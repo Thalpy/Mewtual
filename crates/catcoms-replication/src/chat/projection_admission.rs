@@ -29,10 +29,10 @@ pub use v2_general::{
     OriginalV2OrdinarySigningPlanObservation, V2AdmissionCloseCompletion, V2ArchivedHeaderRefusal,
     V2AuthenticatedAdmission, V2FrozenAdmission, V2GeneralAcceptanceSource, V2GeneralCandidate,
     V2GeneralExpectation, V2GeneralPrefixVerifier, V2GeneralRetiredData, V2KnownGoverningParent,
-    V2LiveMemberObservation, V2OrdinaryDependency, V2OrdinaryKeyCall, V2OrdinaryReceiveStatus,
-    V2OrdinarySigningGuard, V2OrdinarySigningPlan, V2PreparedSelectedHistoryData,
-    V2SelectedHistoryHashData, V2SelectedHistoryNodeData, V2SelectedHistoryTipData,
-    V2SelectedParentProof, MAX_SELECTED_HISTORY_PROOF_HASHES,
+    V2LiveMemberObservation, V2LocalArchiveOriginal, V2OrdinaryDependency, V2OrdinaryKeyCall,
+    V2OrdinaryReceiveStatus, V2OrdinarySigningGuard, V2OrdinarySigningPlan,
+    V2PreparedSelectedHistoryData, V2SelectedHistoryHashData, V2SelectedHistoryNodeData,
+    V2SelectedHistoryTipData, V2SelectedParentProof, MAX_SELECTED_HISTORY_PROOF_HASHES,
 };
 pub use v2_origin::{V2OriginNegative, V2ProjectionOrigin};
 
@@ -66,12 +66,13 @@ impl ProjectionState {
             realm,
         }
     }
-    fn begin(&mut self, group: Option<Arc<GroupViewLife>>) -> ProjectionView {
+    fn begin(&mut self, group: Option<Arc<GroupViewLife>>, local_archive: bool) -> ProjectionView {
         let previous = self.current.as_ref().map(ViewLife::request_close);
         let life = Arc::new(ViewLife {
             gate: self.gate.clone(),
             group,
             realm: self.realm,
+            local_archive,
             revision: AtomicU64::new(1),
             cancelled: AtomicBool::new(false),
             pending: AtomicUsize::new(if previous.is_some() { 1 } else { 0 }),
@@ -103,6 +104,7 @@ struct ViewLife {
     // Immutable ORIGINAL group identity; never looked up anew after body/actor work.
     group: Option<Arc<GroupViewLife>>,
     realm: RealmId,
+    local_archive: bool,
     revision: AtomicU64,
     cancelled: AtomicBool,
     pending: AtomicUsize,
@@ -610,6 +612,10 @@ enum ProjectionSupport {
     GeneralOpen {
         origin: V2ProjectionOrigin,
     },
+    LocalArchive {
+        original: [u8; 32],
+        origin: V2ProjectionOrigin,
+    },
     GeneralAccepted {
         record: owner_bodies::AcceptanceRecordId,
         leaf_index: u64,
@@ -630,6 +636,7 @@ impl ProjectionSupport {
             Self::Legacy { .. } => None,
             Self::FounderCreate { origin, .. }
             | Self::GeneralOpen { origin }
+            | Self::LocalArchive { origin, .. }
             | Self::GeneralAccepted { origin, .. } => Some(origin),
         }
     }
@@ -639,6 +646,7 @@ impl ProjectionSupport {
             Self::Legacy { .. } => true,
             Self::FounderCreate { origin, .. }
             | Self::GeneralOpen { origin }
+            | Self::LocalArchive { origin, .. }
             | Self::GeneralAccepted { origin, .. } => origin.live(),
         }
     }
@@ -664,6 +672,16 @@ impl ProjectionSupport {
                 a.same_original(b)
             }
             (
+                Self::LocalArchive {
+                    original: a,
+                    origin: ao,
+                },
+                Self::LocalArchive {
+                    original: b,
+                    origin: bo,
+                },
+            ) => a == b && ao.same_original(bo),
+            (
                 Self::GeneralAccepted {
                     record: ar,
                     leaf_index: ai,
@@ -684,6 +702,7 @@ impl ProjectionSupport {
             Self::Legacy { source, proof } => Some((source, *proof)),
             Self::FounderCreate { .. }
             | Self::GeneralOpen { .. }
+            | Self::LocalArchive { .. }
             | Self::GeneralAccepted { .. } => None,
         }
     }
@@ -723,7 +742,12 @@ impl ProjectionAdmissionToken {
             }
     }
     fn certainty(&self) -> ProjectionCertainty {
-        if self.open.is_some() || matches!(self.support, ProjectionSupport::GeneralOpen { .. }) {
+        if self.open.is_some()
+            || matches!(
+                self.support,
+                ProjectionSupport::GeneralOpen { .. } | ProjectionSupport::LocalArchive { .. }
+            )
+        {
             ProjectionCertainty::Provisional
         } else {
             ProjectionCertainty::Proven
@@ -731,6 +755,7 @@ impl ProjectionAdmissionToken {
     }
     fn live_for(&self, view: &Arc<ViewLife>, id: ActionId, action: &SignedAction) -> bool {
         Arc::ptr_eq(&self.view, view)
+            && view.local_archive == matches!(self.support, ProjectionSupport::LocalArchive { .. })
             && view.live()
             && self.support.live()
             && self.binding.realm == view.realm
@@ -794,7 +819,7 @@ impl ChatLedger {
     /// original verified governing source. A replacement
     /// remains pending until its returned owner's try_ready completes the old drain barrier.
     pub fn begin_projection_view(&mut self) -> ProjectionView {
-        self.projection.begin(None)
+        self.projection.begin(None, false)
     }
 
     /// Install only opaque current support for already Valid semantic evidence. This never

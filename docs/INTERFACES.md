@@ -10,6 +10,12 @@ projection before falling back to the live ledger.
 Joined archive selection requires the exact signed ancestry to be durable.
 It looks in the selected shared archive before using the own outbox for
 eligible ancestors. A missing original defers the selection.
+Local archive display also rechecks originals against the exact Admission
+from a selected Remove. It keeps the existing visibility and provisional
+certainty across removal. The same check applies after reopening the vault.
+The display view supplies no signing plan or wire authorization. An exact
+target read must include every selected revision within its current bound
+before it can display text.
 An exact archive fetch uses separate request and reply domains on that
 connected dependency class. The holder and requester must both retain
 current contact approval. The reply carries the selected signed original

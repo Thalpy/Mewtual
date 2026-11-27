@@ -237,6 +237,9 @@ impl ChatLedger {
                 heads: Vec::new(),
             });
         };
+        if lease.view.local_archive {
+            return Err(ChatError::Scope);
+        }
         let original = self.entries.get(&create).ok_or(ChatError::Unknown)?;
         if !matches!(original.action.spec().body, Body::Create { .. }) {
             return Err(ChatError::Dependency);

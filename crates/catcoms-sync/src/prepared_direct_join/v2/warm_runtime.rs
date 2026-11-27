@@ -123,12 +123,6 @@ pub struct RetiredV2JoinedAdd {
     _sdk: RetiredTextReceivedAdd,
 }
 
-impl RetiredV2JoinedAdd {
-    pub fn frozen_admission_data(&self) -> Option<&catcoms_replication::chat::V2FrozenAdmission> {
-        self._core.frozen_data()
-    }
-}
-
 impl PreparedV2JoinedMembership {
     /// Check that the bytes about to be retained by the host are the same
     /// ones this SDK candidate consumed, including the signed Core image.
@@ -613,6 +607,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
         selection: &V2HostSelectionExpectation,
         selected_sdk: (u64, [u8; 32]),
     ) -> Result<RetiredV2JoinedAdd, SyncError> {
+        prefix.require_retired_history_room()?;
         let verifier = self.member_prefix(prefix)?;
         let core = candidate.core.as_ref().ok_or(SyncError::JoinRejected)?;
         verifier
@@ -632,7 +627,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {
             .fence
             .prepare_selected_membership(*self.admission_id.as_bytes(), before, selected_sdk)
             .map_err(|_| SyncError::JoinRejected)?;
-        let core = prefix.select_member_successor(selection, &mut candidate.core)?;
+        let mut core = prefix.select_member_successor(selection, &mut candidate.core)?;
+        prefix.retain_frozen_history(&mut core);
         let sdk = sdk.install();
         self.head = header;
         self.epoch = selected_sdk.0;

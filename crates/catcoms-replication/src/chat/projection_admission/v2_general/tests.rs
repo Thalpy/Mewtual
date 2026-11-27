@@ -693,6 +693,152 @@ fn actual_twenty_and_fifty_independent_keys_edit_delete_reply_and_merge_without_
 }
 
 #[test]
+fn selected_local_archive_preserves_edits_deletes_and_replies_after_a1_removal() {
+    let mut f = Fixture::new();
+    let key = DeviceKeypair::from_seed(&[93; 32]);
+    let other = DeviceKeypair::from_seed(&[94; 32]);
+    let a1 = f.add(&key, 20);
+    let b1 = f.add(&other, 21);
+    let a_id = a1.admission_data().admission_id();
+    let b_id = b1.admission_data().admission_id();
+    let message = create(&key, &a1, 1);
+    let edit = action(
+        &key,
+        &a1,
+        2,
+        Body::Edit {
+            create: message.id(),
+            text: "retained before removal".into(),
+        },
+        vec![message.id()],
+    );
+    let hidden = create(&key, &a1, 3);
+    let delete = action(
+        &key,
+        &a1,
+        4,
+        Body::Delete {
+            create: hidden.id(),
+        },
+        vec![hidden.id()],
+    );
+    let reply = action(
+        &other,
+        &b1,
+        5,
+        Body::Create {
+            text: "reply from a current member".into(),
+            reply_to: Some(message.id()),
+        },
+        vec![message.id()],
+    );
+    let own_outbox = create(&key, &a1, 6);
+    let mut retired = f.remove(&a1);
+    let frozen = retired.take_frozen_data().unwrap();
+    assert!(retired.take_close_completion().unwrap().try_complete());
+    drop(retired);
+    let a2 = f.add(&key, 22);
+    let archive =
+        |action: &SignedAction, admission, ledger: &mut ChatLedger, view: &ProjectionView| {
+            f.verifier.project_local_archive_original(
+                ledger,
+                view,
+                V2LocalArchiveOriginal::from_trusted_local_selection(
+                    action,
+                    admission,
+                    &action.encode(),
+                )
+                .unwrap(),
+                &[&frozen],
+                128,
+            )
+        };
+    let (mut ledger, live) = f.ledger();
+    assert!(archive(&message, a_id, &mut ledger, &live).is_err());
+    let mut view = ledger
+        .begin_local_archive_projection_view_in(&f.group_view)
+        .unwrap();
+    assert!(view.try_ready());
+    let current = create(&other, &b1, 7);
+    let draft = ActionDraft::new(current.spec().clone(), *current.signer()).unwrap();
+    assert!(f
+        .verifier
+        .prepare_ordinary_signing_plan(&draft, &b1, &[], &view)
+        .is_err());
+    assert!(f
+        .verifier
+        .provisional_action(&current, &b1, &[], &view)
+        .is_err());
+    assert!(f
+        .verifier
+        .project_provisional_from_ledger(&mut ledger, &view, &current, &b1, 128)
+        .is_err());
+    assert!(ledger.action(current.id()).is_none());
+    assert!(archive(
+        &message,
+        a2.admission_data().admission_id(),
+        &mut ledger,
+        &view
+    )
+    .is_err());
+    let mut changed = message.encode();
+    *changed.last_mut().unwrap() ^= 1;
+    assert!(
+        V2LocalArchiveOriginal::from_trusted_local_selection(&message, a_id, &changed).is_err()
+    );
+    assert_eq!(
+        archive(&reply, b_id, &mut ledger, &view).unwrap(),
+        V2OrdinaryReceiveStatus::WaitingForDependencies(vec![message.id()]),
+    );
+    assert!(ledger.action(reply.id()).is_none());
+    for (original, admission) in [
+        (&message, a_id),
+        (&edit, a_id),
+        (&hidden, a_id),
+        (&reply, b_id),
+    ] {
+        assert_eq!(
+            archive(original, admission, &mut ledger, &view).unwrap(),
+            V2OrdinaryReceiveStatus::Retained(ActionState::Valid),
+        );
+    }
+    assert!(ledger.guarded_projection(message.id(), 128).unwrap()
+        .with_publication(|p| matches!(p, GuardedProjection::Visible {
+            text, certainty: ProjectionCertainty::Provisional, .. } if text == "retained before removal"))
+        .unwrap());
+    let before_delete = ledger.guarded_projection(hidden.id(), 128).unwrap();
+    assert!(before_delete
+        .with_publication(|projection| matches!(projection, GuardedProjection::Visible { .. }))
+        .unwrap());
+    assert!(ledger.projectable_causal_heads(hidden.id(), 128).is_err());
+    assert_eq!(
+        archive(&delete, a_id, &mut ledger, &view).unwrap(),
+        V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+    );
+    assert!(before_delete.with_publication(|_| ()).is_err());
+    assert!(ledger.guarded_projection(hidden.id(), 128).unwrap()
+        .with_publication(|p| matches!(p, GuardedProjection::Deleted {
+            delete: applied, certainty: ProjectionCertainty::Provisional, .. } if *applied == delete.id()))
+        .unwrap());
+    assert!(ledger.guarded_projection(reply.id(), 128).unwrap()
+        .with_publication(|p| matches!(p, GuardedProjection::Visible {
+            reply_to: Some(parent), certainty: ProjectionCertainty::Provisional, .. } if *parent == message.id()))
+        .unwrap());
+    assert_eq!(f.verifier.replay_local_archive_dependency(
+        &mut ledger, &view, &own_outbox, a_id, &[&frozen], 128,
+    ).unwrap(), V2OrdinaryReceiveStatus::Retained(ActionState::Valid));
+    assert!(ledger
+        .guarded_projection(own_outbox.id(), 128)
+        .unwrap()
+        .with_publication(|p| matches!(p, GuardedProjection::Held { .. }))
+        .unwrap());
+    assert!(f
+        .verifier
+        .provisional_action(&own_outbox, &a1, &[], &view)
+        .is_err());
+}
+
+#[test]
 fn actual_remove_rejoin_closes_a1_open_but_keeps_verified_inclusion_and_historical_rights() {
     let mut f = Fixture::new();
     let key = DeviceKeypair::from_seed(&[92; 32]);

@@ -551,6 +551,7 @@ pub(in crate::store) enum FounderReceiveOperation<'a> {
     Read(ActionId),
     ArchivePage(SharedHistoryActionQuery),
     ArchiveMessage(ActionId),
+    TargetMessage(ActionId),
     Audit(SharedHistoryActionQuery),
 }
 

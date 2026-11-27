@@ -539,7 +539,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         let Some((ledger, (original, dependencies, fee))) = self.prepare_member_ledger_with(
             selection,
             channel,
-            caller.clone(),
+            (caller.clone(), ReceiverView::Live),
             |source| source.open_dependency_reply(selection, response),
             |source, ledger, view, original| {
                 require_current(&original)?;

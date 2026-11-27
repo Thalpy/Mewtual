@@ -104,6 +104,11 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         self.require_member_quiescent_for_add(layout)?;
         let member = self.member.as_mut().ok_or_else(refused)?;
         member.require_quiescent_for_add()?;
+        // Reserve capacity before entering SDK or durable Remove. The paid lane
+        // holds at most one cut per bounded governing membership step.
+        if member.retired_history.len() >= catcoms_sync::MAX_V2_GOVERNING_JOIN_STEPS {
+            return Err(refused());
+        }
         let prior = self.governed_add.as_mut().ok_or_else(refused)?;
         let installed = prior.installed.ok_or_else(refused)?;
         let verifier = member.governed_add_verifier()?;
@@ -215,7 +220,8 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         let mut retired = self.owner.take_retired_governed_removal()?;
         let previous = prior.removal.replace(pending.fence);
         prior.installed = Some((head, fingerprint));
-        drop(retired.take_frozen_data());
+        let frozen = retired.take_frozen_data().ok_or_else(refused)?;
+        member.retired_history.push(frozen);
         if let Some(mut close) = retired.take_close_completion() {
             let _ = close.try_complete();
         }

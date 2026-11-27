@@ -27,7 +27,10 @@ macro_rules! redacted_debug {
 mod ordinary;
 mod selected_history;
 mod signing;
-pub use ordinary::{V2GeneralAcceptanceSource, V2OrdinaryDependency, V2OrdinaryReceiveStatus};
+pub use ordinary::{
+    V2GeneralAcceptanceSource, V2LocalArchiveOriginal, V2OrdinaryDependency,
+    V2OrdinaryReceiveStatus,
+};
 pub use selected_history::{
     V2ArchivedHeaderRefusal, V2PreparedSelectedHistoryData, V2SelectedHistoryHashData,
     V2SelectedHistoryNodeData, V2SelectedHistoryTipData, V2SelectedParentProof,
@@ -299,6 +302,20 @@ impl V2GeneralRetiredData {
 pub struct V2FrozenAdmission {
     admission: V2AuthenticatedAdmission,
     cut: FrozenCutData,
+}
+
+impl V2FrozenAdmission {
+    /// Conservative custody charge for the cut and the full retired Admission
+    /// allocation. The active verifier is free to refill its slots after removal.
+    pub const fn retained_layout_bytes() -> usize {
+        std::mem::size_of::<Self>()
+            + std::mem::size_of::<AdmissionCore>()
+            + std::mem::size_of::<AdmissionLife>()
+            + std::mem::size_of::<AdmissionNegative>()
+            + V2ProjectionOrigin::retained_layout_bytes()
+            + crate::chat::owner_profile::MAX_ADMISSION_BYTES
+            + 16 * std::mem::size_of::<usize>()
+    }
 }
 
 /// General selected governing prefix. At most 64 CURRENT Admission owners are retained;

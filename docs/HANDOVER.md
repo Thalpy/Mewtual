@@ -1,5 +1,24 @@
 # Mewtual; Handover
 
+## Keep verified chat history visible after member removal
+
+A device can still display messages and edits it had already verified and
+saved when a member leaves the roster. A selected Delete remains hidden.
+A normal targeted refresh checks the selected archive before using the
+live ledger. The owner can still read the exact signed history in audit.
+
+The 44 focused Core tests passed, including retained revisions, reply
+ancestry, and rejecting a stale view after a selected Delete. Ten focused
+App archive tests and the real MLS join test passed on Windows. Two
+Windows native tests passed. The removal test sent real TCP Creates and
+revisions, checked both history commands and owner audit, removed the
+sender, then repeated those checks after reopening the vault.
+
+The joined reader needs a separate mounted restart result for this case.
+Remote removed-member originals still need their own historical acceptance
+evidence. Founder mutation tracking and the bound on a single target's
+archive replay remain open. Chat V2 stays disabled.
+
 ## Recover a fully staged cold Add
 
 A returning founder can finish a fully written later Add that stopped before

@@ -361,6 +361,34 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
         action: ActionId,
         caller: &RequestCancellation,
     ) -> Result<Option<NativeTextJoinedMemberProjection>, V2MemberSaveRefusal> {
+        self.founder_target_projection(
+            channel,
+            FounderReceiveOperation::ArchiveMessage(action),
+            caller,
+        )
+    }
+
+    /// Refresh one received message. The selected archive takes precedence
+    /// over a live revision, even when its selected effect is Delete.
+    pub fn read_founder_target_projection(
+        self,
+        channel: u128,
+        action: ActionId,
+        caller: &RequestCancellation,
+    ) -> Result<Option<NativeTextJoinedMemberProjection>, V2MemberSaveRefusal> {
+        self.founder_target_projection(
+            channel,
+            FounderReceiveOperation::TargetMessage(action),
+            caller,
+        )
+    }
+
+    fn founder_target_projection(
+        self,
+        channel: u128,
+        operation: FounderReceiveOperation<'_>,
+        caller: &RequestCancellation,
+    ) -> Result<Option<NativeTextJoinedMemberProjection>, V2MemberSaveRefusal> {
         let (cell, mut keys) = self.prepare_keys()?;
         let source = keys.member_entry().1.observe_current();
         let caller = connected::constrain_founder_transport(
@@ -371,11 +399,8 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
         );
         match self
             .finish_prepared((cell, keys))?
-            .run_founder_member_receive(
-                channel,
-                FounderReceiveOperation::ArchiveMessage(action),
-                &caller,
-            )? {
+            .run_founder_member_receive(channel, operation, &caller)?
+        {
             FounderReceiveOutcome::ArchiveMessage(result) => Ok(result.map(|original| {
                 NativeTextJoinedMemberProjection::from_archive(
                     original.projection,
@@ -384,6 +409,11 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
                     original.lease,
                 )
             })),
+            FounderReceiveOutcome::Read(projected) => {
+                Ok(projected.map(|(projection, signal, fee)| {
+                    NativeTextJoinedMemberProjection::from_live(projection, signal, fee)
+                }))
+            }
             FounderReceiveOutcome::RecoveredProjection(projected) => Ok(projected),
             _ => Err(V2MemberSaveRefusal::Failed),
         }
@@ -494,6 +524,13 @@ fn run_recovered_receive(
             FounderReceiveOutcome::RecoveredProjection(
                 founder.archived_message_projection(channel, action, caller, rng)?,
             )
+        }
+        FounderReceiveOperation::TargetMessage(action) => {
+            let archived = founder.archived_message_projection(channel, action, caller, rng)?;
+            FounderReceiveOutcome::RecoveredProjection(match archived {
+                Some(projection) => Some(projection),
+                None => founder.read_member_projection(channel, action, caller)?,
+            })
         }
         FounderReceiveOperation::Audit(query) => {
             FounderReceiveOutcome::Audit(founder.selected_history_audit(channel, query, caller)?)

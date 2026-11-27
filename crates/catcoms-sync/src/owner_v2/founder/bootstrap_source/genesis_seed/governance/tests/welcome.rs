@@ -928,7 +928,7 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     let retired = recovered
         .install_host_selected_membership(foreign_prefix, &mut candidate, &selected, epoch)
         .unwrap();
-    assert!(retired.frozen_admission_data().is_some());
+    assert_eq!(foreign_prefix.retired_history_data().len(), 1);
     assert!(candidate.is_none());
     assert!(!old_publication.is_current_cached());
     assert_eq!(

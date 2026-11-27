@@ -121,6 +121,9 @@ impl V2GeneralPrefixVerifier {
         dependencies: &[V2OrdinaryDependency<'_>],
         view: &ProjectionView,
     ) -> Result<V2OrdinarySigningPlan, ChatError> {
+        if view.life.local_archive {
+            return Err(ChatError::Scope);
+        }
         self.verify_unsigned_authority(
             draft.spec_data(),
             draft.signer_data(),

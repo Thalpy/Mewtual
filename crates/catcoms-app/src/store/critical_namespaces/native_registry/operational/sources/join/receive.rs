@@ -381,7 +381,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             .prepare_member_ledger_with(
                 selection,
                 channel,
-                caller.clone(),
+                (caller.clone(), ReceiverView::LocalArchive),
                 |_| Ok(Some(())),
                 |source, ledger, view, ()| {
                     source.replay_archived_message(ledger, view, create, &caller, rng)
@@ -517,7 +517,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         self.prepare_member_ledger_with(
             selection,
             channel,
-            caller,
+            (caller, ReceiverView::Live),
             |_| Ok(Some(())),
             |_, _, _, ()| Ok(()),
         )?
@@ -529,7 +529,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         self,
         selection: &NativeTextJoinedRowSelection,
         channel: u128,
-        caller: RequestCancellation,
+        (caller, mode): (RequestCancellation, ReceiverView),
         prepare: impl FnOnce(&ReceiverSource<'_, R>) -> Result<Option<T>, V2MemberSaveRefusal>,
         populate: impl FnOnce(
             &ReceiverSource<'_, R>,
@@ -570,9 +570,13 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     },
                 )
                 .map_err(|_| Refusal::Failed)?;
-                let mut view = ledger
-                    .begin_projection_view_in(group)
-                    .map_err(|_| Refusal::Unavailable)?;
+                let mut view = match mode {
+                    ReceiverView::Live => ledger.begin_projection_view_in(group),
+                    ReceiverView::LocalArchive => {
+                        ledger.begin_local_archive_projection_view_in(group)
+                    }
+                }
+                .map_err(|_| Refusal::Unavailable)?;
                 if !view.try_ready() {
                     return Err(Refusal::Busy);
                 }
@@ -930,6 +934,11 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     }
 }
 
+enum ReceiverView {
+    Live,
+    LocalArchive,
+}
+
 impl<R: CryptoRngCore> ReceiverSource<'_, R> {
     fn archived_actions(
         &self,
@@ -968,9 +977,13 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
                 .map_err(|_| V2MemberSaveRefusal::Unavailable)?,
             caller,
         }
-        .replay_message(ledger, view, create, |action| {
-            self.read_dependency(channel, action, rng)
-        })
+        .replay_message(
+            ledger,
+            view,
+            create,
+            self.prefix.retired_history_data(),
+            |action| self.read_dependency(channel, action, rng),
+        )
     }
 
     fn history_scope(&self, channel: u128) -> SharedHistoryScope {

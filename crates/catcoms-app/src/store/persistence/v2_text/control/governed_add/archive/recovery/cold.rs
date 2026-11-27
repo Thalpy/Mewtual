@@ -23,8 +23,8 @@ use crate::store::{RetainedBootstrapSourceData, ServerStore};
 use catcoms_replication::chat::{
     owner_facts::OwnerFactId, owner_header::OwnerHeaderId,
     owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE, FounderGenesisAnchorData,
-    ProjectionGroup, ProjectionGroupView, V2GeneralExpectation, V2GeneralPrefixVerifier,
-    V2HostSelectionExpectation, V2ProjectionOrigin,
+    ProjectionGroup, ProjectionGroupView, V2FrozenAdmission, V2GeneralExpectation,
+    V2GeneralPrefixVerifier, V2HostSelectionExpectation, V2ProjectionOrigin,
 };
 use catcoms_storage::kept::{session_id, SessionId};
 use catcoms_storage::VaultPhysicalWorkLease;
@@ -391,6 +391,7 @@ impl OpenedColdFounderOrigin {
 }
 
 struct ColdFounderCore {
+    retired_history: Vec<V2FrozenAdmission>,
     verifier: V2GeneralPrefixVerifier,
     _view: ProjectionGroupView,
     _group: ProjectionGroup,
@@ -686,6 +687,12 @@ impl HeldColdFounderAdd {
     ) -> Result<(&V2GeneralPrefixVerifier, &ProjectionGroupView), AppError> {
         let core = self.core.as_ref().ok_or_else(refused)?;
         Ok((&core.verifier, &core._view))
+    }
+
+    pub(in crate::store) fn retired_member_history(
+        &self,
+    ) -> Result<&[V2FrozenAdmission], AppError> {
+        Ok(&self.core.as_ref().ok_or_else(refused)?.retired_history)
     }
 
     pub(in crate::store) fn with_checked_member_parts<T>(
@@ -999,7 +1006,9 @@ impl HeldColdFounderAdd {
             const BYTES: usize = 3 * REPLAY_MATH_PRIVATE_INVOICE
                 + V2GeneralPrefixVerifier::metadata_layout_bytes()
                 + ProjectionGroup::initial_metadata_layout_bytes()
-                + 4 * std::mem::size_of::<ColdFounderCore>();
+                + 4 * std::mem::size_of::<ColdFounderCore>()
+                + catcoms_sync::MAX_V2_GOVERNING_JOIN_STEPS
+                    * V2FrozenAdmission::retained_layout_bytes();
             let pool = &store
                 .archive_bootstrap_policy
                 .as_ref()
@@ -1040,9 +1049,11 @@ impl HeldColdFounderAdd {
             )
             .map_err(|_| refused())?;
             self.require_current(store, source)?;
+            let mut retired_history = Vec::with_capacity(catcoms_sync::MAX_V2_GOVERNING_JOIN_STEPS);
             match &self.recovered {
                 ColdRecoveredArchive::First(first) => select_archived_step(
                     &mut verifier,
+                    &mut retired_history,
                     &first.header,
                     ReplayBody::Admission(&first.admission),
                     first.image_data()?,
@@ -1051,6 +1062,7 @@ impl HeldColdFounderAdd {
                     for step in chain.public_steps() {
                         select_archived_step(
                             &mut verifier,
+                            &mut retired_history,
                             &step.header,
                             step.body_data(),
                             &step.image,
@@ -1060,6 +1072,7 @@ impl HeldColdFounderAdd {
             }
             self.require_current(store, source)?;
             self.core = Some(ColdFounderCore {
+                retired_history,
                 verifier,
                 _view: view,
                 _group: group,
@@ -1085,6 +1098,7 @@ impl HeldColdFounderAdd {
 
 fn select_archived_step(
     verifier: &mut V2GeneralPrefixVerifier,
+    retired_history: &mut Vec<V2FrozenAdmission>,
     header: &SignedOwnerHeader,
     body: ReplayBody<'_>,
     image: &[u8],
@@ -1108,6 +1122,12 @@ fn select_archived_step(
         .is_some_and(|mut close| !close.try_complete())
     {
         return Err(refused());
+    }
+    if let Some(frozen) = retired.take_frozen_data() {
+        if retired_history.len() >= catcoms_sync::MAX_V2_GOVERNING_JOIN_STEPS {
+            return Err(refused());
+        }
+        retired_history.push(frozen);
     }
     // The old model holds the verifier's only candidate slot. The next
     // archived step can be replayed only after this owner has drained.
