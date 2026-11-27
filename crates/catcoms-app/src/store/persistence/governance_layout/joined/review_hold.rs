@@ -2,6 +2,8 @@
 //! Capturing authenticated storage grants neither review admission nor
 //! an admin read. The original founder owner lends the actual scope later.
 use super::*;
+
+mod declaration;
 use crate::store::chat_admission::PhysicalMountNegative;
 use crate::store::critical_namespaces::review_hold_namespace;
 use crate::store::persistence::v2_member_outbox::fs::{
@@ -13,6 +15,7 @@ use crate::store::persistence::v2_review_hold::{
 };
 use crate::store::persistence::v2_shared_history::{disk::DISK_FEE, SharedHistoryScope};
 use catcoms_replication::chat::{V2GeneralPrefixVerifier, V2RemovedCreateEvidence};
+pub(super) use declaration::{recover, require_no_scratch};
 use std::collections::BTreeMap;
 
 const MAX_SCOPES: usize = 8;

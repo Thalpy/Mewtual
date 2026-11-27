@@ -6088,6 +6088,164 @@ async fn review_hold_native_open_requires_a_real_founder_and_the_held_marker() {
         let store = ordinary.actual_store_for_test().unwrap();
         let key = zeroize::Zeroizing::new(store.keys.db_key().unwrap());
         let domain = store.chat_vault_domain().unwrap();
+        let proof = crate::store::critical_namespaces::native_registry::VerifiedFounderReviewParent::capture(store);
+        if founder {
+            let proof = proof.unwrap();
+            assert_eq!(proof.layout().vault, domain);
+            assert_eq!(
+                proof.original_catalog(),
+                std::fs::read(root.path().join(Slot::Current.name())).unwrap()
+            );
+            assert_ne!(proof.index_digest(), [0; 32]);
+            assert_ne!(proof.founder_digest(), [0; 32]);
+
+            // The declaration verifier must be able to reprove the fixed
+            // founder leaves while its separately checked Stage exists.
+            // This helper reads only and cannot bless or select that Stage.
+            let stage = root.path().join(Slot::Stage.name());
+            std::fs::write(&stage, b"inert test stage").unwrap();
+            proof.require_original(store).unwrap();
+            assert_eq!(std::fs::read(&stage).unwrap(), b"inert test stage");
+            std::fs::remove_file(stage).unwrap();
+        } else {
+            assert!(proof.is_err());
+        }
+        if founder {
+            let current = root.path().join(Slot::Current.name());
+            let scratch = root
+                .path()
+                .join("chat-critical-namespaces.review-hold.claim");
+            let raw = std::fs::read(&current).unwrap();
+            let draft = store
+                .prepare_founder_review_declaration(&mut rng)
+                .expect("prepare the genuine founder claim");
+            let mut corrupt = draft.seed_for_test().to_vec();
+            let torn = corrupt[..corrupt.len() - 1].to_vec();
+            *corrupt.last_mut().unwrap() ^= 1;
+            drop(draft);
+            drop(ordinary);
+            std::fs::write(&scratch, &corrupt).unwrap();
+            assert!(NativeTextJoinedStorage::open_for_native_startup(
+                root.path(),
+                SECRET,
+                &mut rng,
+                current_policy()
+            )
+            .is_err());
+            assert_eq!(std::fs::read(&scratch).unwrap(), corrupt);
+            assert_eq!(std::fs::read(&current).unwrap(), raw);
+            std::fs::write(&scratch, &torn).unwrap();
+            let unrelated = root.path().join(Slot::Stage.name());
+            std::fs::write(&unrelated, b"separate unfinished catalog").unwrap();
+            assert!(NativeTextJoinedStorage::open_for_native_startup(
+                root.path(),
+                SECRET,
+                &mut rng,
+                current_policy()
+            )
+            .is_err());
+            assert_eq!(std::fs::read(&scratch).unwrap(), torn);
+            assert_eq!(
+                std::fs::read(&unrelated).unwrap(),
+                b"separate unfinished catalog"
+            );
+            std::fs::remove_file(&unrelated).unwrap();
+            let ordinary = NativeTextJoinedStorage::open_for_native_startup(
+                root.path(),
+                SECRET,
+                &mut rng,
+                current_policy(),
+            )
+            .expect("a provably truncated private scratch leaves the founder readable");
+            assert_eq!(std::fs::read(&current).unwrap(), raw);
+            assert!(!scratch.exists());
+            let store = ordinary.actual_store_for_test().unwrap();
+            let mut declaration = store.prepare_founder_review_declaration(&mut rng).unwrap();
+            declaration
+                .stage_for_test(store)
+                .expect("cover the claim, 32-byte marker and genuine catalog Stage");
+            drop(declaration);
+            drop(ordinary);
+            // Cold startup must settle these actual, previously admitted
+            // files before the ordinary catalog/registry inspector can run.
+            let stage = root.path().join(Slot::Stage.name());
+            let candidate = std::fs::read(&stage).unwrap();
+            let raw = std::fs::read(root.path().join(Slot::Current.name())).unwrap();
+            assert_ne!(raw, candidate);
+            let prior = zeroize::Zeroizing::new(
+                catcoms_crypto::unseal(&key, &crate::store::unframe(&raw).unwrap()).unwrap(),
+            );
+            let capability = grammar::parse_review_hold_family(&prior, &domain, true)
+                .unwrap()
+                .governance
+                .unwrap();
+            let governance_marker = root
+                .path()
+                .join(crate::store::critical_namespaces::ARCHIVE_BOOTSTRAP_ROOT)
+                .join(crate::store::critical_namespaces::governance_layout::GOVERNANCE_MARKER);
+            let exact = std::fs::read(&governance_marker).unwrap();
+            let alternate =
+                crate::store::critical_namespaces::governance_layout::codec::seal_marker(
+                    &key, capability, &mut rng,
+                )
+                .unwrap();
+            assert_ne!(exact.as_slice(), alternate.as_slice());
+            std::fs::write(&governance_marker, &*alternate).unwrap();
+            assert!(NativeTextJoinedStorage::open_for_native_startup(
+                root.path(),
+                SECRET,
+                &mut rng,
+                current_policy(),
+            )
+            .is_err());
+            assert_eq!(std::fs::read(&current).unwrap(), raw);
+            assert_eq!(std::fs::read(&stage).unwrap(), candidate);
+            std::fs::write(&governance_marker, exact).unwrap();
+            let mounted = NativeTextJoinedStorage::open_for_native_startup(
+                root.path(),
+                SECRET,
+                &mut rng,
+                current_policy(),
+            )
+            .expect("recover the exact founder declaration through the cold catalog gate");
+            assert_eq!(
+                std::fs::read(root.path().join(Slot::Current.name())).unwrap(),
+                candidate
+            );
+            assert!(!stage.exists());
+            assert!(!root
+                .path()
+                .join(crate::store::critical_namespaces::governance_layout::GOVERNANCE_SEED)
+                .exists());
+            assert!(mounted
+                .actual_store_for_test()
+                .unwrap()
+                .has_mounted_review_hold()
+                .unwrap());
+            let marker_path = root.path().join(MARKER_NAME);
+            let marker = std::fs::read(&marker_path).unwrap();
+            let store = mounted.actual_store_for_test().unwrap();
+            assert!(store.has_mounted_review_hold().unwrap());
+            let scope = crate::store::persistence::v2_shared_history::SharedHistoryScope {
+                vault: domain,
+                group: [71; 16],
+                profile: catcoms_replication::chat::owner_facts::OwnerFactId::from_bytes([72; 32]),
+                tenure: catcoms_replication::chat::owner_header::OwnerTenureId::from_bytes(
+                    [73; 32],
+                ),
+                creation: [74; 32],
+                channel: 75,
+            };
+            let directory = store.review_hold_partition_for_test(scope).unwrap();
+            std::fs::rename(&directory, directory.with_extension("parked")).unwrap();
+            std::fs::create_dir(&directory).unwrap();
+            assert!(store.review_hold_partition_for_test(scope).is_err());
+            let parked = marker_path.with_extension("parked");
+            std::fs::rename(&marker_path, &parked).unwrap();
+            std::fs::write(&marker_path, marker).unwrap();
+            assert!(store.has_mounted_review_hold().is_err());
+            continue;
+        }
         drop(ordinary);
 
         // Emulate an already selected, authenticated declaration. The
@@ -6114,40 +6272,16 @@ async fn review_hold_native_open_requires_a_real_founder_and_the_held_marker() {
         .is_err());
 
         std::fs::write(&marker_path, marker).unwrap();
-        let mounted = NativeTextJoinedStorage::open_for_native_startup(
-            root.path(),
-            SECRET,
-            &mut rng,
-            current_policy(),
+        assert!(
+            NativeTextJoinedStorage::open_for_native_startup(
+                root.path(),
+                SECRET,
+                &mut rng,
+                current_policy()
+            )
+            .is_err(),
+            "an already-selected catalog and valid marker cannot create a founder"
         );
-        if founder {
-            let mounted = mounted.unwrap();
-            let store = mounted.actual_store_for_test().unwrap();
-            assert!(store.has_mounted_review_hold().unwrap());
-            let scope = crate::store::persistence::v2_shared_history::SharedHistoryScope {
-                vault: domain,
-                group: [71; 16],
-                profile: catcoms_replication::chat::owner_facts::OwnerFactId::from_bytes([72; 32]),
-                tenure: catcoms_replication::chat::owner_header::OwnerTenureId::from_bytes(
-                    [73; 32],
-                ),
-                creation: [74; 32],
-                channel: 75,
-            };
-            let directory = store.review_hold_partition_for_test(scope).unwrap();
-            std::fs::rename(&directory, directory.with_extension("parked")).unwrap();
-            std::fs::create_dir(&directory).unwrap();
-            assert!(store.review_hold_partition_for_test(scope).is_err());
-            let parked = marker_path.with_extension("parked");
-            std::fs::rename(&marker_path, &parked).unwrap();
-            std::fs::write(&marker_path, marker).unwrap();
-            assert!(store.has_mounted_review_hold().is_err());
-        } else {
-            assert!(
-                mounted.is_err(),
-                "a catalog and marker cannot create a founder"
-            );
-        }
         assert_eq!(std::fs::read(&current).unwrap(), selected);
         assert_eq!(std::fs::read(&marker_path).unwrap(), marker);
     }

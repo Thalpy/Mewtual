@@ -194,6 +194,28 @@ impl Physical {
             .recovered_join_registration_data()
     }
 
+    pub(super) fn select_review_storage_before_founder_startup(
+        &self,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<bool, AppError> {
+        if !self.handler.accepts_rejoin_startup() {
+            return Err(refused());
+        }
+        let store = self.current()?.checked_store()?;
+        if store.has_mounted_review_hold()? || !store.has_mounted_shared_history()? {
+            return Ok(false);
+        }
+        // The caller retains the original unpublished native owner. No
+        // listener or native command can observe a half-selected catalog.
+        let Some(founder) = self.recovered_cold_founder()? else {
+            return Ok(false);
+        };
+        self.require_recovered_cold_founder(&founder)?;
+        let mut declaration = store.prepare_founder_review_declaration(rng)?;
+        declaration.select(store)?;
+        Ok(true)
+    }
+
     pub(super) fn has_mounted_review_hold(&self) -> Result<bool, AppError> {
         self.current()?.checked_store()?.has_mounted_review_hold()
     }
@@ -233,16 +255,7 @@ impl Physical {
         let store = self.current()?.checked_store()?;
         let source = store
             .read_saved_bootstrap_source_data(&original.binding.group, original.binding.signer)?;
-        let data = source.data();
-        let context = data.view_data().context.spec_data();
-        if context.vault != original.binding.vault
-            || context.group != original.binding.group
-            || context.signer != original.binding.signer
-            || context.profile.as_bytes() != &original.binding.profile
-            || data.source_id_data().as_bytes() != &original.binding.source
-        {
-            return Err(refused());
-        }
+        original.require_saved_source_data(&source)?;
         self.require_recovered_cold_founder(original)?;
         source.validate_original(store)?;
         Ok(source)

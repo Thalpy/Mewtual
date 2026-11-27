@@ -8,11 +8,19 @@ Create and its Remove proof coordinates under a key specific to the
 vault and channel. A complete stage can finish the same partial final
 file. A torn stage holds its own case and counts against the quota.
 
+Native founder startup selects this namespace before exposing a
+recovered row. It reopens through the same vault secret once to mount
+the exact new catalog. Cold recovery verifies the saved founder,
+transport reservation, joined pins, and original archive before
+finishing a covered declaration. A recognized incomplete private
+scratch can be cleared while the original catalog and all selected
+leaves still agree, with no declaration outputs present.
+
 The storage entry keeps the ordinary archive locked across the clean
 absence check and hold selection. An independently selected original
-keeps its place in history. The production declaration recovery,
+keeps its place in history. First-session founder provisioning,
 approved-holder delivery, signed decisions and the admin view remain
-open. This checkpoint does not turn on Chat V2.
+open. Chat V2 remains disabled.
 
 ## Rejoin from the retired native session
 

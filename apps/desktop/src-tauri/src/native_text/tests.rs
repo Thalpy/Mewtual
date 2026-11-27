@@ -3469,6 +3469,10 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
         serde_json::json!({"server": found["server"], "expectedContext": found["context"]});
     let (reopened, main, queue) = app(founder_path.clone(), None, true);
     unlock_current(&reopened, &main, &queue).await;
+    let review_marker = founder_path.join("chat-critical-namespaces.review-hold.marker");
+    let review_cover =
+        std::fs::read(&review_marker).expect("cold founder provisions review storage");
+    assert_eq!(review_cover.len(), 32);
     if let Some(history) = &retained_history {
         check_retained_removal_history(&main, &queue, &found, history).await;
         check_reply_to_removed_author(&main, &queue, &found, &history.visible, 92).await;
@@ -3519,6 +3523,7 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
         cold,
         "cold replay returns the exact original packet"
     );
+    assert_eq!(std::fs::read(review_marker).unwrap(), review_cover);
     if join_after_restart {
         fn group_directory(dir: &std::path::Path, depth: usize) -> Option<std::path::PathBuf> {
             assert!(depth < 12, "isolated fixture tree");

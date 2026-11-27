@@ -82,6 +82,10 @@ impl HeldDirectory {
             self.id,
         )
     }
+    pub(in crate::store::persistence) fn same_original(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+
     pub(in crate::store::persistence) fn try_clone(&self) -> Result<Self, AppError> {
         let held = Self {
             path: self.path.clone(),
@@ -253,11 +257,20 @@ pub(in crate::store::persistence) fn finish_exact_write(
     held: &mut (File, SessionId),
     expected: &[u8],
 ) -> Result<(), AppError> {
+    finish_exact_write_on(path, &mut held.0, held.1, expected)
+}
+
+/// Cover an exact prefix when the caller already holds a named writer.
+pub(in crate::store::persistence) fn finish_exact_write_on(
+    path: &Path,
+    file: &mut File,
+    native: SessionId,
+    expected: &[u8],
+) -> Result<(), AppError> {
     if expected.is_empty() || expected.len() > MAX_FILE {
         return Err(refused());
     }
-    let (file, native) = held;
-    require_same_name(path, file, *native)?;
+    require_same_name(path, file, native)?;
     let metadata = file.metadata().map_err(io)?;
     if !regular(&metadata) || metadata.len() > expected.len() as u64 {
         return Err(refused());
@@ -270,7 +283,7 @@ pub(in crate::store::persistence) fn finish_exact_write(
     }
     file.sync_all().map_err(io)?;
     require_file_bytes(file, expected)?;
-    require_same_name(path, file, *native)
+    require_same_name(path, file, native)
 }
 
 /// Rename one fixed name onto another in the same held directory (the WAL MAIN promotion

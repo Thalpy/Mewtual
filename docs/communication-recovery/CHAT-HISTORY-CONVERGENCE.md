@@ -40,9 +40,11 @@ signature even when a semantic duplicate arrives.
 
 The declaration excludes ID9 and unresolved rejoin journals. A2 binds
 its Pending to the whole encrypted catalog, so rewriting that catalog
-would strand the exact request. Production declaration and recovery,
-approved-holder delivery, signed decisions and the admin timeline
-remain open.
+would strand the exact request. Recovered founder startup can select
+the new namespace and mount it on the same unlock, before exposing the
+row. Restart can finish the same authenticated claim after a cut.
+First-session founder provisioning, approved-holder delivery, signed
+decisions and the admin timeline remain open.
 
 29 October clarification: current desktop new-message sends use a separate save-before-export
 transaction with a persisted retry identity. The accepted-in-memory boundary below still applies

@@ -257,6 +257,22 @@ impl NativeTextJoinedStorage {
         self.index.native_row_count_data()
     }
 
+    /// Upgrade a recovered founder's existing shared-history vault before
+    /// publishing it. The exact selected catalog requires a fresh opener,
+    /// so a successful change must drop this old startup owner.
+    pub fn select_review_storage_before_founder_startup(
+        &self,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<bool, AppError> {
+        if self.pending.is_some() || self.recovered_tcp.is_some() {
+            return Err(refused());
+        }
+        if self.row_count_data()? != 1 || self.recovered_join_registration_data()?.is_some() {
+            return Ok(false);
+        }
+        self.index.select_review_storage_before_founder_startup(rng)
+    }
+
     /// Mount the original cold selection as an empty native vault only if
     /// both its registry and joined pin catalog are proven empty.
     pub fn into_idle_native_vault(

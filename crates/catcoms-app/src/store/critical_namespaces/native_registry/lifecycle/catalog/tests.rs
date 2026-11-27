@@ -439,3 +439,81 @@ fn review_hold_namespace_preserves_the_exact_base_and_refuses_id9() {
         assert!(review::verify_declaration(&prior, &malformed, &VAULT).is_err());
     }
 }
+
+#[test]
+fn founder_review_seed_replays_the_exact_predecessor_and_requires_each_leaf() {
+    use crate::store::critical_namespaces::{
+        archive_current_namespace_codec::CurrentLayoutData,
+        rejoin_namespace,
+        review_hold_namespace::declaration::{
+            AuthenticatedSeed, FounderLeaves, PreparedDeclaration,
+        },
+        shared_history_namespace,
+    };
+    use crate::store::frame;
+    use catcoms_crypto::seal;
+    use rand_chacha::ChaCha20Rng;
+    use rand_core::SeedableRng;
+    let mut rng = ChaCha20Rng::seed_from_u64(4901);
+    let key = [91; 32];
+    let (joined, _) = joined_catalog();
+    let old = shared_history_namespace::prepare_declaration(&joined, &VAULT).unwrap();
+    let layout = grammar::parse_shared_history_native_registry_layout(&old, &VAULT, true)
+        .unwrap()
+        .current_layout
+        .unwrap();
+    let original = frame(&seal(&key, &old, &mut rng).unwrap());
+    let leaves = FounderLeaves {
+        row: [1; 32],
+        index: [2; 32],
+        pins: [3; 32],
+        history: [4; 32],
+    };
+    let prepared = PreparedDeclaration::prepare(&key, &original, layout, leaves, &mut rng).unwrap();
+    for end in 0..prepared.seed.len() {
+        assert!(AuthenticatedSeed::is_incomplete_scratch(
+            &prepared.seed[..end]
+        ));
+    }
+    assert!(!AuthenticatedSeed::is_incomplete_scratch(&prepared.seed));
+    assert!(!AuthenticatedSeed::is_incomplete_scratch(b"unknown"));
+    let seed = AuthenticatedSeed::open(&key, &prepared.seed).unwrap();
+    let recovered = seed.validate(&key, layout, leaves).unwrap();
+    assert_eq!(recovered.original, original);
+    assert_eq!(recovered.candidate, prepared.candidate.as_slice());
+    assert_eq!(recovered.marker, prepared.marker);
+    for changed in [
+        FounderLeaves {
+            row: [101; 32],
+            ..leaves
+        },
+        FounderLeaves {
+            index: [102; 32],
+            ..leaves
+        },
+        FounderLeaves {
+            pins: [103; 32],
+            ..leaves
+        },
+        FounderLeaves {
+            history: [104; 32],
+            ..leaves
+        },
+    ] {
+        assert!(seed.validate(&key, layout, changed).is_err());
+    }
+    let wrong = CurrentLayoutData {
+        root: [14; 32],
+        ..layout
+    };
+    assert!(seed.validate(&key, wrong, leaves).is_err());
+    assert!(AuthenticatedSeed::open(&[90; 32], &prepared.seed).is_err());
+    let mut tainted = prepared.seed;
+    *tainted.last_mut().unwrap() ^= 1;
+    assert!(!AuthenticatedSeed::is_incomplete_scratch(&tainted));
+    assert!(AuthenticatedSeed::open(&key, &tainted).is_err());
+
+    let a2 = rejoin_namespace::prepare_declaration(&old, &VAULT).unwrap();
+    let frame = frame(&seal(&key, &a2, &mut rng).unwrap());
+    assert!(PreparedDeclaration::prepare(&key, &frame, layout, leaves, &mut rng).is_err());
+}

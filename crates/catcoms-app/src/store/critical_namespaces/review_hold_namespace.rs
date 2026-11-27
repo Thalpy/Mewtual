@@ -7,6 +7,8 @@ use super::{
 use crate::AppError;
 use zeroize::Zeroizing;
 
+pub(in crate::store) mod declaration;
+
 pub(super) const ID: u32 = 10;
 pub(super) const VERSION: u32 = 1;
 const DOMAIN: &str = "catcoms/private-chat-v2-review-hold-namespace/v1";

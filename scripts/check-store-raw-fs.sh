@@ -405,7 +405,7 @@ declare -A allowed=(
   # never truncate, never adopt other content.
   ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|open_exact_write|OpenOptions::new()']=2
   ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|open_exact_write|.create_new(true)']=1
-  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|finish_exact_write|file.sync_all().map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|finish_exact_write_on|file.sync_all().map_err(io)?;']=1
   # rename_fixed: WAL stage -> WAL MAIN, and head stage -> head.bin (the selector CAS), each
   # after re-verifying the source's exact bytes and the parent still selected.
   ['crates/catcoms-app/src/store/persistence/v2_member_outbox/fs.rs|rename_fixed|fs::rename(from, to).map_err(io)']=1

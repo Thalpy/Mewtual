@@ -76,6 +76,16 @@ ordinary archive gate during absence and selection. A corrupt or
 unfinished ordinary record cannot grant that absence. None of these
 storage checks issues an approval or an ordinary history effect.
 
+Before exposing a recovered founder, startup can declare the namespace
+under the existing predecessor-visible governance claim. Recovery
+authenticates the exact old and new catalog and rechecks the unchanged
+native files, founder source, joined pins and original history mount.
+Only a recognized short private scratch can be discarded after proving
+the original founder and absence of the shared claim, catalog Stage and
+review outputs. The unauthenticated outer length classifies torn
+scratch writes. It grants no authority to select a catalog. Complete
+claims with invalid authentication are preserved.
+
 A holder's archive page exposes eligible IDs to a reciprocally approved
 peer on the original authenticated connection. Its continuation gives no
 raw offset, author ID or unoffered ActionId. The cursor is replayable on
