@@ -246,6 +246,7 @@ jobs:
                   ('native-idle-reopen', 'native_text::tests::native_text_connected_join_cold_idle_unlock_requires_the_existing_vault', 1),
                   ('native-eviction-notice', 'native_text::tests::native_text_membership_selected_eviction_notifies_the_original_joined_row', 1),
                   ('native-recovered-add', 'native_text::tests::native_text_recovered_founder_admits_a_fresh_join_after_selected_remove', 1),
+                  ('native-complete-staged-add', 'native_text::tests::native_text_cold_founder_finishes_a_complete_staged_add', 1),
                   ('native-frame-capture', 'native_text::tests::native_text_founder_frame_capture_survives_transient_row_contention', 1),
                   ('native-invite-context', 'native_text::tests::native_text_connected_join_retries_original_welcome_after_authenticated_unlock', 1),
                   ('native-invite-expiry', 'native_text::tests::native_text_expired_preview_reproves_the_original_pending_after_restart', 1),

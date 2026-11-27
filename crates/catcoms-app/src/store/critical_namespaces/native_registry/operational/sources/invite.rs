@@ -230,6 +230,10 @@ impl<T: MeshTransport, R: CryptoRngCore> member::NativeTextMemberJob<T, R> {
                 return Err(Error::Cancelled);
             }
             inner.require_current().map_err(|_| Error::Unavailable)?;
+            #[cfg(feature = "native-chat-test-hooks")]
+            if let Err(error) = &result {
+                eprintln!("cold Chat V2 invite save refused: {error:?}");
+            }
             return result.map(InviteResult::Saved).map_err(|_| Error::Failed);
         }
         let driver = body.driver.as_mut().ok_or(Error::Unavailable)?;

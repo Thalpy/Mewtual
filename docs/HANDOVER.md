@@ -1,5 +1,20 @@
 # Mewtual; Handover
 
+## Recover a fully staged cold Add
+
+A returning founder can finish a fully written later Add that stopped before
+the Head rename. Recovery checks the exact authenticated parent, staged child
+and all referenced journal files, restores the paired MLS and Core state, and
+covers the existing files before activation. An already named later Add is
+also synced before activation. Missing or conflicting records stay on disk
+and block startup. Epoch-zero recovery and early incomplete transactions
+remain open.
+
+The Windows native TCP regression passed. It reconstructs the pre-rename
+cut from a real accepted Add and verifies that removal of one required
+record blocks startup without changing the staged or selected bytes. Restoring
+that record allows startup to select the exact new Head and roster.
+
 ## Fresh Add on a recovered founder
 
 The native listener can answer a fresh signed invitation after recovering a
@@ -14,11 +29,13 @@ Remove and two founder restarts, then confirmed the new Admission after
 another restart. Review identified lock placement, final file checks and
 payment tail defects. The corrected version runs the SDK outside Root and
 rechecks the actual invitation, journal and selector at the key and commit
-boundaries. The focused native test and race coverage on the corrected
-version are pending.
+boundaries. The corrected Windows test passed in isolation. One combined
+run refused a cold invitation, so combined repeatability remains open.
+The alternate-provider Windows TCP case recovered the deepest reply and
+the offline author's edit and deletion within its 45-second bound.
+The full frontend suite passed all 3,949 tests.
 
-Recovery of a crash before complete Head selection and rejoin in the same
-member vault remain open. Chat V2 stays disabled.
+Rejoin in the same member vault remains open. Chat V2 stays disabled.
 
 
 ## 27 November 2026 — Prepare a real Add on the recovered founder graph

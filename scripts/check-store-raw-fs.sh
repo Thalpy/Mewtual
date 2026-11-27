@@ -200,6 +200,11 @@ declare -A allowed=(
   ['crates/catcoms-app/src/store/persistence/v2_text/control/governed_add/held/writer.rs|ensure_original|.create_new(true)']=1
   ['crates/catcoms-app/src/store/persistence/v2_text/control/governed_add/held/writer.rs|fill_original|original.file.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/v2_text/control/governed_add/held/writer.rs|select_named_head|fs::rename(stage, head_path).map_err(io)']=1
+
+  # Completion-only cold recovery flushes the original full archive and
+  # journal files. It cannot create or fill an incomplete stage.
+  ['crates/catcoms-app/src/store/persistence/v2_text/control/governed_add/archive/recovery/cold/repair.rs|sync_existing|let file = OpenOptions::new().write(true).open(path).map_err(io)?;']=1
+  ['crates/catcoms-app/src/store/persistence/v2_text/control/governed_add/archive/recovery/cold/repair.rs|sync_existing|file.sync_all().map_err(io)?;']=1
   ['crates/catcoms-app/src/store/persistence/v2_text/transaction/recovery/effect.rs|scratch_inner|fs::remove_file(&p.wal_stage_path).map_err(io::io)?;']=1
   ['crates/catcoms-app/src/store/persistence/v2_text/transaction/recovery/effect.rs|complete_authenticated_output|OpenOptions::new()']=1
   ['crates/catcoms-app/src/store/persistence/v2_text/transaction/recovery/effect.rs|complete_authenticated_output|Err(error) if error.kind() == std::io::ErrorKind::NotFound => OpenOptions::new()']=1

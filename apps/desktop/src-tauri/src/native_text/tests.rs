@@ -1510,15 +1510,20 @@ async fn native_text_founder_frame_capture_survives_transient_row_contention() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_membership_selected_eviction_notifies_the_original_joined_row() {
-    native_text_membership_removal_reopen(false).await;
+    native_text_membership_removal_reopen(false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_recovered_founder_admits_a_fresh_join_after_selected_remove() {
-    native_text_membership_removal_reopen(true).await;
+    native_text_membership_removal_reopen(true, false).await;
 }
 
-async fn native_text_membership_removal_reopen(join_after_restart: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_cold_founder_finishes_a_complete_staged_add() {
+    native_text_membership_removal_reopen(true, true).await;
+}
+
+async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_staged_add: bool) {
     use catcoms_app::store::NativeTextInvitePacketData;
     use tauri::Listener;
 
@@ -1673,6 +1678,27 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool) {
         "cold replay returns the exact original packet"
     );
     if join_after_restart {
+        fn group_directory(dir: &std::path::Path, depth: usize) -> Option<std::path::PathBuf> {
+            assert!(depth < 12, "isolated fixture tree");
+            if dir.join("text.add.response.v2").is_file() && dir.join("head.bin").is_file() {
+                return Some(dir.to_owned());
+            }
+            std::fs::read_dir(dir).unwrap().find_map(|entry| {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    group_directory(&entry.path(), depth + 1)
+                } else {
+                    None
+                }
+            })
+        }
+        let before = if repair_staged_add {
+            let directory = group_directory(&founder_path, 0).expect("governed founder directory");
+            let head = directory.join("head.bin");
+            Some((directory, std::fs::read(&head).unwrap()))
+        } else {
+            None
+        };
         let (successor, window, successor_queue) = app(root.path().join("successor"), None, true);
         unlock_current(&successor, &window, &successor_queue).await;
         let request = invite_command(
@@ -1713,8 +1739,74 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool) {
             .unwrap();
         drop((close, state));
         drop((main, reopened));
+        let repaired = if let Some((directory, parent_bytes)) = before {
+            let head = directory.join("head.bin");
+            let response = std::fs::read_dir(&directory)
+                .unwrap()
+                .find_map(|entry| {
+                    let entry = entry.unwrap();
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with("text.add.response.v2.next."))
+                        .then(|| entry.path())
+                })
+                .expect("the covered later Add response");
+            let stage_name = response.file_name().unwrap().to_str().unwrap().replacen(
+                "text.add.response.v2",
+                "text.add.head-stage.v2",
+                1,
+            );
+            let stage = directory.join(stage_name);
+            let new_head = std::fs::read(&head).unwrap();
+            assert_ne!(new_head, parent_bytes);
+            assert!(!stage.exists());
+            // Recreate the physical cut before the durable Head rename.
+            std::fs::rename(&head, &stage).unwrap();
+            std::fs::write(&head, &parent_bytes).unwrap();
+
+            let parked = response.with_extension("held-response");
+            std::fs::rename(&response, &parked).unwrap();
+            {
+                let (blocked, main, queue) = app(founder_path.clone(), None, true);
+                let state = blocked.state::<AppState>();
+                let generation = state
+                    .ui_session_generation
+                    .load(Ordering::SeqCst)
+                    .to_string();
+                let reply = invoke(&main, &generation, SECRET);
+                run(&queue).await;
+                refused(reply.await.unwrap());
+                assert!(state.store.lock().await.is_none());
+            }
+            assert_eq!(std::fs::read(&head).unwrap(), parent_bytes);
+            assert_eq!(std::fs::read(&stage).unwrap(), new_head);
+            assert!(!response.exists());
+            std::fs::rename(parked, response).unwrap();
+
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    match catcoms_storage::vault::acquire_vault_session(&founder_path) {
+                        Ok(vault) => return drop(vault),
+                        Err(catcoms_storage::StorageError::VaultBusy) => {
+                            SystemClock.sleep(Duration::from_millis(20)).await;
+                        }
+                        Err(other) => panic!("the original vault session refused: {other}"),
+                    }
+                }
+            })
+            .await
+            .expect("the failed restore released its original actor lease");
+            Some((stage, head, new_head))
+        } else {
+            None
+        };
         let (reopened, main, queue) = app(founder_path.clone(), None, true);
         unlock_current(&reopened, &main, &queue).await;
+        if let Some((stage, head, exact)) = repaired {
+            assert!(!stage.exists());
+            assert_eq!(std::fs::read(head).unwrap(), exact);
+        }
         let cold_roster = command_value_after_busy(
             &main,
             &queue,
