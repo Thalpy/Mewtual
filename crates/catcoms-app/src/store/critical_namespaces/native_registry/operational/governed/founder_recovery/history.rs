@@ -67,12 +67,16 @@ impl NativeTextColdFounderSource {
             &self.selection,
             &self.source,
             |_, store| {
-                governed.with_checked_member_parts(store, &self.source, |verifier, _, require| {
-                    let roster =
-                        NativeTextRoster::from_selected(store, verifier.replay_data(), own)?;
-                    require()?;
-                    Ok(roster)
-                })
+                governed.with_checked_member_parts(
+                    store,
+                    &self.source,
+                    |verifier, _, _, require| {
+                        let roster =
+                            NativeTextRoster::from_selected(store, verifier.replay_data(), own)?;
+                        require()?;
+                        Ok(roster)
+                    },
+                )
             },
         )?;
         if caller.is_cancelled() {

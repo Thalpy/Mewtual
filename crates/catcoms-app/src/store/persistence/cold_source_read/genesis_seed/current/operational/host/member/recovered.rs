@@ -17,6 +17,7 @@ pub(in crate::store) struct RecoveredMemberLane {
 pub(in crate::store) struct RecoveredMemberSource<'a, R> {
     pub(in crate::store) sdk: &'a PreparedV2FounderRecoveredAdd,
     pub(in crate::store) verifier: &'a V2GeneralPrefixVerifier,
+    pub(in crate::store) retired: &'a [V2FrozenAdmission],
     pub(in crate::store) view: &'a ProjectionGroupView,
     pub(in crate::store) cut: &'a mut NativeChatPreparedKeyCut,
     pub(in crate::store) ends: &'a mut NativeChatKeyEnds,
@@ -119,7 +120,7 @@ impl RecoveredMemberLane {
     pub(in crate::store) fn retry_request<R: CryptoRngCore>(
         &mut self,
         store: &ServerStore,
-        request: &V2MemberSignRequest<'_>,
+        (request, selected_reply): (&V2MemberSignRequest<'_>, Option<&SavedSharedOriginal>),
         source: &mut RecoveredMemberSource<'_, R>,
     ) -> Result<(), AppError> {
         let pool = &store
@@ -162,7 +163,13 @@ impl RecoveredMemberLane {
         if pending.plan.is_none() {
             let view =
                 member_channel_view(&mut self.channels, group, pending.channel, source.view)?;
-            pending.prepare_plan(source.verifier, own, request.dependencies, view)?;
+            pending.prepare_plan(
+                source.verifier,
+                own,
+                request.dependencies,
+                (selected_reply, source.retired),
+                view,
+            )?;
         }
         pending.sign_and_complete(|inputs, draft, plan| {
             (source.require_files)()?;

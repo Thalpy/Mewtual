@@ -88,7 +88,7 @@ impl NativeTextColdFounderSource {
                 governed.with_checked_member_parts(
                     store,
                     &self.source,
-                    |verifier, view, require_files| {
+                    |verifier, view, retired, require_files| {
                         sdk.bind_native_member_source(verifier, native, cut)
                             .map_err(|_| refused())?;
                         if member.is_none() {
@@ -115,6 +115,7 @@ impl NativeTextColdFounderSource {
                         let source = RecoveredMemberSource {
                             sdk,
                             verifier,
+                            retired,
                             view,
                             cut: &mut *cut,
                             ends: &mut *ends,

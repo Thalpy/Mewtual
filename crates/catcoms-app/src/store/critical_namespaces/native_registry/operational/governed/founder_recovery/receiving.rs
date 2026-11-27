@@ -235,7 +235,9 @@ impl NativeTextColdFounderSource {
         }
         self.restore_first_add(&session.signal)?;
         let scope = self.history_scope(channel)?;
-        let (verifier, group) = self.governed.as_ref().ok_or_else(refused)?.member_parts()?;
+        let governing = self.governed.as_ref().ok_or_else(refused)?;
+        let (verifier, group) = governing.member_parts()?;
+        let retired = governing.retired_member_history()?;
         let sdk = self.sdk.as_ref().ok_or_else(refused)?;
         let (mount, _payment) = self.work.recovered_founder_resources(FRAME_FEE)?;
         let (topic, _, wire) = frame.current_data().ok_or_else(refused)?;
@@ -293,7 +295,7 @@ impl NativeTextColdFounderSource {
         let status = work.with_recovered_founder_store(selection, source, |store| {
             project_founder_member(
                 &original,
-                verifier,
+                (verifier, retired),
                 &mut ledger.ledger,
                 &ledger.view,
                 (store, scope),
@@ -370,6 +372,11 @@ impl NativeTextColdFounderSource {
         let Some(original) = response.open(access, session).map_err(|_| refused())? else {
             return Ok(NativeTextFounderFrameOutcome::Unresolved);
         };
+        let retired = self
+            .governed
+            .as_ref()
+            .ok_or_else(refused)?
+            .retired_member_history()?;
         let ledger = self
             .received
             .as_mut()
@@ -384,7 +391,7 @@ impl NativeTextColdFounderSource {
         let status = work.with_recovered_founder_store(selection, source, |store| {
             project_founder_member(
                 &original,
-                verifier,
+                (verifier, retired),
                 &mut ledger.ledger,
                 &ledger.view,
                 (store, scope),

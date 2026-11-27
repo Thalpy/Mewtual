@@ -48,6 +48,7 @@ pub(super) struct Entry {
     pub(super) action: SignedAction,
     pub(super) state: ActionState,
     pub(super) authority: Option<VerifiedAuthorityBasis>,
+    pub(super) local_ancestry: Option<projection_admission::V2LocalAncestry>,
     // At most one constant-size normalized approval for this already imported action. There
     // is no unknown-action cache or unbounded collection of equivalent proof representations.
     delete_approval: Option<VerifiedDeleteApproval>,
@@ -174,6 +175,9 @@ impl ChatLedger {
                 return Err(ChatError::Malformed);
             }
             if action.signature() < entry.action.signature() {
+                // The selected archive may have retained another original
+                // signature for these same semantic bytes.
+                entry.local_ancestry = None;
                 entry.action = action;
             }
             return Ok(ImportOutcome::Duplicate(id));
@@ -196,6 +200,7 @@ impl ChatLedger {
                 action,
                 state: ActionState::Pending(PendingReason::Authority),
                 authority: None,
+                local_ancestry: None,
                 delete_approval: None,
                 projection: None,
                 prior_delete: None,

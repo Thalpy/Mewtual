@@ -839,6 +839,185 @@ fn selected_local_archive_preserves_edits_deletes_and_replies_after_a1_removal()
 }
 
 #[test]
+fn current_signer_can_only_reply_to_an_exact_selected_retired_create() {
+    let mut f = Fixture::new();
+    let signer = DeviceKeypair::from_seed(&[115; 32]);
+    let first = f.add(&signer, 39);
+    let parent = create(&signer, &first, 1);
+    let parent_raw = parent.encode();
+    let archived = || {
+        V2LocalArchiveOriginal::from_trusted_local_selection(
+            &parent,
+            first.admission_data().admission_id(),
+            &parent_raw,
+        )
+        .unwrap()
+    };
+    let mut removed = f.remove(&first);
+    assert!(removed.take_close_completion().unwrap().try_complete());
+    let retirements = [removed.take_frozen_data().unwrap()];
+    drop(removed);
+    let replacement = f.add(&signer, 40);
+    let (_ledger, view) = f.ledger();
+    let reply = action(
+        &signer,
+        &replacement,
+        2,
+        Body::Create {
+            text: "a new reply".into(),
+            reply_to: Some(parent.id()),
+        },
+        vec![parent.id()],
+    );
+    let draft = ActionDraft::new(reply.spec().clone(), *reply.signer()).unwrap();
+    assert!(f
+        .verifier
+        .prepare_ordinary_signing_plan(
+            &draft,
+            &replacement,
+            &[V2OrdinaryDependency::new(&parent, &first)],
+            &view,
+        )
+        .is_err());
+    assert!(f
+        .verifier
+        .local_archive_reply_parent(archived(), &[])
+        .is_err());
+    let foreign = Fixture::new();
+    assert!(foreign
+        .verifier
+        .local_archive_reply_parent(archived(), &retirements)
+        .is_err());
+    let old = f
+        .verifier
+        .local_archive_reply_parent(archived(), &retirements)
+        .unwrap();
+    let plan = f
+        .verifier
+        .prepare_ordinary_signing_plan(&draft, &replacement, &[old], &view)
+        .unwrap();
+    assert_eq!(
+        plan.admission_id_data(),
+        replacement.admission_data().admission_id()
+    );
+
+    let edit = action(
+        &signer,
+        &replacement,
+        3,
+        Body::Edit {
+            create: parent.id(),
+            text: "old incarnation".into(),
+        },
+        vec![parent.id()],
+    );
+    let draft = ActionDraft::new(edit.spec().clone(), *edit.signer()).unwrap();
+    let old = f
+        .verifier
+        .local_archive_reply_parent(archived(), &retirements)
+        .unwrap();
+    assert!(f
+        .verifier
+        .prepare_ordinary_signing_plan(&draft, &replacement, &[old], &view)
+        .is_err());
+}
+
+#[test]
+fn incoming_reply_requires_a_selected_archive_receipt_even_for_a_hot_valid_parent() {
+    let mut f = Fixture::new();
+    let author = DeviceKeypair::from_seed(&[116; 32]);
+    let current_key = DeviceKeypair::from_seed(&[117; 32]);
+    let original = f.add(&author, 41);
+    let current = f.add(&current_key, 42);
+    let parent = create(&author, &original, 1);
+    let (mut ledger, view) = f.ledger();
+    retain(&f, &mut ledger, &parent, &original, &[]);
+    let late = create(&author, &original, 2);
+    let mut removed = f.remove(&original);
+    assert!(removed.take_close_completion().unwrap().try_complete());
+    let frozen = removed.take_frozen_data().unwrap();
+    drop(removed);
+    let retired = [&frozen];
+    let reply = action(
+        &current_key,
+        &current,
+        3,
+        Body::Create {
+            text: "reply after removal".into(),
+            reply_to: Some(parent.id()),
+        },
+        vec![parent.id()],
+    );
+    assert_eq!(ledger.state(parent.id()), Some(ActionState::Valid));
+    assert!(!f
+        .verifier
+        .locally_usable_ordinary_dependency(&ledger, parent.id()));
+    assert_eq!(
+        f.verifier
+            .apply_with_locally_selected_ancestors(
+                &mut ledger,
+                &view,
+                &reply,
+                &current,
+                &retired,
+                (128, true)
+            )
+            .unwrap(),
+        V2OrdinaryReceiveStatus::WaitingForDependencies(vec![parent.id()])
+    );
+    assert!(ledger.action(reply.id()).is_none());
+    let admission = original.admission_data().admission_id();
+    assert!(f
+        .verifier
+        .replay_current_outbox_ancestor(&mut ledger, &view, (&parent, admission), &retired, 128,)
+        .is_err());
+    let raw = parent.encode();
+    let receipt =
+        V2LocalArchiveOriginal::from_trusted_local_selection(&parent, admission, &raw).unwrap();
+    assert_eq!(
+        f.verifier
+            .replay_locally_selected_ancestor(&mut ledger, &view, receipt, &retired, 128)
+            .unwrap(),
+        V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+    );
+    assert!(f
+        .verifier
+        .locally_usable_ordinary_dependency(&ledger, parent.id()));
+    assert!(ledger
+        .guarded_projection(parent.id(), 128)
+        .unwrap()
+        .with_publication(|projection| matches!(projection, GuardedProjection::Held { .. }))
+        .unwrap());
+    assert!(f
+        .verifier
+        .apply_with_locally_selected_ancestors(
+            &mut ledger,
+            &view,
+            &late,
+            &original,
+            &retired,
+            (128, true),
+        )
+        .is_err());
+    assert_eq!(
+        f.verifier
+            .apply_with_locally_selected_ancestors(
+                &mut ledger,
+                &view,
+                &reply,
+                &current,
+                &retired,
+                (128, true),
+            )
+            .unwrap(),
+        V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+    );
+    assert!(ledger.guarded_projection(reply.id(), 128).unwrap().with_publication(
+        |projection| matches!(projection, GuardedProjection::Visible { text, .. } if text == "reply after removal"),
+    ).unwrap());
+}
+
+#[test]
 fn actual_remove_rejoin_closes_a1_open_but_keeps_verified_inclusion_and_historical_rights() {
     let mut f = Fixture::new();
     let key = DeviceKeypair::from_seed(&[92; 32]);

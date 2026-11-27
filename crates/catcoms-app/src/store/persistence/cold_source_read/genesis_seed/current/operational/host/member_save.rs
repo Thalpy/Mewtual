@@ -613,7 +613,7 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
         {
             self.sign_selected_dependencies(&mut env, state, request, archived_replies, negative)?
         } else {
-            self.sign_and_lend(&env, request)?
+            self.sign_and_lend(&env, request, None)?
         };
 
         // 4. The Store's independently paid slot owns the known original BEFORE any
@@ -731,7 +731,7 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
                 }
                 (*create, *parent, None)
             }
-            _ => return self.sign_and_lend(env, request),
+            _ => return self.sign_and_lend(env, request, None),
         };
         let original =
             Self::read_selected_dependency(env, state, target, request.channel, archive)?;
@@ -764,6 +764,7 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
                     dependencies: &[target, revision],
                     ..request
                 },
+                None,
             )
         } else {
             self.sign_and_lend(
@@ -771,6 +772,10 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
                 V2MemberSignRequest {
                     dependencies: &[target],
                     ..request
+                },
+                match &original {
+                    SavedDependency::Received(selected) => Some(selected),
+                    SavedDependency::Own(_) => None,
                 },
             )
         }
@@ -795,7 +800,7 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
             Some(original) => SavedDependency::Own(original),
             None => SavedDependency::Received(
                 env.store
-                    .read_shared_history_record(archive.ok_or(Refusal::Signing)?, id)
+                    .read_selected_shared_history_record(archive.ok_or(Refusal::Signing)?, id)
                     .map_err(|_| Refusal::Failed)?
                     .ok_or(Refusal::Signing)?,
             ),
@@ -811,6 +816,7 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
         &mut self,
         env: &SaveEnvironment<'_>,
         request: V2MemberSignRequest<'_>,
+        selected_reply: Option<&SavedSharedOriginal>,
     ) -> Result<MemberSignedOriginal, V2MemberSaveRefusal> {
         let token = request.token;
         match self {
@@ -819,8 +825,12 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
                     lane.bind_outbox_context(env.id)
                         .map_err(|_| V2MemberSaveRefusal::Stale)?;
                 }
-                host.retry_sign_member_request_with_access(env.layout, request, access.reborrow())
-                    .map_err(|_| V2MemberSaveRefusal::Signing)?;
+                host.retry_sign_member_request_with_access(
+                    env.layout,
+                    (request, selected_reply),
+                    access.reborrow(),
+                )
+                .map_err(|_| V2MemberSaveRefusal::Signing)?;
                 host.member
                     .as_deref_mut()
                     .ok_or(V2MemberSaveRefusal::Signing)?
@@ -835,14 +845,14 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
                 }
             }
             Self::Joined(lane, source, _) => {
-                lane.retry_request(env.store, &request, source)
+                lane.retry_request(env.store, (&request, selected_reply), source)
                     .map_err(|_| V2MemberSaveRefusal::Signing)?;
                 lane.requests
                     .take_signed(token)
                     .map_err(|_| V2MemberSaveRefusal::Unresolved)
             }
             Self::Recovered(lane, source, _) => {
-                lane.retry_request(env.store, &request, source)
+                lane.retry_request(env.store, (&request, selected_reply), source)
                     .map_err(|_| V2MemberSaveRefusal::Signing)?;
                 lane.requests
                     .take_signed(token)
