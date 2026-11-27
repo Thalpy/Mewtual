@@ -19,7 +19,8 @@ pub use governed::{
     NativeTextColdFounderMemberIngress, NativeTextColdFounderMemberReceiver,
     NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt,
     NativeTextColdFounderSource, NativeTextGovernedStorage, NativeTextJoinedRecovery,
-    NativeTextJoinedRuntime, NativeTextJoinedStorage, NativeTextRemovedJoinedVault,
+    NativeTextJoinedRuntime, NativeTextJoinedStorage, NativeTextRejoinDelivery,
+    NativeTextRejoinExchange, NativeTextRemovedJoinedVault,
 };
 mod history_response;
 pub use history_response::{NativeTextHistoryResponseBudget, NativeTextHistoryResponseCredit};

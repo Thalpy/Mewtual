@@ -1510,17 +1510,17 @@ async fn native_text_founder_frame_capture_survives_transient_row_contention() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_membership_selected_eviction_notifies_the_original_joined_row() {
-    native_text_membership_removal_reopen(false, false).await;
+    native_text_membership_removal_reopen(MembershipAfterRemove::Retired).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_recovered_founder_admits_a_fresh_join_after_selected_remove() {
-    native_text_membership_removal_reopen(true, false).await;
+    native_text_membership_removal_reopen(MembershipAfterRemove::NewMember).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_cold_founder_finishes_a_complete_staged_add() {
-    native_text_membership_removal_reopen(true, true).await;
+    native_text_membership_removal_reopen(MembershipAfterRemove::StagedAdd).await;
 }
 
 struct RetainedRemovalHistory {
@@ -1711,7 +1711,43 @@ async fn archive_originals_before_removal(
     history
 }
 
-async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_staged_add: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_rejoin_exchange_uses_the_cold_original_pending_over_tcp() {
+    native_text_membership_removal_reopen(MembershipAfterRemove::RejoinExchange).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_rejoin_received_data_recovers_without_network_or_key_entry() {
+    native_text_membership_removal_reopen(MembershipAfterRemove::RejoinReceived).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_rejoin_welcome_covers_a_closed_outcome_and_holds_ambiguous_entry() {
+    native_text_membership_removal_reopen(MembershipAfterRemove::RejoinWelcome).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_rejoin_prefix_matches_the_closed_replacement_and_reopens_exactly() {
+    native_text_membership_removal_reopen(MembershipAfterRemove::RejoinPrefix).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MembershipAfterRemove {
+    Retired,
+    NewMember,
+    StagedAdd,
+    RejoinExchange,
+    RejoinReceived,
+    RejoinWelcome,
+    RejoinPrefix,
+}
+
+async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) {
+    let join_after_restart = matches!(
+        scenario,
+        MembershipAfterRemove::NewMember | MembershipAfterRemove::StagedAdd
+    );
+    let repair_staged_add = scenario == MembershipAfterRemove::StagedAdd;
     use catcoms_app::store::NativeTextInvitePacketData;
     use tauri::Listener;
 
@@ -1772,7 +1808,7 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
         .find(|member| member["founder"] == false)
         .expect("the selected roster names the joined admission");
 
-    let retained_history = if !join_after_restart {
+    let retained_history = if scenario == MembershipAfterRemove::Retired {
         Some(
             archive_originals_before_removal(
                 (&main, &founder_queue, &found),
@@ -1942,7 +1978,7 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
         wait_for_original_vault().await;
         let catalog = member_path.join("chat-critical-namespaces.bin");
         let before = std::fs::read(&catalog).unwrap();
-        let open_retired = || {
+        let open_retired_with_ui = |atoms| {
             let mut rng = OsCryptoRng;
             let registry = Registry::default();
             let storage = NativeTextJoinedStorage::open_for_native_startup(
@@ -1960,11 +1996,7 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
                 .unwrap();
             let NativeTextJoinedRecovery::Removed(retired) = runtime
                 .into_recovered_joined_membership(
-                    (
-                        Arc::new(AtomicU64::new(1)),
-                        Arc::new(AtomicU64::new(0)),
-                        Arc::new(AtomicBool::new(false)),
-                    ),
+                    atoms,
                     registry.ui_budget.clone(),
                     &registry.sources.policy(),
                     &negative,
@@ -1973,7 +2005,15 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
             else {
                 panic!("a proven terminal row must retain retired storage only");
             };
-            retired
+            (retired, registry.ui_budget.clone())
+        };
+        let open_retired = || {
+            open_retired_with_ui((
+                Arc::new(AtomicU64::new(1)),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicBool::new(false)),
+            ))
+            .0
         };
         let mut retired = open_retired();
         let mut rng = OsCryptoRng;
@@ -2001,6 +2041,7 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
         }
         impl rand_core::CryptoRng for NeverRng {}
         let proof = retired.removal_data().unwrap().unwrap();
+        assert!(retired.cover_selected_rejoin_catalog().is_err());
         assert_eq!(proof.2, 2);
         assert_eq!(std::fs::read(&catalog).unwrap(), before);
         assert!(!member_path
@@ -2143,18 +2184,498 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
         let reopened = open_retired();
         timeout(Duration::from_secs(10), async {
             loop {
-                if let Some(data) = reopened.removal_data().unwrap() {
-                    assert_eq!(data, proof);
+                if let Some(covered) = reopened.cover_selected_rejoin_catalog().unwrap() {
+                    assert_eq!(covered, *blake3::hash(&bytes).as_bytes());
+                    assert_eq!(reopened.removal_data().unwrap(), Some(proof));
                     break;
                 }
                 SystemClock.sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("cold startup replays the original terminal A1 beneath ID9");
+        .expect("cold startup covers the original ID9 and retains only terminal A1");
+        let foreign = catalog.with_extension("held-cold-rejoin-for-test");
+        std::fs::rename(&catalog, &foreign).unwrap();
+        std::fs::write(&catalog, &bytes).unwrap();
+        assert!(reopened.cover_selected_rejoin_catalog().is_err());
+        std::fs::remove_file(&catalog).unwrap();
+        std::fs::rename(foreign, &catalog).unwrap();
+        assert_eq!(
+            reopened.cover_selected_rejoin_catalog().unwrap(),
+            Some(*blake3::hash(&bytes).as_bytes())
+        );
         assert_eq!(std::fs::read(&catalog).unwrap(), bytes);
         assert!(!stage.exists());
         drop(reopened);
+        wait_for_original_vault().await;
+
+        let replacement = command_value_after_busy(
+            &main,
+            &founder_queue,
+            "mint_invite_fresh",
+            invite_mint::BUSY,
+            serde_json::json!({"server": found["server"], "expectedContext": found["context"]}),
+        )
+        .await;
+        let replacement_bytes = hex::decode(replacement.as_str().unwrap()).unwrap();
+        let replacement = NativeTextInvitePacketData::decode(&replacement_bytes).unwrap();
+        let now = replacement.binding().spec_data().expires_at_ms - 1;
+        let generation = Arc::new(AtomicU64::new(1));
+        let authorized = Arc::new(AtomicU64::new(1));
+        let lock = Arc::new(AtomicBool::new(false));
+        let open = || open_retired_with_ui((generation.clone(), authorized.clone(), lock.clone()));
+        let (mut retired, ui_budget) = open();
+        timeout(Duration::from_secs(10), async {
+            while retired.removal_data().unwrap().is_none() {
+                SystemClock.sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut candidate = retired
+            .prepare_rejoin_ui(1, ui_budget.prepare().unwrap())
+            .finish()
+            .unwrap();
+        let old_ui = retired.admit_rejoin_ui(&mut candidate).unwrap();
+        let (_live, signal) = tokio::sync::watch::channel(false);
+        let caller = catcoms_rt::RequestCancellation::new(signal, None);
+        let attempt = member_path.join("chat-critical-namespaces.rejoin-attempt.bin");
+        let pending = member_path.join("chat-critical-namespaces.rejoin-pending.bin");
+        let inputs = (&replacement, [95; 32], now);
+        lock.store(true, Ordering::SeqCst);
+        assert!(retired
+            .cover_rejoin_pending(&old_ui, inputs, &caller, &mut NeverRng)
+            .is_err());
+        generation.store(2, Ordering::SeqCst);
+        authorized.store(2, Ordering::SeqCst);
+        lock.store(false, Ordering::SeqCst);
+        assert!(retired
+            .cover_rejoin_pending(&old_ui, inputs, &caller, &mut NeverRng)
+            .is_err());
+        assert!(!attempt.exists() && !pending.exists());
+        let mut candidate = retired
+            .prepare_rejoin_ui(2, ui_budget.prepare().unwrap())
+            .finish()
+            .unwrap();
+        let ui = retired.admit_rejoin_ui(&mut candidate).unwrap();
+        let saved = retired
+            .cover_rejoin_pending(&ui, inputs, &caller, &mut OsCryptoRng)
+            .unwrap()
+            .unwrap();
+        assert_ne!(saved.request_digest, [0; 32]);
+        let attempt_bytes = std::fs::read(&attempt).unwrap();
+        let pending_bytes = std::fs::read(&pending).unwrap();
+        for (path, expected) in [(&attempt, &attempt_bytes), (&pending, &pending_bytes)] {
+            let original = path.with_extension("held-rejoin-test");
+            std::fs::rename(path, &original).unwrap();
+            std::fs::write(path, expected).unwrap();
+            assert!(retired
+                .cover_rejoin_pending(&ui, inputs, &caller, &mut NeverRng)
+                .is_err());
+            assert_eq!(&std::fs::read(path).unwrap(), expected);
+            std::fs::remove_file(path).unwrap();
+            std::fs::rename(original, path).unwrap();
+        }
+        let warm = retired
+            .cover_rejoin_pending(
+                &ui,
+                (&replacement, [95; 32], u64::MAX),
+                &caller,
+                &mut NeverRng,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(warm.request_digest, saved.request_digest);
+        assert_eq!(warm.context, saved.context);
+        drop((old_ui, ui, candidate, retired));
+        wait_for_original_vault().await;
+
+        let (mut reopened, ui_budget) = open();
+        let mut candidate = reopened
+            .prepare_rejoin_ui(2, ui_budget.prepare().unwrap())
+            .finish()
+            .unwrap();
+        let ui = reopened.admit_rejoin_ui(&mut candidate).unwrap();
+        let exact = timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(receipt) = reopened
+                    .cover_rejoin_pending(
+                        &ui,
+                        (&replacement, [95; 32], u64::MAX),
+                        &caller,
+                        &mut NeverRng,
+                    )
+                    .unwrap()
+                {
+                    break receipt;
+                }
+                SystemClock.sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(exact.request_digest, saved.request_digest);
+        assert_eq!(exact.context, saved.context);
+        assert!(reopened
+            .cover_rejoin_pending(&ui, (&replacement, [96; 32], now), &caller, &mut NeverRng,)
+            .is_err());
+        for path in [&attempt, &pending] {
+            let original = path.with_extension("held-cold-rejoin-test");
+            std::fs::rename(path, &original).unwrap();
+            assert!(reopened
+                .cover_rejoin_pending(&ui, inputs, &caller, &mut NeverRng)
+                .is_err());
+            assert!(!path.exists());
+            std::fs::rename(original, path).unwrap();
+        }
+        let torn = &attempt_bytes[..attempt_bytes.len() / 2];
+        std::fs::write(&attempt, torn).unwrap();
+        assert!(reopened
+            .cover_rejoin_pending(&ui, inputs, &caller, &mut NeverRng)
+            .is_err());
+        assert_eq!(std::fs::read(&attempt).unwrap(), torn);
+        std::fs::write(&attempt, &attempt_bytes).unwrap();
+
+        let partial = &pending_bytes[..pending_bytes.len() / 2];
+        std::fs::write(&pending, partial).unwrap();
+        assert!(reopened
+            .cover_rejoin_pending(&ui, inputs, &caller, &mut NeverRng)
+            .is_err());
+        assert_eq!(std::fs::read(&pending).unwrap(), partial);
+        assert_eq!(std::fs::read(&attempt).unwrap(), attempt_bytes);
+        assert_eq!(std::fs::read(&catalog).unwrap(), bytes);
+        assert_eq!(std::fs::read(&selector).unwrap(), selector_bytes);
+        std::fs::write(&pending, &pending_bytes).unwrap();
+        if matches!(
+            scenario,
+            MembershipAfterRemove::RejoinExchange
+                | MembershipAfterRemove::RejoinReceived
+                | MembershipAfterRemove::RejoinWelcome
+                | MembershipAfterRemove::RejoinPrefix
+        ) {
+            let admit = |owner: &catcoms_app::store::NativeTextRemovedJoinedVault, generation| {
+                let mut prepared = owner
+                    .prepare_rejoin_ui(generation, ui_budget.prepare().unwrap())
+                    .finish()
+                    .unwrap();
+                owner.admit_rejoin_ui(&mut prepared).unwrap()
+            };
+            let held = pending.with_extension("exchange-foreign-for-test");
+            std::fs::rename(&pending, &held).unwrap();
+            std::fs::write(&pending, &pending_bytes).unwrap();
+            assert!(reopened
+                .prepare_rejoin_exchange(
+                    admit(&reopened, 2),
+                    &replacement,
+                    [95; 32],
+                    caller.clone()
+                )
+                .is_err());
+            std::fs::remove_file(&pending).unwrap();
+            std::fs::rename(&held, &pending).unwrap();
+
+            let scheduler = catcoms_discovery::EndpointDialScheduler::new(Default::default());
+            let host = std::net::Ipv4Addr::LOCALHOST.into();
+            let old = reopened
+                .prepare_rejoin_exchange(
+                    admit(&reopened, 2),
+                    &replacement,
+                    [95; 32],
+                    caller.clone(),
+                )
+                .unwrap()
+                .expect("the original A1 listener drained");
+            lock.store(true, Ordering::SeqCst);
+            generation.store(3, Ordering::SeqCst);
+            authorized.store(3, Ordering::SeqCst);
+            lock.store(false, Ordering::SeqCst);
+            assert!(old
+                .connect_approved_host(&replacement, host, &scheduler)
+                .await
+                .is_err());
+            drop(old);
+
+            let original_received =
+                member_path.join("chat-critical-namespaces.rejoin-received.bin");
+            let local_ui = admit(&reopened, 3);
+            let invitation = (&replacement, [95; 32]);
+            assert!(reopened
+                .recover_rejoin_received(&local_ui, invitation, &caller, &mut NeverRng)
+                .unwrap()
+                .is_none());
+            assert!(!original_received.exists());
+            let exchange = reopened
+                .prepare_rejoin_exchange(
+                    admit(&reopened, 3),
+                    &replacement,
+                    [95; 32],
+                    caller.clone(),
+                )
+                .unwrap()
+                .unwrap();
+            exchange
+                .connect_approved_host(&replacement, host, &scheduler)
+                .await
+                .unwrap();
+            let delivery = timeout(Duration::from_secs(45), exchange.receive())
+                .await
+                .expect("the original founder answers A2 over its TCP listener")
+                .unwrap();
+            assert_eq!(delivery.request_digest_data(), saved.request_digest);
+            assert!(delivery.is_for_original_cached(&reopened));
+            assert_eq!(reopened.removal_data().unwrap(), Some(proof));
+            assert_eq!(std::fs::read(&catalog).unwrap(), bytes);
+            assert_eq!(std::fs::read(&pending).unwrap(), pending_bytes);
+
+            if scenario != MembershipAfterRemove::RejoinExchange {
+                use catcoms_app::store::NativeTextRejoinWelcomeStatus;
+                let receipt = delivery
+                    .cover(&mut reopened, invitation, &mut OsCryptoRng)
+                    .unwrap();
+                assert_eq!(receipt.request_digest, saved.request_digest);
+                assert_ne!(receipt.delivery_digest, [0; 32]);
+                let raw = std::fs::read(&original_received).unwrap();
+                let renamed = original_received.with_extension("received-for-test");
+                std::fs::rename(&original_received, &renamed).unwrap();
+                std::fs::write(&original_received, &raw).unwrap();
+                assert!(reopened
+                    .recover_rejoin_received(&local_ui, invitation, &caller, &mut NeverRng)
+                    .is_err());
+                std::fs::remove_file(&original_received).unwrap();
+                std::fs::rename(&renamed, &original_received).unwrap();
+                assert_eq!(
+                    reopened
+                        .recover_rejoin_received(&local_ui, invitation, &caller, &mut NeverRng)
+                        .unwrap(),
+                    Some(receipt),
+                );
+                let welcome = if matches!(
+                    scenario,
+                    MembershipAfterRemove::RejoinWelcome | MembershipAfterRemove::RejoinPrefix
+                ) {
+                    let NativeTextRejoinWelcomeStatus::Covered(result) = reopened
+                        .cover_rejoin_welcome(&local_ui, invitation, &caller, &mut OsCryptoRng)
+                        .unwrap()
+                    else {
+                        panic!("the exact covered delivery enters one Welcome");
+                    };
+                    assert_eq!(result.request_digest, receipt.request_digest);
+                    assert_eq!(result.epoch, 3);
+                    assert_eq!(
+                        reopened
+                            .cover_rejoin_welcome(&local_ui, invitation, &caller, &mut NeverRng)
+                            .unwrap(),
+                        NativeTextRejoinWelcomeStatus::Covered(result),
+                    );
+                    assert_eq!(reopened.removal_data().unwrap(), Some(proof));
+                    Some(result)
+                } else {
+                    None
+                };
+                let prefix_path =
+                    member_path.join("chat-critical-namespaces.rejoin-initial-prefix.bin");
+                let covered_prefix = if scenario == MembershipAfterRemove::RejoinPrefix {
+                    let result = reopened
+                        .cover_rejoin_prefix(&local_ui, invitation, &caller, &mut OsCryptoRng)
+                        .unwrap()
+                        .unwrap();
+                    let (head, active, epoch) = result.registration.selected_data();
+                    assert_eq!(epoch, 3);
+                    assert_eq!(head, welcome.unwrap().header);
+                    assert_ne!(active, proof.1);
+                    let original = std::fs::read(&prefix_path).unwrap();
+                    let saved_file = prefix_path.with_extension("prefix-role-for-test");
+                    std::fs::rename(&prefix_path, &saved_file).unwrap();
+                    std::fs::write(&prefix_path, &original).unwrap();
+                    assert!(reopened
+                        .cover_rejoin_prefix(&local_ui, invitation, &caller, &mut NeverRng)
+                        .is_err());
+                    std::fs::remove_file(&prefix_path).unwrap();
+                    std::fs::rename(saved_file, &prefix_path).unwrap();
+                    let same = reopened
+                        .cover_rejoin_prefix(&local_ui, invitation, &caller, &mut NeverRng)
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(same.history_fingerprint, result.history_fingerprint);
+                    assert_eq!(reopened.removal_data().unwrap(), Some(proof));
+                    Some((result, original))
+                } else {
+                    None
+                };
+                drop((local_ui, ui, candidate, reopened));
+                wait_for_original_vault().await;
+
+                let (mut cold, ui_budget) = open();
+                timeout(Duration::from_secs(10), async {
+                    while cold.removal_data().unwrap().is_none() {
+                        SystemClock.sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                let mut capture = cold
+                    .prepare_rejoin_ui(3, ui_budget.prepare().unwrap())
+                    .finish()
+                    .unwrap();
+                let ui = cold.admit_rejoin_ui(&mut capture).unwrap();
+                let replay = cold
+                    .cover_rejoin_pending(
+                        &ui,
+                        (&replacement, [95; 32], u64::MAX),
+                        &caller,
+                        &mut NeverRng,
+                    )
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(replay.request_digest, saved.request_digest);
+                if welcome.is_some() {
+                    let backup = original_received.with_extension("missing-received-for-test");
+                    let sdk =
+                        member_path.join("chat-critical-namespaces.rejoin-welcome-attempt.bin");
+                    let outcome = member_path.join("chat-critical-namespaces.rejoin-outcome.bin");
+                    let before = (
+                        std::fs::read(&sdk).unwrap(),
+                        std::fs::read(&outcome).unwrap(),
+                    );
+                    std::fs::rename(&original_received, &backup).unwrap();
+                    assert!(cold
+                        .recover_rejoin_received(&ui, invitation, &caller, &mut NeverRng)
+                        .is_err());
+                    assert!(!original_received.exists());
+                    assert_eq!(std::fs::read(sdk).unwrap(), before.0);
+                    assert_eq!(std::fs::read(outcome).unwrap(), before.1);
+                    std::fs::rename(&backup, &original_received).unwrap();
+                }
+                let partial = &raw[..raw.len() / 2];
+                std::fs::write(&original_received, partial).unwrap();
+                assert!(cold
+                    .recover_rejoin_received(&ui, invitation, &caller, &mut NeverRng)
+                    .is_err());
+                assert_eq!(std::fs::read(&original_received).unwrap(), partial);
+                std::fs::write(&original_received, &raw).unwrap();
+                assert_eq!(
+                    cold.recover_rejoin_received(&ui, invitation, &caller, &mut NeverRng)
+                        .unwrap(),
+                    Some(receipt),
+                );
+                assert_eq!(std::fs::read(&original_received).unwrap(), raw);
+                assert_eq!(cold.removal_data().unwrap(), Some(proof));
+                if let Some(result) = welcome {
+                    assert_eq!(
+                        cold.recover_rejoin_welcome(&ui, invitation, &caller, &mut NeverRng)
+                            .unwrap(),
+                        NativeTextRejoinWelcomeStatus::Covered(result),
+                    );
+                    assert_eq!(cold.removal_data().unwrap(), Some(proof));
+                }
+                if let Some((covered, original)) = covered_prefix {
+                    let partial = &original[..original.len() / 2];
+                    std::fs::write(&prefix_path, partial).unwrap();
+                    assert!(cold
+                        .cover_rejoin_prefix(&ui, invitation, &caller, &mut NeverRng)
+                        .is_err());
+                    assert_eq!(std::fs::read(&prefix_path).unwrap(), partial);
+                    std::fs::write(&prefix_path, &original).unwrap();
+                    let recovered = cold
+                        .cover_rejoin_prefix(&ui, invitation, &caller, &mut NeverRng)
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(recovered.registration, covered.registration);
+                    assert_eq!(recovered.history_fingerprint, covered.history_fingerprint);
+                    assert_eq!(std::fs::read(&prefix_path).unwrap(), original);
+                }
+                drop((ui, capture, cold));
+                wait_for_original_vault().await;
+
+                if scenario == MembershipAfterRemove::RejoinWelcome {
+                    let sdk_attempt =
+                        member_path.join("chat-critical-namespaces.rejoin-welcome-attempt.bin");
+                    let sdk_outcome =
+                        member_path.join("chat-critical-namespaces.rejoin-outcome.bin");
+                    let attempt_frame = std::fs::read(&sdk_attempt).unwrap();
+                    let held_outcome = sdk_outcome.with_extension("held-outcome-for-test");
+                    std::fs::rename(&sdk_outcome, &held_outcome).unwrap();
+                    let (mut held, paid) = open();
+                    timeout(Duration::from_secs(10), async {
+                        while held.removal_data().unwrap().is_none() {
+                            SystemClock.sleep(Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    let mut capture = held
+                        .prepare_rejoin_ui(3, paid.prepare().unwrap())
+                        .finish()
+                        .unwrap();
+                    let ui = held.admit_rejoin_ui(&mut capture).unwrap();
+                    held.cover_rejoin_pending(&ui, inputs, &caller, &mut NeverRng)
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        held.recover_rejoin_received(&ui, invitation, &caller, &mut NeverRng)
+                            .unwrap(),
+                        Some(receipt),
+                    );
+                    assert_eq!(
+                        held.recover_rejoin_welcome(&ui, invitation, &caller, &mut NeverRng)
+                            .unwrap(),
+                        NativeTextRejoinWelcomeStatus::Held,
+                    );
+                    assert_eq!(std::fs::read(&sdk_attempt).unwrap(), attempt_frame);
+                    assert!(!sdk_outcome.exists());
+                    std::fs::rename(&held_outcome, &sdk_outcome).unwrap();
+                    drop((ui, capture, held));
+                    wait_for_original_vault().await;
+                }
+
+                let held_attempt = attempt.with_extension("rejoin-attempt-held-for-test");
+                let held_pending = pending.with_extension("rejoin-pending-held-for-test");
+                std::fs::rename(&attempt, &held_attempt).unwrap();
+                std::fs::rename(&pending, &held_pending).unwrap();
+                let (mut orphaned, ui_budget) = open();
+                timeout(Duration::from_secs(10), async {
+                    while orphaned.removal_data().unwrap().is_none() {
+                        SystemClock.sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                let mut capture = orphaned
+                    .prepare_rejoin_ui(3, ui_budget.prepare().unwrap())
+                    .finish()
+                    .unwrap();
+                let ui = orphaned.admit_rejoin_ui(&mut capture).unwrap();
+                assert!(orphaned
+                    .cover_rejoin_pending(&ui, inputs, &caller, &mut NeverRng)
+                    .is_err());
+                assert!(!attempt.exists() && !pending.exists());
+                assert_eq!(std::fs::read(&original_received).unwrap(), raw);
+                std::fs::rename(&held_attempt, &attempt).unwrap();
+                std::fs::rename(&held_pending, &pending).unwrap();
+                assert_eq!(
+                    orphaned
+                        .cover_rejoin_pending(&ui, inputs, &caller, &mut NeverRng)
+                        .unwrap()
+                        .unwrap()
+                        .request_digest,
+                    saved.request_digest,
+                );
+                drop((ui, capture, orphaned));
+            } else {
+                lock.store(true, Ordering::SeqCst);
+                assert!(!delivery.is_for_original_cached(&reopened));
+                drop((delivery, local_ui, ui, candidate, reopened));
+            }
+            wait_for_original_vault().await;
+            let founder_state = founder.state::<AppState>();
+            let close = register_vault_close(&founder_state).await.unwrap();
+            sources::close_server_rows(&founder_state, &SystemClock)
+                .await
+                .unwrap();
+            drop((close, founder_state));
+            return;
+        }
+        drop((ui, candidate, reopened));
         wait_for_original_vault().await;
     }
 

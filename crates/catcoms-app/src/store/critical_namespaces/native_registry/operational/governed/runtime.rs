@@ -4,15 +4,25 @@ catcoms_rt::redacted_debug! {
 }
 
 use super::super::join_tcp;
+use super::super::native_ui::{
+    UiAdmissionOwner, UiCandidate, UiCapture, UiPreparation, UiRetirement,
+};
 use super::*;
 use crate::store::persistence::governance_layout::joined::{
-    rejoin::RejoinCatalogPreparation, JoinedRuntimeInputs,
+    rejoin::{
+        RejoinCatalogPreparation, RejoinPendingOwner, RejoinPrefixOwner, RejoinReceivedOwner,
+        RejoinWelcomeOwner,
+    },
+    JoinedRuntimeInputs,
 };
 use crate::store::NativeTextJoinedRegistrationData;
 use catcoms_replication::chat::{owner_facts::OwnerFactId, owner_header::OwnerHeaderId};
 use catcoms_sync::{ClosedV2JoinedNode, SelectedRejoinRemoval, MAX_V2_FIRST_ADD_PROOF_BYTES};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use zeroize::Zeroizing;
+
+mod rejoin_exchange;
+pub use rejoin_exchange::{NativeTextRejoinDelivery, NativeTextRejoinExchange};
 
 enum RecoveredJoinedMembership {
     Active(OwnerHeaderId, OwnerFactId, u64),
@@ -51,11 +61,18 @@ pub enum NativeTextJoinedRecovery<R: CryptoRngCore> {
 /// Exclusive retired membership storage. The recorded labels are historical
 /// data. A rejoin writer must recheck the held Remove at its own commit edge.
 pub struct NativeTextRemovedJoinedVault {
+    ui: UiAdmissionOwner,
+    key_source: catcoms_rt::NativeChatSourceOwner,
     index: upgrade_source::owning::Store,
     registration: NativeTextJoinedRegistrationData,
     removal: SelectedRejoinRemoval,
     tcp_drain: catcoms_net::NativeTcpDrain,
     rejoin_catalog: Option<Box<RejoinCatalogPreparation>>,
+    rejoin_pending: Option<RejoinPendingOwner>,
+    rejoin_tcp: Option<Arc<join_tcp::Transport>>,
+    rejoin_received: Option<RejoinReceivedOwner>,
+    rejoin_welcome: Option<Box<RejoinWelcomeOwner>>,
+    rejoin_prefix: Option<Box<RejoinPrefixOwner>>,
 }
 
 catcoms_rt::redacted_debug! {
@@ -63,7 +80,38 @@ catcoms_rt::redacted_debug! {
     NativeTextRemovedJoinedVault;
 }
 
+impl Drop for NativeTextRemovedJoinedVault {
+    fn drop(&mut self) {
+        // Close the retired UI and independent key source before their
+        // original physical vault and file custody can leave this owner.
+        self.ui.close_first();
+        self.key_source.close();
+    }
+}
+
 impl NativeTextRemovedJoinedVault {
+    /// Capture the original retired vault's paid UI generation. The
+    /// candidate must be finished outside native or Store guards.
+    pub fn prepare_rejoin_ui(
+        &self,
+        expected: u64,
+        credit: crate::store::NativeUiInvocationMetadata,
+    ) -> UiPreparation {
+        self.ui.prepare_capture(expected, credit)
+    }
+
+    /// Bind the candidate to the canonical generation of this retired vault.
+    /// This admits UI metadata only and issues no key or live chat source.
+    pub fn admit_rejoin_ui(&self, candidate: &mut UiCandidate) -> Result<UiCapture, AppError> {
+        self.ui.admit(candidate)
+    }
+
+    /// Move begun generation retirement outside the native guard before
+    /// waiting for any admitted rejoin operation to leave.
+    pub fn begin_rejoin_ui_retirement(&self, through: u64) -> Result<UiRetirement, AppError> {
+        self.ui.begin_retirement(through)
+    }
+
     /// Recheck the exact registry, original Welcome files and selected
     /// terminal cut before lending the historical coordinates. None means the
     /// original TCP actor still has a task or key to retire.
@@ -111,6 +159,59 @@ impl NativeTextRemovedJoinedVault {
         let prepared = self.rejoin_catalog.as_mut().ok_or_else(refused)?;
         self.index.stage_retired_rejoin_catalog(prepared)?;
         Ok(true)
+    }
+
+    /// Cover an exact A2 Pending after authentication, original UI
+    /// generation admission and actual retirement of the recovered A1 actor.
+    /// It returns historical data. Network and Welcome are separate cuts.
+    pub fn cover_rejoin_pending(
+        &mut self,
+        ui: &UiCapture,
+        invite: (&crate::store::NativeTextInvitePacketData<'_>, [u8; 32], u64),
+        negative: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<crate::store::NativeTextRejoinPendingReceipt>, AppError> {
+        if !self.tcp_drain.is_drained() {
+            return Ok(None);
+        }
+        let command = self.ui.require_capture(ui)?;
+        let source = self.key_source.observe();
+        let purpose = catcoms_rt::NativeChatKeyPurpose::JoinerDevice;
+        let mut cut = self
+            .key_source
+            .prepare_cut(command, purpose)
+            .map_err(|_| refused())?;
+        // Ends outlive all storage guards, including refusal before a file
+        // is covered and unwinding during the SDK or physical write.
+        let mut ends = catcoms_rt::NativeChatKeyEnds::new();
+        let authority = &self.ui;
+        let require_current = || {
+            if negative.is_cancelled() || !authority.is_current_cached(ui) {
+                return Err(refused());
+            }
+            Ok(())
+        };
+        self.index
+            .cover_rejoin_pending(
+                (self.registration, self.removal),
+                &mut self.rejoin_pending,
+                invite,
+                (&source, &mut cut, &mut ends),
+                rng,
+                require_current,
+            )
+            .map(Some)
+    }
+
+    /// Confirm the covered ID9 fingerprint from a fresh terminal mount. None
+    /// means the original recovered TCP transport has yet to finish retiring.
+    pub fn cover_selected_rejoin_catalog(&self) -> Result<Option<[u8; 32]>, AppError> {
+        if !self.tcp_drain.is_drained() {
+            return Ok(None);
+        }
+        self.index
+            .cover_selected_rejoin_catalog(self.registration, self.removal)
+            .map(Some)
     }
 
     /// Publish and cover the original Stage as Current. The old mount never
@@ -511,12 +612,21 @@ impl<R: CryptoRngCore> NativeTextJoinedRuntime<catcoms_net::MeshService, R> {
             self.storage
                 .index
                 .require_recovered_native_join_removal(receipt, removal)?;
+            let ui = UiAdmissionOwner::new(session.0, session.1, session.2, ui_budget)?;
+            let key_source = ui.retired_key_source()?;
             let original = NativeTextRemovedJoinedVault {
+                ui,
+                key_source,
                 index: self.storage.index,
                 registration: receipt,
                 removal,
                 tcp_drain,
                 rejoin_catalog: None,
+                rejoin_pending: None,
+                rejoin_tcp: None,
+                rejoin_received: None,
+                rejoin_welcome: None,
+                rejoin_prefix: None,
             };
             if negative.is_cancelled() {
                 return Err(refused());

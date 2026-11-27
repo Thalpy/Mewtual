@@ -122,7 +122,8 @@ pub use native_registry::{
 };
 pub use native_registry::{NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob};
 pub use native_registry::{
-    NativeTextJoinedRecovery, NativeTextJoinedRuntime, NativeTextRemovedJoinedVault,
+    NativeTextJoinedRecovery, NativeTextJoinedRuntime, NativeTextRejoinDelivery,
+    NativeTextRejoinExchange, NativeTextRemovedJoinedVault,
 };
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;

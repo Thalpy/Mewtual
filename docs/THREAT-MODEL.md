@@ -66,6 +66,31 @@ verifying its child and checking the selected local stores. An original
 page, approval and connection bound the request. Chains have a fixed
 deadline, attempt cap and depth cap.
 
+For same-device Chat V2 rejoin, the retired vault retains the exact
+Attempt and Pending file handles across the exchange. It authenticates
+and rechecks both files, the selected ID9 catalog, and the original A1
+Remove. The A2 TCP loan binds the current UI generation, vault mount,
+explicit numeric host and authenticated founder peer. The response must
+verify against the original request and the Remove-to-Add prefix. The
+returned delivery grants no MLS Welcome or active member authority.
+The retired vault may cover the exact authenticated reply in a private
+Received file. Warm retries retain its original identity and bytes.
+Cold recovery checks the same selected request and delivery with a fresh
+authorized UI capture. Torn records and replies missing their original
+Pending pair are preserved. Neither permits generation of a new package.
+The Welcome SDK requires a separate native cut and a durable
+possible-entry fence bound to the held Received and Pending frames.
+A verified complete Outcome recovers the closed graph. A cold
+possible-entry without Outcome preserves the journal and does not
+enter Welcome again. Index4 and a selected Core prefix are required
+before the graph can serve an active membership. The initial prefix
+record checks the exact paid, closed graph against the selected Add and
+the replacement Admission. It binds the signed history to the held
+Attempt, Pending, Received, SDK Attempt and Outcome. The prefix is
+covered before its Core transition can finish. Its receipt is data and
+cannot authorize native installation. A cold retry replays the original
+inputs and refuses a torn or different prefix record.
+
 Cold founder startup can complete a fully staged later Add only after vault
 authentication and replay under the original pin. It retains and rechecks
 the named parent, archive, stage and each journal record against their
@@ -82,9 +107,15 @@ the old device signer and a fresh KeyPackage. Welcome validation replays
 the pinned prefix through the selected new Add and checks that the old
 Remove occurs in that prefix. The same check runs before restoring a
 sealed outcome. Ordinary first-pin paths refuse the new Pending format.
-The desktop still lacks the mounted rejoin owner that proves the original
-Remove selected on disk, preserves the old files and admits the replacement
-row. The retained coordinates alone grant no membership or write authority.
+The retired native vault covers ID9 and reproves the original native
+registry, pin, Pending, Welcome and terminal Remove before replacement
+device entry. Its separate current UI generation grants one cut to reuse
+the signer in a fresh provider. An authenticated attempt precedes that
+cut. The covered Pending binds the exact same attempt, original removal
+and private provider. Cold incomplete work remains on disk and does not
+redraw a KeyPackage. The renderer and replacement row installation still
+need their own paths. The retained coordinates grant no membership or
+message write authority.
 
 Cold joined-contact recovery begins with explicit local recurring consent.
 The saved contact is tenant-bound and epoch-bound, and the current signed

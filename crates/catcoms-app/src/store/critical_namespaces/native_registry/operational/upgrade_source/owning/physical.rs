@@ -281,7 +281,7 @@ impl Physical {
         &self,
         data: crate::store::NativeTextJoinedRegistrationData,
     ) -> Result<(), AppError> {
-        self.with_registered_native_join(data, |_| Ok(()))
+        self.with_registered_native_join(data, |_, _| Ok(()))
     }
 
     pub(super) fn require_recovered_native_join_removal(
@@ -289,7 +289,7 @@ impl Physical {
         data: crate::store::NativeTextJoinedRegistrationData,
         removal: catcoms_sync::SelectedRejoinRemoval,
     ) -> Result<(), AppError> {
-        self.with_registered_native_join(data, |store| {
+        self.with_registered_native_join(data, |store, _| {
             store.require_recovered_joined_removal(data, removal)
         })
     }
@@ -383,10 +383,168 @@ impl Physical {
         prepared.select_catalog(self.current()?.checked_store()?)
     }
 
+    pub(super) fn cover_selected_rejoin_catalog(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+        removal: catcoms_sync::SelectedRejoinRemoval,
+    ) -> Result<[u8; 32], AppError> {
+        if !self.rejoin_catalog_selected()? {
+            return Err(refused());
+        }
+        self.with_registered_native_join(data, |store, inventory| {
+            store.cover_selected_rejoin_catalog(data, removal, inventory)
+        })
+    }
+
+    pub(super) fn prepare_rejoin_transport(
+        &self,
+        original: (
+            crate::store::NativeTextJoinedRegistrationData,
+            catcoms_sync::SelectedRejoinRemoval,
+        ),
+        warm: &mut Option<
+            crate::store::persistence::governance_layout::joined::rejoin::RejoinPendingOwner,
+        >,
+        invitation: (&crate::store::NativeTextInvitePacketData<'_>, [u8; 32]),
+    ) -> Result<
+        crate::store::persistence::governance_layout::joined::rejoin::PreparedRejoinTransport,
+        AppError,
+    > {
+        if !self.rejoin_catalog_selected()? {
+            return Err(refused());
+        }
+        self.with_registered_native_join(original.0, |store, inventory| {
+            store.prepare_rejoin_transport(inventory, original, warm, invitation)
+        })
+    }
+
+    pub(super) fn cover_rejoin_pending(
+        &self,
+        original: (
+            crate::store::NativeTextJoinedRegistrationData,
+            catcoms_sync::SelectedRejoinRemoval,
+        ),
+        warm: &mut Option<
+            crate::store::persistence::governance_layout::joined::rejoin::RejoinPendingOwner,
+        >,
+        request: (&crate::store::NativeTextInvitePacketData<'_>, [u8; 32], u64),
+        native: crate::store::persistence::governance_layout::joined::rejoin::RejoinKeyEntry<'_>,
+        rng: &mut impl CryptoRngCore,
+        require_current: impl Fn() -> Result<(), AppError>,
+    ) -> Result<crate::store::NativeTextRejoinPendingReceipt, AppError> {
+        if !self.rejoin_catalog_selected()? {
+            return Err(refused());
+        }
+        self.with_registered_native_join(original.0, |store, inventory| {
+            store.cover_rejoin_pending(
+                inventory,
+                original,
+                warm,
+                request,
+                native,
+                rng,
+                require_current,
+            )
+        })
+    }
+
+    pub(super) fn cover_rejoin_received(
+        &self,
+        original: (
+            crate::store::NativeTextJoinedRegistrationData,
+            catcoms_sync::SelectedRejoinRemoval,
+        ),
+        funds: (&RejoinPendingOwner, &mut Option<RejoinReceivedOwner>),
+        invite: (&crate::store::NativeTextInvitePacketData<'_>, [u8; 32]),
+        input: RejoinReceivedInput<'_>,
+        rng: &mut impl CryptoRngCore,
+        require_current: impl Fn() -> Result<(), AppError>,
+    ) -> Result<Option<crate::store::NativeTextRejoinReceivedReceipt>, AppError> {
+        if !self.rejoin_catalog_selected()? {
+            return Err(refused());
+        }
+        // The Received writer performs its final inventory and exact file
+        // proof here under the same cell. Do not do later physical checks
+        // after it has established the original reply receipt.
+        self.with_registered_native_join_inventory(original.0, |store, inventory| {
+            store.cover_rejoin_received(
+                inventory,
+                original,
+                funds,
+                invite,
+                input,
+                rng,
+                require_current,
+            )
+        })
+    }
+
+    pub(super) fn cover_rejoin_welcome(
+        &self,
+        original: (
+            crate::store::NativeTextJoinedRegistrationData,
+            catcoms_sync::SelectedRejoinRemoval,
+        ),
+        sources: RejoinWelcomeOwners<'_>,
+        invite: (&crate::store::NativeTextInvitePacketData<'_>, [u8; 32]),
+        authority: (
+            Option<RejoinWelcomeKeyEntry<'_>>,
+            &catcoms_rt::RequestCancellation,
+        ),
+        rng: &mut impl CryptoRngCore,
+        require_current: impl Fn() -> Result<(), AppError>,
+    ) -> Result<crate::store::NativeTextRejoinWelcomeStatus, AppError> {
+        if !self.rejoin_catalog_selected()? {
+            return Err(refused());
+        }
+        self.with_registered_native_join_inventory(original.0, |store, inventory| {
+            store.cover_rejoin_welcome(
+                inventory,
+                original,
+                sources,
+                invite,
+                authority,
+                rng,
+                require_current,
+            )
+        })
+    }
+
+    pub(super) fn cover_rejoin_prefix(
+        &self,
+        original: (
+            crate::store::NativeTextJoinedRegistrationData,
+            catcoms_sync::SelectedRejoinRemoval,
+        ),
+        sources: RejoinPrefixInputs<'_>,
+        invite: (&crate::store::NativeTextInvitePacketData<'_>, [u8; 32]),
+        rng: &mut impl CryptoRngCore,
+        require_current: impl Fn() -> Result<(), AppError>,
+    ) -> Result<crate::store::NativeTextRejoinPrefixReceipt, AppError> {
+        if !self.rejoin_catalog_selected()? {
+            return Err(refused());
+        }
+        self.with_registered_native_join_inventory(original.0, |store, inventory| {
+            store.cover_rejoin_prefix(inventory, original, sources, invite, rng, require_current)
+        })
+    }
+
     fn with_registered_native_join<T>(
         &self,
         data: crate::store::NativeTextJoinedRegistrationData,
-        require: impl FnOnce(&ServerStore) -> Result<T, AppError>,
+        require: impl FnOnce(&ServerStore, &UpgradeInventory) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        self.with_registered_native_join_inventory(data, |store, inventory| {
+            let output = require(store, inventory)?;
+            inventory.require(store)?;
+            Ok(output)
+        })
+    }
+
+    fn with_registered_native_join_inventory<T>(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+        complete_under_cell: impl FnOnce(&ServerStore, &UpgradeInventory) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
         let cell = self.cell.try_lock().map_err(|_| refused())?;
         cell.require_idle()?;
@@ -403,9 +561,7 @@ impl Physical {
         if store.recovered_join_registration_data()? != Some(data) {
             return Err(refused());
         }
-        let output = require(store)?;
-        inventory.require(store)?;
-        Ok(output)
+        complete_under_cell(store, &inventory)
     }
 
     pub(super) fn prepare_recovered_native_join_tcp(

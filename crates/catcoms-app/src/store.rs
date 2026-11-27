@@ -126,7 +126,8 @@ pub use critical_namespaces::{
     NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob,
 };
 pub use critical_namespaces::{
-    NativeTextJoinedRecovery, NativeTextJoinedRuntime, NativeTextRemovedJoinedVault,
+    NativeTextJoinedRecovery, NativeTextJoinedRuntime, NativeTextRejoinDelivery,
+    NativeTextRejoinExchange, NativeTextRemovedJoinedVault,
 };
 pub(crate) use mounted::LegacyStoreCustody;
 pub use mounted::{MountedLeaseRefusal, MountedLeaseRefusalKind, MountedVault};
@@ -135,6 +136,10 @@ pub use native_text_invite::{
     NativeTextSavedJoinResponse, MAX_NATIVE_TEXT_INVITE_PACKET_BYTES,
 };
 pub use native_text_roster::{NativeTextRoster, NativeTextRosterMember};
+pub use persistence::governance_layout::joined::rejoin::{
+    NativeTextRejoinOutcomeReceipt, NativeTextRejoinPendingReceipt, NativeTextRejoinPrefixReceipt,
+    NativeTextRejoinReceivedReceipt, NativeTextRejoinWelcomeStatus,
+};
 pub use persistence::v2_member_transport::{
     NativeTextFounderAudit, NativeTextFounderDependencyExchange,
     NativeTextFounderDependencyResponse, NativeTextFounderFrameOutcome, NativeTextFounderReceived,

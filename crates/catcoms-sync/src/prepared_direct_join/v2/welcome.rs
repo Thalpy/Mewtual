@@ -281,6 +281,12 @@ impl<'a> WelcomeAdmission<'a> {
 }
 
 impl PreparedV2JoinRequest {
+    /// Whether this in-memory original crossed its actual Welcome entry.
+    /// This label cannot authorize another SDK call or resolve a cold fence.
+    pub fn welcome_entered_data(&self) -> bool {
+        self.welcome_entered
+    }
+
     /// Fund retention of the original warm private graph before Welcome entry.
     /// A failed or completed entry cannot be relabelled with a different fee.
     pub fn fund_warm_sdk_graph(

@@ -99,6 +99,90 @@ replay bounds remain open. So do the 2,048-record and 256 MiB archive
 ceilings and independent founder replay of an unsaved received original.
 Chat V2 stays disabled.
 
+## Cover the signed initial history for a replacement membership
+
+The retired vault matches the exact closed Welcome with the selected
+replacement Add and covers its signed initial history. A warm retry retains
+the Core preparation if file work refuses after Sync has issued it. A cold
+opener reconstructs the same history from its exact closed Outcome and
+covered delivery. The new record is bound to the five original journals and
+the old terminal membership.
+
+The Windows native test passed warm cover, cold recovery without key
+generation, equal-byte file replacement refusal and preservation of a partial
+history record. The receipt identifies the prepared replacement. Index4
+selection, live source attachment and the renderer command remain open.
+
+## Cover the closed Welcome for a replacement membership
+
+The retired vault verifies the saved delivery and restores its exact
+private Pending under a native PendingSource cut. Before the Welcome
+SDK cut, it covers a separate possible-entry file. The same warm owner
+retains the completed graph for sealing and retry. A cold opener can
+recover the closed Outcome under a fresh UI capture, without preparing
+either key cut. A possible entry without an Outcome stays held. The
+original A1 registration remains terminal.
+
+The Windows native fixture exercised the closed warm Outcome, its
+cold recovery, and an ambiguous retained attempt. The selected Core
+prefix, Index4 installation, native renderer route and physical
+acceptance still need integration.
+
+## Recover a received replacement membership reply
+
+The retired vault can cover the authenticated A2 delivery in a separate
+received-data record. It binds the selected ID9 catalog, the original
+Remove and held Attempt and Pending files to the exact delivery. A fresh
+admitted UI generation can recover that record after restart without
+contacting the founder again or generating keys. An incomplete record
+is preserved. An occupied Received with missing original request files
+prevents a new replacement attempt.
+
+The Windows native fixture passed real TCP, warm same-file retry, cold
+retry without randomness, partial-file refusal and protection of an
+orphaned Received. The A1 row remained terminal. The Welcome attempt
+fence, sealed Outcome, Index4 membership activation and renderer
+command remain open.
+
+## Exchange a saved replacement membership request
+
+A retired vault can reuse its covered replacement Pending over TCP. It
+retains the original Attempt and Pending files on warm and cold paths,
+and checks their identities and contents before starting a new exchange.
+The caller approves a numeric host for the exact invited peer. The
+authenticated response must match the saved request and the original
+Remove before the native caller receives it.
+
+The Windows native test passed an actual first Join, Remove, cold
+reopen and A2 request to the founder. It also refused an equal-byte
+replacement of the Pending file and a previous UI generation. The test
+holds the A1 retirement and checks that it remains selected throughout.
+The delivery is held in memory. Durable delivery, Welcome processing,
+membership installation and the renderer route remain open.
+
+## Save the exact second membership request
+
+A newly opened retired vault covers the selected ID9 catalog again before
+it can admit the replacement device operation. A separate UI generation
+and key source bind the operation to that vault. Its attempt and Pending
+files bind the original Remove, same device signer, stable pin, original
+vault and exact fresh invitation. The Pending keeps the newly generated
+KeyPackage and transport reservation. The existing pin and A1 registration
+stay in place.
+
+A complete journal returns the same request digest and context after a
+restart, including an exact expired retry. It draws no randomness on that
+path. Warm retries require the original file handles and keep the original
+memory reservation. An ambiguous cold attempt or partial Pending is
+preserved. A returned refusal before actual device entry can retry from
+a current UI generation. Errors after entry retain the attempt.
+
+The Windows fixture passed real first membership, selected removal and
+warm and cold rejoin Pending recovery using a new invite. The new native
+backend returns historical receipts. The separate exchange now carries
+these saved bytes over TCP. Welcome and outcome files, Index4 activation,
+the renderer route and real multi-device acceptance are still open.
+
 ## Same-device rejoin proof and cold removal
 
 Cold native recovery verifies the original selected Remove before reporting

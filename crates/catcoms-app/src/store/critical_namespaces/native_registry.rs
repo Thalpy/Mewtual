@@ -80,7 +80,8 @@ pub use operational::{
 };
 pub use operational::{NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob};
 pub use operational::{
-    NativeTextJoinedRecovery, NativeTextJoinedRuntime, NativeTextRemovedJoinedVault,
+    NativeTextJoinedRecovery, NativeTextJoinedRuntime, NativeTextRejoinDelivery,
+    NativeTextRejoinExchange, NativeTextRemovedJoinedVault,
 };
 pub use preparation::{
     NativeRegistryInstallation, NativeRegistryPolicy, NativeRegistryPreparationPolicy,

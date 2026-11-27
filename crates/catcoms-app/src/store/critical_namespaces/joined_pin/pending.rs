@@ -127,7 +127,7 @@ impl JoinedTransportReservation {
         Self::new(seed, port)
     }
 
-    fn new(seed: Zeroizing<[u8; 32]>, port: u16) -> Result<Self, AppError> {
+    pub(in crate::store) fn new(seed: Zeroizing<[u8; 32]>, port: u16) -> Result<Self, AppError> {
         if *seed == [0; 32]
             || port == 0
             || port != crate::store::ServerNet::derived_port_for_seed(&seed)
@@ -135,6 +135,10 @@ impl JoinedTransportReservation {
             return Err(refused());
         }
         Ok(Self { seed, port })
+    }
+
+    pub(in crate::store) fn sealed_record_data(&self) -> (&[u8; 32], u16) {
+        (&self.seed, self.port)
     }
 
     pub(in crate::store) fn identity_data(
@@ -414,6 +418,72 @@ impl RecoveredPinnedPending {
             context: fields.context,
             transport: fields.transport,
         })
+    }
+
+    pub(in crate::store) fn require_rejoin_invite(
+        key: &[u8; 32],
+        layout: CurrentLayoutData,
+        raw: &[u8],
+        context: V2PendingJoinContextData,
+        replacement: &SignedInviteBindingData,
+    ) -> Result<(), AppError> {
+        let fields = Self::open_fields(key, layout, raw)?;
+        let old = fields.accepted.spec_data();
+        let next = replacement.spec_data();
+        if fields.context != context
+            || old.anchor != next.anchor
+            || old.nonce == next.nonce
+            || old.policy != next.policy
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
+    /// Use the original retired Pending only as a donor for the same
+    /// signer. The mounted caller still owns the selected Remove and ID9.
+    pub(in crate::store) fn prepare_rejoin_from_original(
+        key: &[u8; 32],
+        layout: CurrentLayoutData,
+        raw: &[u8],
+        registration: NativeTextJoinedRegistrationData,
+        (invite, token, now_ms): (&SignedInviteBindingData, [u8; 32], u64),
+        removal: catcoms_sync::SelectedRejoinRemoval,
+        limits: DirectJoinLimits,
+        native: NativeV2JoinKeyEntry<'_>,
+    ) -> Result<Result<PreparedV2JoinRequest, catcoms_sync::NativeV2RejoinFailure>, AppError> {
+        let fields = Self::open_fields(key, layout, raw)?;
+        let original = RecoveredV2PendingJoinSource::open(
+            &fields.sealed,
+            key,
+            fields.context,
+            &fields.accepted,
+            limits,
+        )
+        .map_err(|_| refused())?;
+        if fields.context != registration.context
+            || *blake3::hash(original.request_bytes_data()).as_bytes() != registration.request
+            || original.rejoin_remove_data().is_some()
+            || registration.selected.own_admission != removal.1
+            || registration.selected.epoch >= removal.2
+        {
+            return Err(refused());
+        }
+        Ok(fields.sealed.prepare_native_rejoin_classified(
+            key,
+            catcoms_sync::NativeV2RejoinInputs {
+                previous_invite: &fields.accepted,
+                previous_context: fields.context,
+                previous_request: original.request_bytes_data(),
+                previous_signer: registration.signer,
+                previous_remove: removal,
+                invite,
+                token,
+                now_ms,
+                limits,
+            },
+            native,
+        ))
     }
 
     /// The physical caller already holds the original Pending and has
