@@ -739,6 +739,50 @@ fn each_independent_proven_delete_retains_its_own_negative_obligation() {
 }
 
 #[test]
+fn guarded_projection_does_not_expand_dense_revision_roots_twice() {
+    let f = Fixture::new();
+    let mut ledger = f.ledger();
+    let view = ledger.begin_projection_view();
+    let create = f.create(1, "base");
+    f.retain(&mut ledger, &create);
+    ledger
+        .admit_projection(&f.token(&create, &view, None), 320)
+        .unwrap();
+
+    let mut parents = vec![create.id()];
+    for nonce in 2..=14 {
+        let edit = f.action(
+            nonce,
+            Body::Edit {
+                create: create.id(),
+                text: format!("revision {nonce}"),
+            },
+            parents.clone(),
+        );
+        f.retain(&mut ledger, &edit);
+        ledger
+            .admit_projection(&f.token(&edit, &view, None), 320)
+            .unwrap();
+        parents.push(edit.id());
+    }
+    let selected = *parents.last().unwrap();
+    let row = ledger.guarded_projection(create.id(), 320).unwrap();
+    assert!(row
+        .with_publication(|row| matches!(
+            row,
+            GuardedProjection::Visible { selected: head, text, .. }
+                if *head == selected && text == "revision 14"
+        ))
+        .unwrap());
+    let heads = ledger.projectable_causal_heads(create.id(), 320).unwrap();
+    assert!(heads.with_publication(|heads| heads == [selected]).unwrap());
+    assert!(matches!(
+        ledger.guarded_projection(create.id(), 32),
+        Err(ChatError::WorkLimit)
+    ));
+}
+
+#[test]
 fn guarded_edit_preserves_original_creation_timestamp_and_refuses_partial_work() {
     let f = Fixture::new();
     let mut ledger = f.ledger();

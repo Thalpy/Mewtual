@@ -14,7 +14,7 @@ use crate::store::persistence::v2_member_transport::replay_local_member_dependen
 use crate::store::persistence::v2_shared_history::{
     PreparedSharedHistoryRecord, SharedHistoryActionPage, SharedHistoryActionQuery,
     SharedHistoryMessageSelection, SharedHistoryProjectionLease, SharedHistoryReplay,
-    SharedHistoryScope, SHARED_HISTORY_RECORD_FEE,
+    SharedHistoryScope, ARCHIVED_PROJECTION_WORK, SHARED_HISTORY_RECORD_FEE,
 };
 use crate::store::ServerStore;
 use catcoms_net::{
@@ -391,15 +391,30 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         let Some(selected) = selected else {
             return Ok(None);
         };
-        let mut projection = ledger.prepare_message_projection(create)?;
-        projection.archive = Some(Box::new(SharedHistoryProjectionLease {
-            selected,
-            _view: ledger.view,
-            _ledger: ledger.ledger,
-            _invocation: Some(ledger._invocation),
-            _fee: ledger._fee,
-        }));
-        Ok(Some(projection))
+        use V2MemberSaveRefusal as Refusal;
+        if ledger.signal.is_cancelled() {
+            return Err(Refusal::Cancelled);
+        }
+        let payment = ledger
+            ._fee
+            .reserve_more(PROJECTION_FEE)
+            .map_err(|_| Refusal::Busy)?;
+        let projection = ledger
+            .ledger
+            .guarded_projection(create, ARCHIVED_PROJECTION_WORK)
+            .map_err(|_| Refusal::Failed)?;
+        Ok(Some(NativeTextJoinedMemberProjection::from_archive(
+            projection,
+            ledger.signal,
+            payment,
+            Box::new(SharedHistoryProjectionLease {
+                selected,
+                _view: ledger.view,
+                _ledger: ledger.ledger,
+                _invocation: Some(ledger._invocation),
+                _fee: ledger._fee,
+            }),
+        )))
     }
 
     #[cfg(test)]
