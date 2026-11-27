@@ -1525,7 +1525,8 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool) {
     let root = tempfile::tempdir().unwrap();
     let founder_path = root.path().join("founder");
     let (founder, main, founder_queue) = app(founder_path.clone(), None, true);
-    let (member, window, member_queue) = app(root.path().join("member"), None, true);
+    let member_path = root.path().join("member");
+    let (member, window, member_queue) = app(member_path.clone(), None, true);
     unlock_current(&founder, &main, &founder_queue).await;
     unlock_current(&member, &window, &member_queue).await;
     let found = found_request(&main, 1, "Founder group");
@@ -1611,6 +1612,79 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool) {
         work.await;
     }
     refused(send.await.unwrap());
+
+    // Only the authenticated selected A1 Remove explains why this row
+    // cannot be activated. An outcome with its selector removed is still
+    // ambiguous and must not be classified as an eligible retired member.
+    let state = member.state::<AppState>();
+    let close = register_vault_close(&state).await.unwrap();
+    sources::close_server_rows(&state, &SystemClock)
+        .await
+        .unwrap();
+    drop((close, state));
+    drop((window, member));
+    let removed_response = |path: std::path::PathBuf| async move {
+        let (app, main, queue) = app(path, None, true);
+        let state = app.state::<AppState>();
+        let generation = state
+            .ui_session_generation
+            .load(Ordering::SeqCst)
+            .to_string();
+        let reply = invoke(&main, &generation, SECRET);
+        run(&queue).await;
+        let tauri::ipc::InvokeResponse::Err(error) = reply.await.unwrap() else {
+            panic!("a closed original Admission must not acquire a native row");
+        };
+        assert!(state.store.lock().await.is_none());
+        error.0
+    };
+    assert_eq!(
+        removed_response(member_path.clone()).await,
+        serde_json::json!("This device was removed from this Chat V2 server."),
+    );
+    let wait_for_original_vault = || async {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                match catcoms_storage::vault::acquire_vault_session(&member_path) {
+                    Ok(session) => return drop(session),
+                    Err(catcoms_storage::StorageError::VaultBusy) => {
+                        SystemClock.sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(error) => panic!("original vault session: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("the previous native TCP owner released the vault");
+    };
+    wait_for_original_vault().await;
+    let selector = std::fs::read_dir(&member_path)
+        .unwrap()
+        .find_map(|entry| {
+            let entry = entry.unwrap();
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| {
+                    name.starts_with("chat-critical-namespaces.joined-member-selected.")
+                        && name.ends_with(".2.bin")
+                })
+                .then(|| entry.path())
+        })
+        .expect("the covered A1 removal has an original selector");
+    let parked = selector.with_extension("held-for-test");
+    std::fs::rename(&selector, &parked).unwrap();
+    assert_eq!(
+        removed_response(member_path.clone()).await,
+        serde_json::json!("Could not unlock the existing Chat V2 vault."),
+    );
+    assert!(parked.is_file() && !selector.exists());
+    std::fs::rename(parked, &selector).unwrap();
+    wait_for_original_vault().await;
+    assert_eq!(
+        removed_response(member_path.clone()).await,
+        serde_json::json!("This device was removed from this Chat V2 server."),
+    );
 
     // The selected Remove is already on disk. A different application
     // instance must use the original founder identity to mint its next invite.

@@ -284,6 +284,33 @@ fn shared_history_declaration_only_adds_eight_and_predecessor_refuses() {
 }
 
 #[test]
+fn same_vault_rejoin_catalog_adds_only_its_critical_capability() {
+    use crate::store::critical_namespaces::{
+        rejoin_namespace as rejoin, shared_history_namespace as history,
+    };
+    let (joined, _) = joined_catalog();
+    assert!(rejoin::prepare_declaration(&joined, &VAULT).is_err());
+    let prior = history::prepare_declaration(&joined, &VAULT).unwrap();
+    let successor = rejoin::prepare_declaration(&prior, &VAULT).unwrap();
+    rejoin::verify_declaration(&prior, &successor, &VAULT).unwrap();
+    // Existing reader still accepts its own original and refuses the new
+    // capability before the same joined rows can be activated.
+    grammar::parse_shared_history_native_registry_layout(&prior, &VAULT, true).unwrap();
+    assert!(
+        grammar::parse_shared_history_native_registry_layout(&successor, &VAULT, true).is_err()
+    );
+    assert!(rejoin::verify_declaration(&joined, &successor, &VAULT).is_err());
+    assert!(rejoin::prepare_declaration(&successor, &VAULT).is_err());
+    assert!(rejoin::verify_declaration(&prior, &successor, &[0xef; 32]).is_err());
+    let parsed = outer::parse(&successor, &VAULT, outer::MAX_ENVELOPE_PLAIN).unwrap();
+    let mut changed = parsed.entry(parsed.count - 1).unwrap().payload.to_vec();
+    *changed.last_mut().unwrap() ^= 1;
+    let malformed =
+        catalog_declaration::insert_entry_data(&prior, &VAULT, rejoin::ID, 1, &changed).unwrap();
+    assert!(rejoin::verify_declaration(&prior, &malformed, &VAULT).is_err());
+}
+
+#[test]
 fn shared_history_seed_retains_exact_catalogs_marker_and_pin_index() {
     use crate::store::critical_namespaces::{
         joined_pin::declaration as joined, shared_history_namespace::declaration as history,

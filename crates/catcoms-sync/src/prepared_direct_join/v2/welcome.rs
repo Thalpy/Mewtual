@@ -197,13 +197,17 @@ impl<'a> WelcomeAdmission<'a> {
         proof: &'a V2GoverningJoinPrefixData<'_>,
         anchor: &GenesisAnchorBindingData,
         signed: &SignedWelcomeBindingData,
+        removed: Option<SelectedRejoinRemoval>,
     ) -> Result<Self, SyncError> {
         let labels = signed.spec_data();
-        let replay = proof.verify_selected_add(
-            anchor,
+        let selected = (
             OwnerHeaderId::from_bytes(labels.add_header),
             OwnerFactId::from_bytes(labels.admission),
-        )?;
+        );
+        let replay = match removed {
+            Some(old) => proof.verify_rejoin_ancestry(anchor, selected, old)?,
+            None => proof.verify_selected_add(anchor, selected.0, selected.1)?,
+        };
         let (last, body) = proof.last_admission()?;
         Ok(Self {
             profile: proof.profile_data(),
@@ -217,13 +221,18 @@ impl<'a> WelcomeAdmission<'a> {
     pub(super) fn for_delivery(
         delivery: &'a V2JoinDeliveryData<'_>,
         anchor: &GenesisAnchorBindingData,
+        removed: Option<SelectedRejoinRemoval>,
     ) -> Result<Self, SyncError> {
         match delivery {
-            V2JoinDeliveryData::First(frame) => Self::first(frame.data().1, anchor),
+            V2JoinDeliveryData::First(frame) if removed.is_none() => {
+                Self::first(frame.data().1, anchor)
+            }
+            V2JoinDeliveryData::First(_) => Err(SyncError::JoinRejected),
             V2JoinDeliveryData::Later(frame) => Self::later(
                 frame.governing_proof_data().0,
                 anchor,
                 frame.response_data().binding,
+                removed,
             ),
         }
     }
@@ -294,6 +303,10 @@ impl PreparedV2JoinRequest {
         response: V2JoinResponseData<'_>,
         prefix: &V2GeneralPrefixVerifier,
     ) -> Result<&CompletedV2JoinCandidate, SyncError> {
+        // The generic verified view has no evidence of the prior Remove.
+        if self.rejoin_remove.is_some() {
+            return Err(SyncError::JoinRejected);
+        }
         let reject = |_| SyncError::JoinRejected;
         let request_bytes = self.request.clone();
         let packet = V2JoinRequestPacketData::decode(&request_bytes)?;
@@ -355,8 +368,12 @@ impl PreparedV2JoinRequest {
             .ok_or(SyncError::Malformed)?;
         let request_bytes = self.request.clone();
         let packet = V2JoinRequestPacketData::decode(&request_bytes)?;
-        let admission =
-            WelcomeAdmission::later(proof, &packet.invite.spec_data().anchor, response.binding)?;
+        let admission = WelcomeAdmission::later(
+            proof,
+            &packet.invite.spec_data().anchor,
+            response.binding,
+            self.rejoin_remove,
+        )?;
         self.finish_verified_welcome(
             &packet,
             response,
@@ -384,6 +401,9 @@ impl PreparedV2JoinRequest {
         proof: &V2FirstAddProofData<'_>,
         authority: WelcomeAuthority<'_>,
     ) -> Result<&CompletedV2JoinCandidate, SyncError> {
+        if self.rejoin_remove.is_some() {
+            return Err(SyncError::JoinRejected);
+        }
         let cap = self
             .limits
             .exchange
@@ -399,13 +419,16 @@ impl PreparedV2JoinRequest {
     /// consuming the original Welcome attempt. The mounted owner can cover its
     /// exact possible-entry record after this check and before calling finish.
     pub fn validate_first_join_delivery_data(&self, bytes: &[u8]) -> Result<(), SyncError> {
+        if self.rejoin_remove.is_some() {
+            return Err(SyncError::JoinRejected);
+        }
         validate_delivery_data(&self.request, self.limits, bytes)
     }
 
     /// Authenticate a complete first or later delivery before the host covers
     /// this exact possible Welcome entry.
     pub fn validate_pinned_join_delivery_data(&self, bytes: &[u8]) -> Result<(), SyncError> {
-        validate_pinned_delivery_data(&self.request, self.limits, bytes)
+        validate_pinned_delivery_data(&self.request, self.limits, bytes, self.rejoin_remove)
     }
 
     /// Enter the exact covered Welcome on the original request using the
@@ -422,8 +445,11 @@ impl PreparedV2JoinRequest {
         let delivery = V2JoinDeliveryData::decode(bytes)?;
         let request_bytes = self.request.clone();
         let packet = V2JoinRequestPacketData::decode(&request_bytes)?;
-        let admission =
-            WelcomeAdmission::for_delivery(&delivery, &packet.invite.spec_data().anchor)?;
+        let admission = WelcomeAdmission::for_delivery(
+            &delivery,
+            &packet.invite.spec_data().anchor,
+            self.rejoin_remove,
+        )?;
         self.finish_verified_welcome(
             &packet,
             delivery.response_data(),
@@ -629,17 +655,15 @@ pub(super) fn validate_pinned_delivery_data(
     request: &[u8],
     limits: DirectJoinLimits,
     bytes: &[u8],
+    removed: Option<SelectedRejoinRemoval>,
 ) -> Result<(), SyncError> {
     if bytes.len() > limits.exchange {
         return Err(SyncError::Malformed);
     }
     let delivery = V2JoinDeliveryData::decode(bytes)?;
     let packet = V2JoinRequestPacketData::decode(request)?;
-    WelcomeAdmission::for_delivery(&delivery, &packet.invite.spec_data().anchor)?.validate(
-        &packet,
-        delivery.response_data(),
-        limits.exchange,
-    )?;
+    WelcomeAdmission::for_delivery(&delivery, &packet.invite.spec_data().anchor, removed)?
+        .validate(&packet, delivery.response_data(), limits.exchange)?;
     Ok(())
 }
 

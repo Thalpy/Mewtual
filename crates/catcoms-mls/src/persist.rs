@@ -38,7 +38,10 @@ pub use text_current::{
 mod provider_restore;
 pub use provider_restore::restore_server_provider_bounded;
 mod join_device;
-pub use join_device::{restore_join_device_provider_bounded, snapshot_join_device_bounded};
+pub use join_device::{
+    restore_join_device_provider_bounded, restore_join_signer_only_bounded,
+    snapshot_join_device_bounded,
+};
 mod snapshot_compare;
 pub use snapshot_compare::compare_server_snapshot_bounded;
 

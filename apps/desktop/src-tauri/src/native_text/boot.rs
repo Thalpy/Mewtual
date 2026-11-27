@@ -179,7 +179,12 @@ impl Bootstrap {
                                         &source_policy,
                                         &negative,
                                     )
-                                    .map_err(|_| EXISTING)?;
+                                    .map_err(|error| match error {
+                                        catcoms_app::AppError::ChatV2MembershipRemoved => {
+                                            "This device was removed from this Chat V2 server."
+                                        }
+                                        _ => EXISTING,
+                                    })?;
                                 super::sources::ReadyBundle::recovered(
                                     vault,
                                     sources,

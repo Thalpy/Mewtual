@@ -168,7 +168,8 @@ fn put_joined(output: &mut Encoder, value: &JoinedBinding) -> Result<(), AppErro
 
 impl Index {
     pub(super) fn encoded_length(&self) -> Result<usize, AppError> {
-        self.lengths_data().map(|(encoded, _)| encoded)
+        self.validate_data()?;
+        self.lengths_validated_data().map(|(encoded, _)| encoded)
     }
 
     /// Required final footprint, not just today's bytes. Birth/metadata
@@ -177,11 +178,17 @@ impl Index {
     /// from stranding a previously admitted activation or retirement.
     #[cfg(test)]
     pub(super) fn reserved_length_data(&self) -> Result<usize, AppError> {
-        self.lengths_data().map(|(_, reserved)| reserved)
+        self.validate_data()?;
+        self.lengths_validated_data().map(|(_, reserved)| reserved)
     }
 
-    fn lengths_data(&self) -> Result<(usize, usize), AppError> {
-        self.validate_data()?;
+    #[cfg(test)]
+    pub(super) fn rejoin_encoded_length(&self) -> Result<usize, AppError> {
+        self.validate_data_in(true)?;
+        self.lengths_validated_data().map(|(encoded, _)| encoded)
+    }
+
+    fn lengths_validated_data(&self) -> Result<(usize, usize), AppError> {
         let mut length = HEADER_BYTES + self.parent.map_or(0, |_| 36);
         // G1 has no parent yet; its first successor necessarily has one.
         let mut reserved = HEADER_BYTES + 36;

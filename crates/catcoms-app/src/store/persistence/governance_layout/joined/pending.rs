@@ -866,13 +866,16 @@ impl ServerStore {
         let mut slot = self.joined_pin_index.try_lock().map_err(|_| denied())?;
         let selected = slot.as_mut().ok_or_else(denied)?;
         selected.require(self)?;
-        selected
+        let removed = selected
             .pending
             .as_mut()
             .and_then(|pending| pending.welcome.as_mut())
             .ok_or_else(denied)?
             .recover_member_adds(self, context, node)?;
         selected.require(self)?;
+        if removed.is_some() {
+            return Err(AppError::ChatV2MembershipRemoved);
+        }
         Ok(())
     }
 }

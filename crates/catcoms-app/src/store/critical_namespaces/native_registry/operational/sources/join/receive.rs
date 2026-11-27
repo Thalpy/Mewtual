@@ -377,16 +377,17 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         caller: RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Option<NativeTextJoinedMemberProjection>, V2MemberSaveRefusal> {
-        let (ledger, selected) = self.prepare_member_ledger_with(
-            selection,
-            channel,
-            caller.clone(),
-            |_| Ok(Some(())),
-            |source, ledger, view, ()| {
-                source.replay_archived_message(ledger, view, create, &caller, rng)
-            },
-        )?
-        .ok_or(V2MemberSaveRefusal::Unavailable)?;
+        let (ledger, selected) = self
+            .prepare_member_ledger_with(
+                selection,
+                channel,
+                caller.clone(),
+                |_| Ok(Some(())),
+                |source, ledger, view, ()| {
+                    source.replay_archived_message(ledger, view, create, &caller, rng)
+                },
+            )?
+            .ok_or(V2MemberSaveRefusal::Unavailable)?;
         let Some(selected) = selected else {
             return Ok(None);
         };

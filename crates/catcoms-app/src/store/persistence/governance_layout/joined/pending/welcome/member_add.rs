@@ -296,11 +296,12 @@ impl MemberAdds {
         welcome: &[u8],
         core: &mut PreparedV2JoinedPrefix,
         node: &mut ClosedV2JoinedNode<T, R>,
-    ) -> Result<(), AppError> {
+    ) -> Result<Option<(OwnerHeaderId, u64)>, AppError> {
         self.require_current()?;
         store.validate_mounted_governance_layout()?;
         let key = Zeroizing::new(store.keys.db_key()?);
         let mut missing = false;
+        let mut removed = None;
         let (_, _, epoch) = node.selected_join_data()?;
         for expected_epoch in epoch.checked_add(1).ok_or_else(denied)?..=MAX_EPOCH {
             let path = path(store, context, expected_epoch)?;
@@ -370,7 +371,13 @@ impl MemberAdds {
             let fetch = node.member_add_request_data(core)?;
             store.validate_mounted_governance_layout()?;
             let retired = install_transition(core, node, &mut candidate, selected)?;
-            self.evicted = retired.terminal_data().is_some();
+            removed = retired.terminal_data();
+            self.evicted = removed.is_some();
+            // A merely present outcome can be historical recovery material,
+            // but cannot prove a selected terminal Admission for rejoin.
+            if self.evicted && selection.is_none() {
+                return Err(denied());
+            }
             self.covered.push(Covered {
                 path,
                 file,
@@ -381,7 +388,17 @@ impl MemberAdds {
             });
             drop(retired);
         }
-        self.require_current()
+        if let Some(terminal) = removed {
+            if self.pending.is_some() || self.first.is_some() || self.fork.is_some() {
+                return Err(denied());
+            }
+            self.require_original()?;
+            store.validate_mounted_governance_layout()?;
+            self.require_original()?;
+            return Ok(Some(terminal));
+        }
+        self.require_current()?;
+        Ok(None)
     }
 }
 

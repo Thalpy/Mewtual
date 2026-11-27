@@ -7,6 +7,125 @@ async fn v2_join_request_and_welcome_complete_with_actual_add() {
     complete_original_welcome(false).await;
 }
 
+#[test]
+fn native_rejoin_request_uses_only_the_original_signer_and_a_fresh_package() {
+    use crate::{
+        DirectJoinLimits, NativeV2JoinKeyEntry, PreparedV2JoinRequest,
+        RecoveredV2PendingJoinSource, SealedV2PendingJoinSource, V2JoinRequestPacketData,
+    };
+    use rand_core::SeedableRng;
+    let (node, _reservation, _opened, _fee) = prepared_node(0x5e31);
+    let mut origin = Some(node);
+    let mut governed = None;
+    UnboundV2GenesisNode::prepare_governance_into_data(&mut origin, &mut governed).unwrap();
+    let node = governed.take().unwrap();
+    let a1_invite = Request::new(&node, 75).invite;
+    let a2_invite = Request::new(&node, 78).invite;
+    let limits = DirectJoinLimits::new(RAW, RAW, 256 * 1024).unwrap();
+    let mut a1 = PreparedV2JoinRequest::prepare(
+        MlsDevice::generate().unwrap(),
+        &a1_invite.spec_data().anchor,
+        &a1_invite,
+        [76; 32],
+        NOW,
+        limits,
+    )
+    .unwrap();
+    let a1_wire = a1.request_bytes_data().to_vec();
+    let a1_packet = V2JoinRequestPacketData::decode(&a1_wire).unwrap();
+    let a1_request = a1_packet.founder_add_data().request.spec_data();
+    let context = crate::V2PendingJoinContextData {
+        vault: [101; 32],
+        root: [102; 32],
+        original_pending: [103; 32],
+        pin: [104; 32],
+    };
+    let vault_key = [105; 32];
+    let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(106);
+    let sealed = a1
+        .seal_pending_source(&vault_key, context, &mut rng)
+        .unwrap();
+    let (nonce, ciphertext) = sealed.encrypted_parts();
+    let saved = SealedV2PendingJoinSource::from_encrypted_parts(*nonce, ciphertext).unwrap();
+    let previous_remove = (
+        OwnerHeaderId::from_bytes([79; 32]),
+        OwnerFactId::from_bytes([80; 32]),
+        2,
+    );
+    let input = |invite, token| crate::NativeV2RejoinInputs {
+        previous_invite: &a1_invite,
+        previous_context: context,
+        previous_request: &a1_wire,
+        previous_signer: a1_request.joiner,
+        previous_remove,
+        invite,
+        token,
+        now_ms: NOW,
+        limits,
+    };
+    let native = Native::new();
+    let original = native.source.observe();
+    let mut cut = native.cut(NativeChatKeyPurpose::JoinerDevice);
+    let mut ends = catcoms_rt::NativeChatKeyEnds::new();
+    assert!(saved
+        .prepare_native_rejoin(
+            &vault_key,
+            input(&a1_invite, [79; 32]),
+            NativeV2JoinKeyEntry::new(&original, &mut cut, &mut ends),
+        )
+        .is_err());
+    assert!(saved
+        .prepare_native_rejoin(
+            &vault_key,
+            input(&a2_invite, [76; 32]),
+            NativeV2JoinKeyEntry::new(&original, &mut cut, &mut ends),
+        )
+        .is_err());
+    let mut a2 = saved
+        .prepare_native_rejoin(
+            &vault_key,
+            input(&a2_invite, [79; 32]),
+            NativeV2JoinKeyEntry::new(&original, &mut cut, &mut ends),
+        )
+        .unwrap();
+    a2.validate_retained_package_data().unwrap();
+    let a2_packet = V2JoinRequestPacketData::decode(a2.request_bytes_data()).unwrap();
+    let a2_request = a2_packet.founder_add_data().request.spec_data();
+    assert_eq!(a2_request.joiner, a1_request.joiner);
+    assert_ne!(
+        a2_request.key_package_reference,
+        a1_request.key_package_reference
+    );
+    assert_ne!(a2_request.request_token, a1_request.request_token);
+    assert_eq!(saved.encrypted_parts().1, ciphertext);
+
+    let a2_context = crate::V2PendingJoinContextData {
+        original_pending: [107; 32],
+        ..context
+    };
+    assert_eq!(a2.rejoin_remove_data(), Some(previous_remove));
+    let sealed_rejoin = a2
+        .seal_pending_source(&vault_key, a2_context, &mut rng)
+        .unwrap();
+    assert!(RecoveredV2PendingJoinSource::open(
+        sealed_rejoin,
+        &vault_key,
+        context,
+        &a2_invite,
+        limits,
+    )
+    .is_err());
+    let restarted = RecoveredV2PendingJoinSource::open(
+        sealed_rejoin,
+        &vault_key,
+        a2_context,
+        &a2_invite,
+        limits,
+    )
+    .unwrap();
+    assert_eq!(restarted.rejoin_remove_data(), Some(previous_remove));
+}
+
 #[tokio::test]
 async fn native_joiner_welcome_requires_the_original_device_source_and_sdk_cut() {
     complete_original_welcome(true).await;
@@ -823,6 +942,11 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     assert_eq!(node.raw_removal_signature_data(), Some(&raw));
     let header = node.materialize_signed_removal_data().unwrap().clone();
     let removal = node.removal_outcome_data().unwrap();
+    let selected_remove_record = (
+        header.clone(),
+        removal.unsigned.body_data().clone(),
+        removal.unsigned.image_data().to_vec(),
+    );
     let old = recovered.selected_join_data().unwrap();
     let old_publication = recovered
         .observe_member_publication(foreign_prefix)
@@ -1148,6 +1272,45 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     restored.materialize_recovered_welcome_data().unwrap();
     let (header, response) = restored.recovered_join_response_data().unwrap();
     assert_eq!(header.spec().parent, fingerprint.header);
+    let outcome = restored.recovered_add_outcome_data().unwrap();
+    let selected_rejoin_admission = outcome.admission_data().admission_id();
+    let with_ancestor = V2GoverningJoinPrefixData::encode(
+        first,
+        &[
+            V2GoverningJoinStepData {
+                header: &retained_later.0,
+                body: ReplayBody::Admission(&retained_later.1),
+                image: &retained_later.2,
+            },
+            V2GoverningJoinStepData {
+                header: &selected_remove_record.0,
+                body: ReplayBody::Removal(&selected_remove_record.1),
+                image: &selected_remove_record.2,
+            },
+            V2GoverningJoinStepData {
+                header,
+                body: ReplayBody::Admission(outcome.admission_data()),
+                image: outcome.unsigned_data().image_data(),
+            },
+        ],
+    )
+    .unwrap();
+    let with_ancestor = V2GoverningJoinPrefixData::decode(&with_ancestor).unwrap();
+    let accepted = &next_invite.invite.spec_data().anchor;
+    let new_admission = (header.id(), selected_rejoin_admission);
+    let old_remove = (fingerprint.header, removed_id, fingerprint.epoch);
+    assert!(with_ancestor
+        .verify_rejoin_ancestry(accepted, new_admission, old_remove)
+        .is_ok());
+    for unrelated in [
+        (retained_later.0.id(), removed_id, fingerprint.epoch),
+        (fingerprint.header, old.1, fingerprint.epoch),
+        (fingerprint.header, removed_id, fingerprint.epoch - 1),
+    ] {
+        assert!(with_ancestor
+            .verify_rejoin_ancestry(accepted, new_admission, unrelated)
+            .is_err());
+    }
     assert_eq!(
         response.binding.spec_data().add_header,
         *header.id().as_bytes()

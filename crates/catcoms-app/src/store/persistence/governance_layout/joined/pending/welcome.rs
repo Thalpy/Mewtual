@@ -496,15 +496,20 @@ impl RecoveredWelcome {
         store: &ServerStore,
         context: V2PendingJoinContextData,
         node: &mut catcoms_sync::ClosedV2JoinedNode<T, R>,
-    ) -> Result<(), AppError> {
+    ) -> Result<Option<(OwnerHeaderId, u64)>, AppError> {
         self.require(store)?;
         let outcome = self.outcome.as_mut().ok_or_else(denied)?;
         let selected = Arc::get_mut(&mut outcome.selection).ok_or_else(denied)?;
         selected.initial.ok_or_else(denied)?;
-        outcome
-            .member_adds
-            .recover(store, context, &outcome.file.1, &mut selected.core, node)?;
-        self.require(store)
+        let removed = outcome.member_adds.recover(
+            store,
+            context,
+            &outcome.file.1,
+            &mut selected.core,
+            node,
+        )?;
+        self.require(store)?;
+        Ok(removed)
     }
 
     pub(super) fn cover_member_add<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore>(

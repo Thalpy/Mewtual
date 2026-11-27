@@ -259,15 +259,19 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextJoinedRuntime<T, R> {
         if self.storage.pending.is_some() || negative.is_cancelled() {
             return Err(refused());
         }
-        self.storage
+        let attached = self
+            .storage
             .index
-            .attach_recovered_joined_node(&mut self.inputs, &mut self.node)?;
+            .attach_recovered_joined_node(&mut self.inputs, &mut self.node);
+        let removed = matches!(&attached, Err(AppError::ChatV2MembershipRemoved));
+        if !removed {
+            attached?;
+        }
         let node = self
             .node
             .as_ref()
             .filter(|node| node.was_recovered_data())
             .ok_or_else(refused)?;
-        let (head, own, epoch) = node.selected_join_data().map_err(|_| refused())?;
         if self.storage.recovered_tcp.is_some() {
             let receipt = self
                 .storage
@@ -286,7 +290,10 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextJoinedRuntime<T, R> {
         {
             return Err(refused());
         }
-        Ok((head, own, epoch))
+        if removed {
+            return Err(AppError::ChatV2MembershipRemoved);
+        }
+        node.selected_join_data().map_err(|_| refused())
     }
 
     /// Receive, cover, and pair the original Welcome. The returned data is
