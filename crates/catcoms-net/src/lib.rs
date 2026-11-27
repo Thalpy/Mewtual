@@ -134,7 +134,7 @@ mod native_chat_member_dependencies;
 pub use native_chat_member_dependencies::{
     NativeChatMemberDependencies, NativeChatMemberDependencyExchange,
     NativeChatMemberDependencyIncoming, NativeChatMemberDependencyObservation,
-    NativeChatMemberDependencyRequests,
+    NativeChatMemberDependencyRequests, NativeChatMemberInventoryExchange,
 };
 mod publication;
 
@@ -5880,6 +5880,7 @@ pub struct MeshService {
     native_chat_dependencies: Option<NativeChatJoinIngress>,
     native_chat_governing: Option<NativeChatJoinIngress>,
     native_chat_dependency_outbound: Option<Arc<Semaphore>>,
+    native_chat_inventory_outbound: Option<Arc<Semaphore>>,
     native_member_gossip_slot: Option<Arc<Semaphore>>,
     #[cfg(test)]
     test_event_tx: mpsc::Sender<TransportEvent>,
@@ -6054,6 +6055,7 @@ impl MeshService {
             .as_ref()
             .map(|slot| NativeChatJoinIngress(Arc::downgrade(slot)));
         let native_chat_dependency_outbound = native.as_ref().map(|_| Arc::new(Semaphore::new(1)));
+        let native_chat_inventory_outbound = native.as_ref().map(|_| Arc::new(Semaphore::new(1)));
         let native_member_gossip_slot = native.as_ref().map(|_| Arc::new(Semaphore::new(1)));
         #[cfg(test)]
         let test_event_tx = event_tx.clone();
@@ -6172,6 +6174,7 @@ impl MeshService {
             native_chat_dependencies,
             native_chat_governing,
             native_chat_dependency_outbound,
+            native_chat_inventory_outbound,
             native_member_gossip_slot,
             #[cfg(test)]
             test_event_tx,
@@ -6213,6 +6216,7 @@ impl MeshService {
             commands: self.cmd_tx.downgrade(),
             connections: Arc::downgrade(&self.connection_leases),
             outbound: Arc::downgrade(self.native_chat_dependency_outbound.as_ref()?),
+            inventory_outbound: Arc::downgrade(self.native_chat_inventory_outbound.as_ref()?),
             local: self.local,
         })
     }
