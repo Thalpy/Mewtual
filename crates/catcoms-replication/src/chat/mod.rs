@@ -47,9 +47,10 @@ pub use projection_admission::{
     V2GeneralPrefixVerifier, V2GeneralRetiredData, V2HostSelectionExpectation,
     V2KnownGoverningParent, V2LiveMemberObservation, V2LocalArchiveOriginal, V2OrdinaryDependency,
     V2OrdinaryKeyCall, V2OrdinaryReceiveStatus, V2OrdinarySigningGuard, V2OrdinarySigningPlan,
-    V2OriginNegative, V2PreparedSelectedHistoryData, V2ProjectionOrigin, V2RetiredAppendData,
-    V2SelectedHistoryHashData, V2SelectedHistoryNodeData, V2SelectedHistoryTipData,
-    V2SelectedParentProof, V2VerifiedAppendCandidate, MAX_SELECTED_HISTORY_PROOF_HASHES,
+    V2OriginNegative, V2PreparedSelectedHistoryData, V2ProjectionOrigin, V2RemovedCreateEvidence,
+    V2RemovedCreateRecord, V2RetiredAppendData, V2SelectedHistoryHashData,
+    V2SelectedHistoryNodeData, V2SelectedHistoryTipData, V2SelectedParentProof,
+    V2VerifiedAppendCandidate, MAX_REMOVED_CREATE_RECORD_BYTES, MAX_SELECTED_HISTORY_PROOF_HASHES,
 };
 pub use storage::{ChatSnapshot, Page, PageCursor, MAX_PAGE_BYTES, MAX_PAGE_RECORDS};
 

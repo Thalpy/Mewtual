@@ -1822,3 +1822,231 @@ fn actual_concurrent_ordinary_forks_merge_additively_without_governing_conflict_
     assert!(f.verifier.fork_close_completion_mut().is_none());
     assert_eq!(f.owner.calls.get(), owner_calls);
 }
+
+#[test]
+fn removed_create_evidence_names_the_selected_remove_and_keeps_signature_bytes() {
+    use crate::chat::cold_actions::OriginalActionDigest;
+    let mut f = Fixture::new();
+    let key = DeviceKeypair::from_seed(&[109; 32]);
+    let first = f.add(&key, 20);
+    let old = create(&key, &first, 1);
+    let mut removed = f.remove(&first);
+    assert!(removed.take_close_completion().unwrap().try_complete());
+    let frozen = removed.take_frozen_data().unwrap();
+    drop(removed);
+    let selected = f.verifier.replay_data();
+    let (ledger, view) = f.ledger();
+    let original = old.encode();
+    let proof = f
+        .verifier
+        .verify_removed_create_for_review(&original, &frozen, &ledger, &view, &[])
+        .unwrap();
+    assert_eq!(
+        proof.removal_data(),
+        (selected.header().id(), selected.mls_epoch_data())
+    );
+    assert_ne!(proof.removal_data().0, frozen.cut.tip_header);
+    assert_eq!(
+        proof.target_data().spec().context.admission,
+        first.admission_data().admission_id()
+    );
+    assert_eq!(proof.target_data().spec().action, old.id());
+    assert_eq!(
+        proof.original_digest_data(),
+        OriginalActionDigest::for_original_bytes(&original)
+    );
+    assert!(ledger.action(old.id()).is_none());
+    assert!(f.verifier.require_current_removed_create(&proof).is_ok());
+    let frame = proof.encode_record_data(&original).unwrap();
+    let record = V2RemovedCreateRecord::decode(&frame).unwrap();
+    assert_eq!(record.original_bytes_data(), original);
+    assert_eq!(record.target_data(), proof.target_data());
+    assert_eq!(record.removal_data(), proof.removal_data());
+    assert!(record.require_evidence(&proof).is_ok());
+    for end in 0..frame.len() {
+        assert!(V2RemovedCreateRecord::decode(&frame[..end]).is_err());
+    }
+    let mut trailing = frame.to_vec();
+    trailing.push(0);
+    assert!(V2RemovedCreateRecord::decode(&trailing).is_err());
+    let oversize = vec![0; MAX_REMOVED_CREATE_RECORD_BYTES + 1];
+    assert!(matches!(
+        V2RemovedCreateRecord::decode(&oversize),
+        Err(ChatError::Bound)
+    ));
+    let mut changed_remove = frame.to_vec();
+    let mut fields = catcoms_wire::Decoder::new(&frame);
+    for _ in 0..3 {
+        fields.get_bytes().unwrap();
+    }
+    let epoch_at = frame.len() - fields.remaining();
+    changed_remove[epoch_at + 7] ^= 1;
+    let foreign = V2RemovedCreateRecord::decode(&changed_remove).unwrap();
+    assert!(matches!(
+        foreign.require_evidence(&proof),
+        Err(ChatError::Scope)
+    ));
+
+    let mut corrupt = original.clone();
+    *corrupt.last_mut().unwrap() ^= 1;
+    assert!(proof.encode_record_data(&corrupt).is_err());
+    let mut corrupt_frame = frame.to_vec();
+    *corrupt_frame.last_mut().unwrap() ^= 1;
+    assert!(V2RemovedCreateRecord::decode(&corrupt_frame).is_err());
+    fields.get_u64().unwrap();
+    let digest_at = frame.len() - fields.remaining() + 4;
+    corrupt_frame[digest_at..digest_at + 32]
+        .copy_from_slice(OriginalActionDigest::for_original_bytes(&corrupt).as_bytes());
+    assert!(matches!(
+        V2RemovedCreateRecord::decode(&corrupt_frame),
+        Err(ChatError::Signature)
+    ));
+    assert!(matches!(
+        f.verifier
+            .verify_removed_create_for_review(&corrupt, &frozen, &ledger, &view, &[]),
+        Err(ChatError::Signature)
+    ));
+    let other = Fixture::new();
+    let (other_ledger, other_view) = other.ledger();
+    assert!(matches!(
+        other.verifier.verify_removed_create_for_review(
+            &original,
+            &frozen,
+            &other_ledger,
+            &other_view,
+            &[]
+        ),
+        Err(ChatError::Scope)
+    ));
+
+    let replacement = f.add(&key, 21);
+    let changed = create(&key, &replacement, 2).encode();
+    assert!(f.verifier.require_current_removed_create(&proof).is_err());
+    let (ledger, view) = f.ledger();
+    assert!(matches!(
+        f.verifier
+            .verify_removed_create_for_review(&changed, &frozen, &ledger, &view, &[]),
+        Err(ChatError::Authority)
+    ));
+    let fresh = f
+        .verifier
+        .verify_removed_create_for_review(&original, &frozen, &ledger, &view, &[])
+        .unwrap();
+    assert_eq!(fresh.case_data(), proof.case_data());
+    assert_eq!(fresh.removal_data(), proof.removal_data());
+}
+
+#[test]
+fn removed_reply_requires_verified_dependencies_and_never_admits_a_delete() {
+    let mut f = Fixture::new();
+    let key = DeviceKeypair::from_seed(&[109; 32]);
+    let other = DeviceKeypair::from_seed(&[110; 32]);
+    let first = f.add(&key, 20);
+    let parent_author = f.add(&other, 22);
+    let parent = create(&other, &parent_author, 1);
+    let reply = action(
+        &key,
+        &first,
+        2,
+        Body::Create {
+            text: "A withheld reply".into(),
+            reply_to: Some(parent.id()),
+        },
+        vec![parent.id()],
+    );
+    let delete = action(
+        &key,
+        &first,
+        3,
+        Body::Delete {
+            create: parent.id(),
+        },
+        vec![parent.id()],
+    );
+    let mut removed = f.remove(&first);
+    assert!(removed.take_close_completion().unwrap().try_complete());
+    let frozen = removed.take_frozen_data().unwrap();
+    drop(removed);
+    let (mut ledger, view) = f.ledger();
+    let original = reply.encode();
+    let mut forged = original.clone();
+    *forged.last_mut().unwrap() ^= 1;
+    assert!(matches!(
+        f.verifier
+            .verify_removed_create_for_review(&forged, &frozen, &ledger, &view, &[]),
+        Err(ChatError::Signature)
+    ));
+    let waiting = f
+        .verifier
+        .verify_removed_create_for_review(&original, &frozen, &ledger, &view, &[])
+        .unwrap();
+    assert_eq!(waiting.waiting_for_reply_parent_data(), Some(parent.id()));
+    ledger.import(parent.clone()).unwrap();
+    let unverified = f
+        .verifier
+        .verify_removed_create_for_review(&original, &frozen, &ledger, &view, &[])
+        .unwrap();
+    assert_eq!(unverified.case_data(), waiting.case_data());
+    assert_eq!(
+        unverified.waiting_for_reply_parent_data(),
+        Some(parent.id())
+    );
+    retain(&f, &mut ledger, &parent, &parent_author, &[]);
+    let ready = f
+        .verifier
+        .verify_removed_create_for_review(&original, &frozen, &ledger, &view, &[])
+        .unwrap();
+    assert_eq!(ready.waiting_for_reply_parent_data(), None);
+    assert_eq!(ready.case_data(), waiting.case_data());
+    assert_eq!(ready.original_digest_data(), waiting.original_digest_data());
+    assert_eq!(
+        *ready.encode_record_data(&original).unwrap(),
+        *waiting.encode_record_data(&original).unwrap(),
+        "input order must not alter the stored frame"
+    );
+    assert!(matches!(
+        f.verifier
+            .verify_removed_create_for_review(&delete.encode(), &frozen, &ledger, &view, &[]),
+        Err(ChatError::Permission)
+    ));
+    assert_eq!(ledger.action_ids().collect::<Vec<_>>(), vec![parent.id()]);
+
+    let edit = action(
+        &other,
+        &parent_author,
+        4,
+        Body::Edit {
+            create: parent.id(),
+            text: "a valid edit, never a reply parent".into(),
+        },
+        vec![parent.id()],
+    );
+    let reply_to_edit = action(
+        &key,
+        &first,
+        5,
+        Body::Create {
+            text: "a reply to the wrong action kind".into(),
+            reply_to: Some(edit.id()),
+        },
+        vec![edit.id()],
+    );
+    retain(
+        &f,
+        &mut ledger,
+        &edit,
+        &parent_author,
+        &[V2OrdinaryDependency::new(&parent, &parent_author)],
+    );
+    assert!(matches!(
+        f.verifier.verify_removed_create_for_review(
+            &reply_to_edit.encode(),
+            &frozen,
+            &ledger,
+            &view,
+            &[]
+        ),
+        Err(ChatError::Dependency)
+    ));
+    assert!(ledger.action(reply_to_edit.id()).is_none());
+}

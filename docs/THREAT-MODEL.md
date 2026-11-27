@@ -12,6 +12,14 @@ It neither establishes group-wide delivery nor grants a new membership or
 moderation permission. Members holding old ciphertext and keys may have
 the same historical plaintext independently of this native UI restriction.
 
+The removed-post hold proof verifies historical delegation against the
+actual selected Remove before returning an exact signed envelope binding.
+It cannot import, serve or release a post. Waiting for a valid reply
+parent changes no stored identity. A plaintext record's matching digest
+and real signature do not authenticate its claimed removal or store
+scope. A future host must obtain those from its own selected prefix and
+encrypted case selection, then enforce current authorization for access.
+
 Chat V2 history discovery can reveal IDs and the scanned ordinal range of a
 current member's outbox to a peer with an explicitly approved signed contact
 and the current channel exporter. The native Source binds contact Admission

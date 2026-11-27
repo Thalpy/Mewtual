@@ -421,6 +421,73 @@ impl V2GeneralPrefixVerifier {
         Self::apply_verified(ledger, action, work, verified).map(V2OrdinaryReceiveStatus::Retained)
     }
 
+    /// Temporary layout allowance for decoding and verifying a removed
+    /// original. Charge retained input and evidence separately.
+    pub const fn removed_create_review_temporary_layout_bytes() -> usize {
+        Self::ordinary_authorization_temporary_layout_bytes() + 2 * crate::chat::MAX_ACTION_BYTES
+    }
+
+    /// Verify historical authority for withholding this exact Create or
+    /// reply. The caller still decides whether independently verified
+    /// inclusion or existing selected bytes already keep it in history.
+    /// A signed reply can be held while its exact parent is missing.
+    /// This consumes no ledger state and grants no live projection.
+    pub fn verify_removed_create_for_review(
+        &self,
+        original: &[u8],
+        author: &V2FrozenAdmission,
+        ledger: &ChatLedger,
+        view: &ProjectionView,
+        retired_dependencies: &[&V2FrozenAdmission],
+    ) -> Result<V2RemovedCreateEvidence, ChatError> {
+        if retired_dependencies.len() > MAX_LOCAL_ARCHIVE_RETIREMENTS {
+            return Err(ChatError::Bound);
+        }
+        let action = SignedAction::decode(original)?;
+        let Body::Create { reply_to, .. } = action.spec().body else {
+            return Err(ChatError::Permission);
+        };
+        self.require_receiver_ledger(ledger, view, &action)?;
+        self.require_admission(&author.admission)?;
+        if !author.admission.core.life.closed.load(Ordering::Acquire) {
+            return Err(ChatError::Authority);
+        }
+        // Authenticate the claimed sender before reporting missing parents.
+        // A forged action must never nominate work for a later holder.
+        author
+            .admission
+            .core
+            .body
+            .matches_action_delegation(&action)?;
+        let checked = self.ledger_dependencies(
+            ledger,
+            &action,
+            retired_dependencies,
+            DependencyEvidence::LocallySelectedAncestors,
+        )?;
+        let waiting = match checked.missing.as_slice() {
+            [] => {
+                let parents = checked
+                    .exact
+                    .iter()
+                    .map(|(original, admission)| V2OrdinaryDependency::new(original, admission))
+                    .collect::<Vec<_>>();
+                self.verify_unsigned_authority(
+                    action.spec(),
+                    action.signer(),
+                    &author.admission,
+                    &parents,
+                )?;
+                None
+            }
+            [missing] if reply_to == Some(*missing) => Some(*missing),
+            _ => return Err(ChatError::Dependency),
+        };
+        let binding = V2RemovedCreateEvidence::derive(&action, original, author, self, waiting)?;
+        self.live()?;
+        Ok(binding)
+    }
+
     /// Borrow the exact locally selected Create as the target of a new
     /// reply. Its selected Remove supplies the original Admission, and the
     /// original bytes and signature must still match that Admission. This
