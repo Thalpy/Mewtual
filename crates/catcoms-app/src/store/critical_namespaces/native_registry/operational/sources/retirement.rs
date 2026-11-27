@@ -362,6 +362,15 @@ impl<T: MeshTransport, R: CryptoRngCore> Row<T, R> {
                 .discard_add_for_closed_source(&self.keys)
                 .map_err(|_| Error::Unknown)?;
         }
+        if let Some(founder) = loan
+            .body
+            .as_mut()
+            .and_then(|body| body.recovered_founder.as_mut())
+        {
+            founder
+                .discard_add_for_closed_source(&self.keys)
+                .map_err(|_| Error::Unknown)?;
+        }
         if !self.keys.is_drained() {
             return Ok(false);
         }

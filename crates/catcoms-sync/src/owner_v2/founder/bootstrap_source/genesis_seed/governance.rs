@@ -31,7 +31,9 @@ pub use installation::{PreparedV2FounderAddInstall, RetiredV2FounderAddInstall};
 mod invite;
 mod member_transport;
 mod recover;
-pub use recover::PreparedV2FounderRecoveredAdd;
+pub use recover::{
+    PreparedV2FounderRecoveredAdd, PreparedV2RecoveredAddInstall, V2RecoveredFounderAddSigning,
+};
 mod removal;
 use removal::PendingRemoval;
 pub use removal::{
@@ -117,26 +119,11 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
     ) -> Result<(), SyncError> {
         let seed = &self.seed.body;
         drop(request.verify_seed(seed)?);
-        let now = self._parts.body._clock.now_ms();
-        if request.invite.expired_at_data(now) {
-            return Err(unavailable());
-        }
-        let signed = request.request.spec_data();
-        let packet = TextCurrentAddRequestData::from_untrusted_data(
-            request.key_package,
-            signed.joiner,
-            request.invite.spec_data().nonce,
-            signed.key_package_reference,
-            now,
-        )
-        .with_expected_credential_data(signed.credential);
-        catcoms_mls::group::text_current_add::check_private_text_add_package(
-            &seed.device,
-            &seed.group,
-            packet,
+        request.check_live_package(
+            (&seed.device, &seed.group),
+            self._parts.body._clock.now_ms(),
             limits,
         )
-        .map_err(|_| unavailable())
     }
 }
 
@@ -203,17 +190,32 @@ pub struct V2FounderAddSigning<'a> {
 
 impl V2FounderAddSigning<'_> {
     pub fn sign_header_native(&mut self) -> Result<(), SyncError> {
-        let p = &mut *self.pending;
-        if p.raw.is_some() {
+        if self.pending.raw.is_some() {
             return Ok(());
         }
         self.negative.require_live_data()?;
+        self.pending.sign_header_native(
+            &self.seed.body.device,
+            self.seed.body.context.spec_data().signer,
+        )
+    }
+}
+
+impl PendingAdd {
+    fn sign_header_native(
+        &mut self,
+        device: &MlsDevice,
+        signer: [u8; 32],
+    ) -> Result<(), SyncError> {
+        let p = self;
+        if p.raw.is_some() {
+            return Ok(());
+        }
         let unsigned = p.unsigned.as_ref().ok_or_else(unavailable)?;
         if p.phase != Phase::Complete {
             return Err(unavailable());
         }
-        let signer = self.seed.body.context.spec_data().signer;
-        if !self.seed.body.device.retained_ed25519_key_matches(&signer) {
+        if !device.retained_ed25519_key_matches(&signer) {
             return Err(unavailable());
         }
         p.header_native.enter(
@@ -225,10 +227,7 @@ impl V2FounderAddSigning<'_> {
         p.phase = Phase::HeaderEntered;
         #[cfg(test)]
         test_cut(TestCut::HeaderEntered);
-        let raw = self
-            .seed
-            .body
-            .device
+        let raw = device
             .sign_retained_ed25519_bounded(
                 &signer,
                 unsigned.signing_bytes_data(),
@@ -494,7 +493,53 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
                 welcome_cut,
             )));
         };
-        self.pending = Some(Box::new(PendingAdd {
+        self.pending = Some(Box::new(PendingAdd::new(
+            request,
+            (original, admission, [sdk_cut, header_cut, welcome_cut]),
+        )));
+        Ok(())
+    }
+
+    /// One finite secret snapshot/restore and genuine Add on the SAME private
+    /// candidate. Native entry covers preparation too, not only SDK dispatch.
+    /// An entered construction failure is sticky; it cannot reinstantiate the
+    /// admission's cumulative counters. Returned Cell outputs are retained
+    /// before late source/native checks. Never call while holding writers.
+    pub fn execute_add_data_native(
+        &mut self,
+        request: V2FounderAddRequestData<'_>,
+    ) -> Result<(), SyncError>
+    where
+        R: CryptoRngCore,
+    {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.phase == Phase::Prepared)
+        {
+            self.require_sdk_current_data()?;
+        }
+        let pending = self.pending.as_mut().ok_or_else(unavailable)?;
+        let owner = &mut self.node._parts.body;
+        pending.execute_sdk(
+            request,
+            (&self.node.seed.body.device, &self.node.seed.body.group),
+            (&*owner._clock, &mut owner._rng),
+        )?;
+        self.require_sdk_current_data()
+    }
+}
+
+impl PendingAdd {
+    fn new(
+        request: FrozenAddRequest,
+        (original, admission, [sdk_cut, header_cut, welcome_cut]): (
+            NativeChatSourceObservation,
+            TextCurrentAddAdmission,
+            [NativeChatPreparedKeyCut; 3],
+        ),
+    ) -> Self {
+        Self {
             request,
             admitted_at_ms: None,
             cell: None,
@@ -519,30 +564,18 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
             header_may_reauthorize: false,
             welcome_may_reauthorize: false,
             ends: NativeChatKeyEnds::new(),
-        }));
-        Ok(())
+        }
     }
 
-    /// One finite secret snapshot/restore and genuine Add on the SAME private
-    /// candidate. Native entry covers preparation too, not only SDK dispatch.
-    /// An entered construction failure is sticky; it cannot reinstantiate the
-    /// admission's cumulative counters. Returned Cell outputs are retained
-    /// before late source/native checks. Never call while holding writers.
-    pub fn execute_add_data_native(
+    /// The owning adapter proves the SDK pair before invoking this stage.
+    /// The stage owns one exact original request, the actual cut and its Ends.
+    fn execute_sdk(
         &mut self,
         request: V2FounderAddRequestData<'_>,
-    ) -> Result<(), SyncError>
-    where
-        R: CryptoRngCore,
-    {
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|p| p.phase == Phase::Prepared)
-        {
-            self.require_sdk_current_data()?;
-        }
-        let p = self.pending.as_mut().ok_or_else(unavailable)?;
+        (device, group): (&MlsDevice, &ServerGroup),
+        (clock, rng): (&dyn Clock, &mut impl CryptoRngCore),
+    ) -> Result<(), SyncError> {
+        let p = self;
         p.request.require_same(request)?;
         if p.sdk_continuation_retired {
             return Err(unavailable()); // use the explicit cached DATA loan
@@ -554,7 +587,7 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
             // Sample the ORIGINAL retained node clock, immediately before the
             // first native SDK entry. Prepared time and caller time cannot
             // extend the signed invitation or the actual package lifetime.
-            let now_ms = self.node._parts.body._clock.now_ms();
+            let now_ms = clock.now_ms();
             p.request.require_unexpired(now_ms)?;
             p.sdk_native.enter(
                 p.sdk_cut.as_mut().ok_or_else(unavailable)?,
@@ -567,8 +600,8 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
             #[cfg(test)]
             test_cut(TestCut::SdkEntered);
             PreparedTextCurrentAdd::prepare_with_routing_into(
-                &self.node.seed.body.device,
-                &self.node.seed.body.group,
+                device,
+                group,
                 p.request.sdk_request(now_ms),
                 &p.request.routing_plain,
                 &mut p.admission,
@@ -583,8 +616,8 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
                 return Err(unavailable());
             }
             PreparedTextCurrentAdd::prepare_with_routing_into(
-                &self.node.seed.body.device,
-                &self.node.seed.body.group,
+                device,
+                group,
                 p.request
                     .sdk_request(p.admitted_at_ms.ok_or_else(unavailable)?),
                 &p.request.routing_plain,
@@ -596,19 +629,19 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         if p.phase == Phase::SdkEntered {
             #[cfg(test)]
             test_cut(TestCut::BeforeSdkExecution);
-            self.finish_admitted_add_data_native()?;
+            p.finish_admitted_sdk(rng)?;
         }
         // No late negative intervenes between real SDK outputs and their
         // owning Cell/phase above. Exact borrowed DATA remains recoverable.
-        let p = self.pending.as_ref().ok_or_else(unavailable)?;
         p.sdk_cut
             .as_ref()
             .ok_or_else(unavailable)?
             .preflight(&p.original, NativeChatKeyPurpose::AddSdk)
-            .map_err(|_| unavailable())?;
-        self.require_sdk_current_data()
+            .map_err(|_| unavailable())
     }
+}
 
+impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     /// Historical completed Cell loan, including after native/source closure.
     /// No source permission, fresh SDK operation or owning secret copy escapes.
     pub fn completed_add_data(&self) -> Result<CompletedTextCurrentAddData<'_>, SyncError> {
@@ -625,7 +658,26 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     /// Root supplies its current guard independently. No SDK re-snapshot occurs.
     pub fn prepare_admission_data(&mut self, replay: &ReplayMath) -> Result<(), SyncError> {
         self.require_sdk_current_data()?;
-        let p = self.pending.as_mut().ok_or_else(unavailable)?;
+        let seed = &self.node.seed.body;
+        let parent = self
+            .installed
+            .map_or(seed.genesis.header.id(), |selected| selected.header);
+        self.pending
+            .as_mut()
+            .ok_or_else(unavailable)?
+            .prepare_admission(replay, &seed.context, &seed.genesis.profile, parent)
+    }
+}
+
+impl PendingAdd {
+    fn prepare_admission(
+        &mut self,
+        replay: &ReplayMath,
+        context: &BootstrapSourceContextData,
+        profile: &SignedOwnerProfile,
+        parent: OwnerHeaderId,
+    ) -> Result<(), SyncError> {
+        let p = self;
         let result = p
             .cell
             .as_ref()
@@ -633,13 +685,10 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
             .completed_result_data()
             .map_err(|_| unavailable())?;
         let change = result.membership_change_data();
-        let spec = self.node.seed.body.context.spec_data();
-        if replay.profile() != &self.node.seed.body.genesis.profile
+        let spec = context.spec_data();
+        if replay.profile() != profile
             || replay.mls_epoch_data() != change.before_epoch()
-            || replay.header().id()
-                != self
-                    .installed
-                    .map_or(self.node.seed.body.genesis.header.id(), |s| s.header)
+            || replay.header().id() != parent
             || change.group() != spec.group
             || change.author() != &spec.signer
             || change.subject() != &p.request.spec.joiner
@@ -684,6 +733,22 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         Ok(())
     }
 
+    fn outcome(&self) -> Result<V2FounderAddOutcomeData<'_>, SyncError> {
+        Ok(V2FounderAddOutcomeData {
+            result: self
+                .cell
+                .as_ref()
+                .ok_or_else(unavailable)?
+                .completed_result_data()
+                .map_err(|_| unavailable())?,
+            admission: self.body.as_ref().ok_or_else(unavailable)?,
+            unsigned: self.unsigned.as_ref().ok_or_else(unavailable)?,
+            request: &self.request,
+        })
+    }
+}
+
+impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     /// Borrow immutable preimage/image/body. Root must durably cover these and
     /// the SAME completed SDK result BEFORE invoking the governing key edge.
     pub fn unsigned_admission_data(
@@ -700,15 +765,7 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     /// The signed Header can only follow that record, so this works before
     /// signing and continues to lend the same original bytes afterwards.
     pub fn outcome_data(&self) -> Result<V2FounderAddOutcomeData<'_>, SyncError> {
-        let result = self.completed_add_data()?;
-        let (admission, unsigned) = self.unsigned_admission_data()?;
-        let request = &self.pending.as_ref().ok_or_else(unavailable)?.request;
-        Ok(V2FounderAddOutcomeData {
-            result,
-            admission,
-            unsigned,
-            request,
-        })
+        self.pending.as_ref().ok_or_else(unavailable)?.outcome()
     }
 
     /// Final primitive only, after Root's genuine saved-outcome/current/Core
@@ -756,7 +813,16 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     /// Deterministic materialization outside writers. It never calls the key,
     /// including after a lost signing reply or a late cancellation.
     pub fn materialize_admission_data(&mut self) -> Result<(), SyncError> {
-        let p = self.pending.as_mut().ok_or_else(unavailable)?;
+        self.pending
+            .as_mut()
+            .ok_or_else(unavailable)?
+            .materialize_header()
+    }
+}
+
+impl PendingAdd {
+    fn materialize_header(&mut self) -> Result<(), SyncError> {
+        let p = self;
         if p.header.is_some() {
             return Ok(());
         }
@@ -774,7 +840,9 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         p.phase = Phase::Materialized;
         Ok(())
     }
+}
 
+impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     pub fn signed_admission_data(&self) -> Result<&SignedOwnerHeader, SyncError> {
         self.pending
             .as_ref()

@@ -50,7 +50,7 @@ pub(in crate::store) use control::governed_add::held::{
     HeldGovernedAddFence,
 };
 pub(in crate::store) use control::governed_add::held::{
-    PreparedGovernedAddFence, PreparedGovernedRemoveFence,
+    PreparedColdGovernedAdd, PreparedGovernedAddFence, PreparedGovernedRemoveFence,
 };
 #[cfg(all(test, any(windows, target_os = "linux")))]
 pub(in crate::store) use control::governed_add::HeldGovernedArchiveRead;

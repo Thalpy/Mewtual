@@ -1,6 +1,7 @@
 //! Frozen signed request and original routing custody. These checks establish
 //! cryptographic consistency with THIS node, not Root invitation permission,
 //! nonce consumption, a saved operation or a current selected governing head.
+use super::super::super::codec::VerifiedGenesisData;
 use super::*;
 use catcoms_mls::group::text_current_add::MAX_TEXT_ADD_ROUTING_PLAIN_BYTES;
 use catcoms_replication::chat::join_bindings::{
@@ -62,25 +63,39 @@ impl V2FounderAddRequestData<'_> {
     }
 
     pub(super) fn verify_seed(self, seed: &SeedBody) -> Result<Vec<u8>, SyncError> {
-        self.verify()?;
-        let g = &seed.genesis;
-        let invite = self.invite.spec_data();
-        let anchor = &invite.anchor;
-        if anchor.group != g.profile.spec().group
-            || anchor.founder != g.profile.spec().founder
-            || anchor.profile != *g.profile.id().as_bytes()
-            || anchor.admission != *g.admission.admission_id().as_bytes()
-            || anchor.tenure != *g.profile.tenure().as_bytes()
-            || anchor.header != *g.header.id().as_bytes()
-            || anchor.state != *g.header.spec().state.as_bytes()
-            || invite.inviter != seed.context.spec_data().signer
-            || seed.metadata.routing_label != 0
+        if seed.metadata.routing_label != 0
             || seed.metadata.routing.len() != 1
             || seed.metadata.routing[0].0 != 0
         {
             return Err(unavailable());
         }
-        let policy = seed.metadata.policy.as_ref().ok_or_else(unavailable)?;
+        self.verify_original(
+            &seed.context,
+            &seed.genesis,
+            seed.metadata.policy.as_ref().ok_or_else(unavailable)?,
+        )
+    }
+
+    fn verify_original(
+        self,
+        context: &BootstrapSourceContextData,
+        genesis: &VerifiedGenesisData,
+        policy: &GroupPolicy,
+    ) -> Result<Vec<u8>, SyncError> {
+        self.verify()?;
+        let invite = self.invite.spec_data();
+        let anchor = &invite.anchor;
+        if anchor.group != genesis.profile.spec().group
+            || anchor.founder != genesis.profile.spec().founder
+            || anchor.profile != *genesis.profile.id().as_bytes()
+            || anchor.admission != *genesis.admission.admission_id().as_bytes()
+            || anchor.tenure != *genesis.profile.tenure().as_bytes()
+            || anchor.header != *genesis.header.id().as_bytes()
+            || anchor.state != *genesis.header.spec().state.as_bytes()
+            || invite.inviter != context.spec_data().signer
+        {
+            return Err(unavailable());
+        }
         crate::group_policy::require_supported(policy).map_err(|_| unavailable())?;
         let policy = policy.encode();
         if JoinPayloadKindData::Policy
@@ -91,6 +106,57 @@ impl V2FounderAddRequestData<'_> {
             return Err(unavailable());
         }
         Ok(policy)
+    }
+
+    /// Match a recovered founder request to the original encrypted S0
+    /// metadata. Never use the successor MLS exporter for the shared L0 keys.
+    pub(super) fn verify_recovered<'source>(
+        self,
+        original: &'source OpenedBootstrapSourceData,
+    ) -> Result<(Vec<u8>, &'source [u8; 32], &'source [u8; 32]), SyncError> {
+        let source = original.view_data();
+        let fields = s0::fields(source.snapshot, source.context.spec_data())?;
+        let mut route = catcoms_wire::Decoder::new(fields.routing);
+        let invalid = |_| unavailable();
+        if route.get_u64().map_err(invalid)? != 0
+            || route.get_u32().map_err(invalid)? != 1
+            || route.get_u64().map_err(invalid)? != 0
+        {
+            return Err(unavailable());
+        }
+        let l0 = route
+            .get_bytes()
+            .map_err(invalid)?
+            .try_into()
+            .map_err(|_| unavailable())?;
+        route.finish().map_err(invalid)?;
+        let policy = crate::group_policy::decode_pin(fields.policy)?.ok_or_else(unavailable)?;
+        let policy = self.verify_original(source.context, &original.genesis, &policy)?;
+        Ok((policy, l0, fields.file_wrap_key))
+    }
+
+    pub(super) fn check_live_package(
+        self,
+        (device, group): (&MlsDevice, &ServerGroup),
+        now: u64,
+        limits: catcoms_mls::persist::text_current_add::TextCurrentAddLimits,
+    ) -> Result<(), SyncError> {
+        if self.invite.expired_at_data(now) {
+            return Err(unavailable());
+        }
+        let signed = self.request.spec_data();
+        let packet = TextCurrentAddRequestData::from_untrusted_data(
+            self.key_package,
+            signed.joiner,
+            self.invite.spec_data().nonce,
+            signed.key_package_reference,
+            now,
+        )
+        .with_expected_credential_data(signed.credential);
+        catcoms_mls::group::text_current_add::check_private_text_add_package(
+            device, group, packet, limits,
+        )
+        .map_err(|_| unavailable())
     }
 }
 
@@ -104,17 +170,44 @@ impl FrozenAddRequest {
         installed: Option<V2InstalledFounderAddData>,
         data: V2FounderAddRequestData<'_>,
     ) -> Result<Self, SyncError> {
-        let policy = data.verify_seed(seed)?;
-        let g = &seed.genesis;
+        Self::freeze(
+            data,
+            data.verify_seed(seed)?,
+            (&seed.metadata.routing[0].1, &seed.metadata._file_wrap_key),
+            (
+                seed.group.epoch(),
+                installed.map_or(seed.genesis.header.id(), |selected| selected.header),
+            ),
+        )
+    }
+
+    pub(super) fn prepare_recovered(
+        source: &OpenedBootstrapSourceData,
+        installed: V2InstalledFounderAddData,
+        data: V2FounderAddRequestData<'_>,
+    ) -> Result<Self, SyncError> {
+        let (policy, l0, file_key) = data.verify_recovered(source)?;
+        Self::freeze(
+            data,
+            policy,
+            (l0, file_key),
+            (installed.epoch, installed.header),
+        )
+    }
+
+    fn freeze(
+        data: V2FounderAddRequestData<'_>,
+        policy: Vec<u8>,
+        (l0, file_key): (&[u8; 32], &[u8; 32]),
+        (before_epoch, parent): (u64, OwnerHeaderId),
+    ) -> Result<Self, SyncError> {
         let invite = data.invite.spec_data();
         // The wrapper admits Add only. No Remove or policy mutation can make
         // these original L0 secrets stale. Future transition support MUST
         // install genuine updated routing custody, never rederive L0 from a
         // post-Add exporter (only the transfer wrapping key changes on Add).
         let spec = data.request.spec_data().clone();
-        let before_epoch = seed.group.epoch();
         let after_epoch = before_epoch.checked_add(1).ok_or_else(unavailable)?;
-        let parent = installed.map_or(g.header.id(), |s| s.header);
         // Explicit V2 framing; none of this is the legacy routing grammar.
         // Preallocate the full supported cap INSIDE Zeroizing before the first
         // secret copy, so an early return/unwind also clears the partial frame.
@@ -137,8 +230,8 @@ impl FrozenAddRequest {
         plain.extend_from_slice(&0u64.to_be_bytes()); // current label L0
         plain.extend_from_slice(&1u32.to_be_bytes()); // exactly one slot
         plain.extend_from_slice(&0u64.to_be_bytes()); // slot L0
-        field(&mut plain, seed.metadata.routing[0].1.as_ref())?;
-        field(&mut plain, seed.metadata._file_wrap_key.as_ref())?;
+        field(&mut plain, l0)?;
+        field(&mut plain, file_key)?;
         Ok(Self {
             invite: data.invite.encode(),
             request: data.request.encode(),

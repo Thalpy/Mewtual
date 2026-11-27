@@ -13,6 +13,7 @@ use catcoms_rt::PeerId;
 use catcoms_sync::owner_v2::PreparedV2FounderRecoveredAdd;
 use tokio::sync::watch;
 
+mod add;
 mod authoring;
 mod history;
 mod invite;
@@ -69,6 +70,8 @@ pub struct NativeTextColdFounderSource {
     actor: Option<super::super::join_tcp::Loan>,
     tcp: Option<Arc<super::super::join_tcp::Transport>>,
     sdk: Option<PreparedV2FounderRecoveredAdd>,
+    // The cold writer pays for the Sync pending scaffold until it drains.
+    add: Option<Box<crate::store::persistence::v2_text::PreparedColdGovernedAdd>>,
     governed: Option<Box<HeldColdFounderAdd>>,
     genesis_sdk: Option<Box<crate::store::persistence::RetainedPromotedGenesisSdk>>,
     genesis: Option<Box<HeldColdFounderGenesis>>,
@@ -110,6 +113,7 @@ impl NativeTextJoinedStorage {
                     received: None,
                     member: None,
                     invite: Default::default(),
+                    add: None,
                     actor: None,
                     tcp: None,
                     sdk: None,
@@ -130,6 +134,29 @@ impl NativeTextJoinedStorage {
 }
 
 impl NativeTextColdFounderSource {
+    pub(in crate::store::critical_namespaces::native_registry) fn retire_add_for_closed_ui(
+        &mut self,
+        closed: &[Option<&catcoms_rt::NativeChatKeyDrain>],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        if let Some(sdk) = self.sdk.as_mut() {
+            // The caller owns the actual RuntimeLoan and no Root or native
+            // writer. End retirement can safely wake the waiting UI lock.
+            drop(sdk.retire_recovered_add_for_closed_ui(closed, rng)?);
+        }
+        Ok(())
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn discard_add_for_closed_source(
+        &mut self,
+        closed: &catcoms_rt::NativeChatKeyDrain,
+    ) -> Result<(), AppError> {
+        if let Some(sdk) = self.sdk.as_mut() {
+            sdk.discard_recovered_add_for_closed_source(closed)?;
+        }
+        Ok(())
+    }
+
     pub fn registration_data(&self) -> (NativeCreationStatusData, &str) {
         (self.selection.status, &self.selection.name)
     }

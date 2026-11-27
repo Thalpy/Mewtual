@@ -11,7 +11,10 @@ use catcoms_sync::{
     MAX_V2_GOVERNING_JOIN_STEPS, MAX_V2_JOIN_REQUEST_PACKET_BYTES,
 };
 use selected_head::GovernedHeadKind;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+
+const PREDECESSOR_READ_BYTES: usize = 8192;
 
 /// Small held identity per immutable predecessor. Ciphertext and SDK buffers
 /// are released after each read. The selected head and its own archive have
@@ -20,6 +23,8 @@ struct Predecessor {
     head: [u8; selected_head::FRAME_LEN],
     id: ArchiveHeadId,
     kind: GovernedHeadKind,
+    bytes: usize,
+    digest: blake3::Hash,
     file: OpenedTextControl,
 }
 
@@ -54,13 +59,15 @@ pub(super) struct RecoveredArchiveChain {
     first: PublicStep,
     successors: Vec<PublicStep>,
     prior_requests: Vec<PriorRequest>,
+    consumed_nonces: Vec<[u8; 16]>,
     pub(super) prefix: Vec<u8>,
 }
 
 impl RecoveredArchiveChain {
     pub(super) const fn invoice_bytes() -> usize {
         use catcoms_replication::chat::owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE;
-        4 * (MAX_BYTES + 1)
+        PREDECESSOR_READ_BYTES
+            + 4 * (MAX_BYTES + 1)
             + 4 * MAX_V2_GOVERNING_JOIN_PREFIX_BYTES
             + 2 * REPLAY_MATH_PRIVATE_INVOICE
             + 4 * std::mem::size_of::<Self>()
@@ -154,6 +161,7 @@ impl RecoveredArchiveChain {
             first,
             successors,
             prior_requests,
+            consumed_nonces: replay.nonces,
             prefix,
         };
         chain.require_original_predecessors(directory)?;
@@ -168,6 +176,13 @@ impl RecoveredArchiveChain {
             )?;
         }
         Ok(())
+    }
+
+    /// Re-read the original held inodes under their exact names and compare
+    /// the already authenticated bytes. Only one bounded scratch buffer is
+    /// live even when a long governing history precedes the selected Head.
+    pub(super) fn require_predecessor_contents(&self, directory: &Path) -> Result<(), AppError> {
+        require_exact_predecessors(directory, &self.predecessors)
     }
 
     pub(super) fn public_steps(&self) -> impl Iterator<Item = &PublicStep> {
@@ -189,30 +204,41 @@ impl RecoveredArchiveChain {
         Ok(V2GoverningJoinPrefixData::encode(&proof, &steps)?)
     }
 
-    pub(super) fn encode_join_delivery(
+    pub(super) fn classify_join_delivery(
         &self,
         key: &[u8; 32],
         directory: &Path,
         trusted: &GenesisPublicData<'_>,
         request: &[u8],
-    ) -> Result<Vec<u8>, AppError> {
+        nonce: [u8; 16],
+    ) -> Result<Option<Vec<u8>>, AppError> {
         if !(1..=MAX_V2_JOIN_REQUEST_PACKET_BYTES).contains(&request.len()) {
             return Err(refused());
         }
         if let RecoveredMembershipJournal::Add(journal) = &self.journal {
             if journal.request.as_slice() == request {
-                return Ok(V2GoverningJoinDeliveryData::encode(
+                require_exact_predecessors(directory, &self.predecessors)?;
+                return Ok(Some(V2GoverningJoinDeliveryData::encode(
                     &journal.response,
                     &self.prefix,
-                )?);
+                )?));
             }
         }
         let requested = blake3::hash(request);
-        let index = self
+        let Some(index) = self
             .prior_requests
             .iter()
             .position(|prior| prior.digest.as_ref() == Some(requested.as_bytes()))
-            .ok_or_else(refused)?;
+        else {
+            // Verified on every Add during the original bounded selected
+            // replay. A different request cannot consume that nonce again.
+            if self.consumed_nonces.contains(&nonce) {
+                return Err(refused());
+            }
+            require_exact_predecessors(directory, &self.predecessors)?;
+            return Ok(None);
+        };
+        require_exact_predecessors(directory, &self.predecessors)?;
         let first_proof = self.first.first_proof(trusted)?;
         if index == 0 {
             let original = self.predecessors.first().ok_or_else(refused)?;
@@ -230,10 +256,10 @@ impl RecoveredArchiveChain {
             if first.request.as_slice() != request {
                 return Err(refused());
             }
-            return Ok(V2FirstJoinDeliveryData::encode(
+            return Ok(Some(V2FirstJoinDeliveryData::encode(
                 &first.response,
                 &first_proof,
-            )?);
+            )?));
         }
         let RecoveredMembershipJournal::Add(journal) =
             self.read_later_journal(key, directory, trusted, index)?
@@ -250,10 +276,10 @@ impl RecoveredArchiveChain {
             .map(PublicStep::proof_data)
             .collect();
         let proof = V2GoverningJoinPrefixData::encode(&first_proof, &steps)?;
-        Ok(V2GoverningJoinDeliveryData::encode(
+        Ok(Some(V2GoverningJoinDeliveryData::encode(
             &journal.response,
             &proof,
-        )?)
+        )?))
     }
 
     pub(super) fn encode_member_add(
@@ -315,6 +341,37 @@ impl RecoveredArchiveChain {
     }
 }
 
+/// Use the captured length and ciphertext digest, with an EOF probe on
+/// the exact inode. This works under the final physical guard without
+/// allocating another archive-sized buffer or repeating MLS decoding.
+fn require_exact_predecessors(
+    directory: &Path,
+    predecessors: &[Predecessor],
+) -> Result<(), AppError> {
+    let io = |error: std::io::Error| AppError::Io(error.to_string());
+    let mut buffer = [0; PREDECESSOR_READ_BYTES];
+    for predecessor in predecessors {
+        let path = archive_child(directory, predecessor.id.as_bytes())?;
+        require_named(&path, &predecessor.file)?;
+        let mut file = &predecessor.file.file;
+        file.seek(SeekFrom::Start(0)).map_err(io)?;
+        let mut remaining = predecessor.bytes;
+        let mut digest = blake3::Hasher::new();
+        while remaining > 0 {
+            let take = remaining.min(buffer.len());
+            file.read_exact(&mut buffer[..take]).map_err(io)?;
+            digest.update(&buffer[..take]);
+            remaining -= take;
+        }
+        if file.read(&mut buffer[..1]).map_err(io)? != 0 || digest.finalize() != predecessor.digest
+        {
+            return Err(refused());
+        }
+        require_named(&path, &predecessor.file)?;
+    }
+    Ok(())
+}
+
 fn capture_predecessors(
     key: &[u8; 32],
     directory: &Path,
@@ -346,11 +403,15 @@ fn capture_predecessors(
             }
             None
         };
+        let bytes = file.frame.len();
+        let digest = blake3::hash(&file.frame);
         *buffer = Some(std::mem::take(&mut file.frame));
         predecessors.push(Predecessor {
             head,
             id: prior.archive,
             kind: prior.kind,
+            bytes,
+            digest,
             file,
         });
         if predecessors.len() >= count {

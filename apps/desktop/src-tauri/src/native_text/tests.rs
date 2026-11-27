@@ -1510,6 +1510,15 @@ async fn native_text_founder_frame_capture_survives_transient_row_contention() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_membership_selected_eviction_notifies_the_original_joined_row() {
+    native_text_membership_removal_reopen(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_recovered_founder_admits_a_fresh_join_after_selected_remove() {
+    native_text_membership_removal_reopen(true).await;
+}
+
+async fn native_text_membership_removal_reopen(join_after_restart: bool) {
     use catcoms_app::store::NativeTextInvitePacketData;
     use tauri::Listener;
 
@@ -1663,6 +1672,78 @@ async fn native_text_membership_selected_eviction_notifies_the_original_joined_r
         cold,
         "cold replay returns the exact original packet"
     );
+    if join_after_restart {
+        let (successor, window, successor_queue) = app(root.path().join("successor"), None, true);
+        unlock_current(&successor, &window, &successor_queue).await;
+        let request = invite_command(
+            &window,
+            "join_server",
+            serde_json::json!({
+                "inviteHex": cold, "approvedHost": "127.0.0.1", "displayName": "Successor",
+                "serverName": "Recovered group", "isDm": false, "allowSwitchboards": false,
+            }),
+        );
+        timeout(Duration::from_secs(45), run(&successor_queue))
+            .await
+            .expect("the fresh Add runs over the recovered founder TCP listener");
+        let joined = found_value(request.await.unwrap());
+        assert!(joined["server"].is_number());
+        let new_roster = command_value_after_busy(
+            &main,
+            &queue,
+            "get_native_chat_members",
+            membership::BUSY,
+            mint_args.clone(),
+        )
+        .await;
+        let live = new_roster["members"].as_array().unwrap();
+        assert_eq!(live.len(), 2, "founder and the new Admission only");
+        assert!(live
+            .iter()
+            .all(|entry| entry["admission"] != admission["admission"]));
+        let new_admission = live
+            .iter()
+            .find(|member| member["founder"] == false)
+            .unwrap();
+
+        let state = reopened.state::<AppState>();
+        let close = register_vault_close(&state).await.unwrap();
+        sources::close_server_rows(&state, &SystemClock)
+            .await
+            .unwrap();
+        drop((close, state));
+        drop((main, reopened));
+        let (reopened, main, queue) = app(founder_path.clone(), None, true);
+        unlock_current(&reopened, &main, &queue).await;
+        let cold_roster = command_value_after_busy(
+            &main,
+            &queue,
+            "get_native_chat_members",
+            membership::BUSY,
+            mint_args.clone(),
+        )
+        .await;
+        assert!(cold_roster["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["admission"] == new_admission["admission"]));
+        let state = reopened.state::<AppState>();
+        let close = register_vault_close(&state).await.unwrap();
+        sources::close_server_rows(&state, &SystemClock)
+            .await
+            .unwrap();
+        drop((close, state));
+        drop((main, reopened));
+        let state = successor.state::<AppState>();
+        let close = register_vault_close(&state).await.unwrap();
+        sources::close_server_rows(&state, &SystemClock)
+            .await
+            .unwrap();
+        drop((close, state));
+        drop((window, successor));
+        return;
+    }
     let state = reopened.state::<AppState>();
     let close = register_vault_close(&state).await.unwrap();
     sources::close_server_rows(&state, &SystemClock)

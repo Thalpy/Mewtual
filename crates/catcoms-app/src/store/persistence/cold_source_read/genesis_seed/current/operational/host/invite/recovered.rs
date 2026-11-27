@@ -1,9 +1,10 @@
 //! A covered invitation on the original cold founder's selected parent.
 use super::*;
-use crate::store::persistence::v2_text::HeldColdFounderAdd;
+use crate::store::persistence::v2_text::{ColdInviteParent, HeldColdFounderAdd};
 use crate::store::{RetainedBootstrapSourceData, ServerStore};
 use catcoms_rt::{Clock, CryptoRngCore, NativeChatKeyPurpose};
 use catcoms_sync::owner_v2::PreparedV2FounderRecoveredAdd;
+use catcoms_sync::V2JoinRequestPacketData;
 
 /// One issuing runtime may finish only the files it created. A later opener
 /// can reconstruct a complete result or refuse without adopting an attempt.
@@ -12,7 +13,76 @@ pub(in crate::store) struct RecoveredFounderInvite {
     pending: Option<Box<PendingInvite>>,
 }
 
+/// The new command opens the signed invite once and re-proves the same
+/// names and contents before each previously unentered key/selector edge.
+pub(in crate::store) struct RecoveredJoinInviteCheck<'a> {
+    read: InviteRecoveryRead<'a>,
+    parent: ColdInviteParent<'a>,
+}
+
+impl RecoveredJoinInviteCheck<'_> {
+    pub(in crate::store) fn require_current(&mut self) -> Result<(), AppError> {
+        self.read.require_current_cold(&self.parent)
+    }
+}
+
 impl RecoveredFounderInvite {
+    pub(in crate::store) fn capture_join_invite<'a>(
+        parent: ColdInviteParent<'a>,
+        source: &RetainedBootstrapSourceData,
+        packet: &V2JoinRequestPacketData<'_>,
+        route: &[u8],
+    ) -> Result<RecoveredJoinInviteCheck<'a>, AppError> {
+        let mut read = InviteRecoveryRead::prepare(parent.store(), Some(parent.context_data().0))?;
+        read.capture_cold(&parent, false)?;
+        read.require_cold_join_invite(route, source.data(), packet.founder_add_data().invite)?;
+        read.require_current_cold(&parent)?;
+        Ok(RecoveredJoinInviteCheck { read, parent })
+    }
+
+    /// Verify a fresh request against the selected founder's exact covered
+    /// invitation and the genuine live SDK pair. The caller separately
+    /// excludes consumed nonces and owns the future durable Add transaction.
+    pub(in crate::store) fn require_join_packet(
+        (store, source, governed, sdk): (
+            &ServerStore,
+            &RetainedBootstrapSourceData,
+            &mut HeldColdFounderAdd,
+            &mut PreparedV2FounderRecoveredAdd,
+        ),
+        (packet, route): (&V2JoinRequestPacketData<'_>, &[u8]),
+        keys: &mut NativeFounderKeys,
+        clock: &dyn Clock,
+        caller: &RequestCancellation,
+    ) -> Result<(), AppError> {
+        governed.with_checked_invite_parent(store, source, |parent, verifier, require| {
+            if caller.is_cancelled() {
+                return Err(refused());
+            }
+            let request = packet.founder_add_data();
+            let mut read = InviteRecoveryRead::prepare(store, Some(parent.context_data().0))?;
+            read.capture_cold(parent, false)?;
+            read.require_cold_join_invite(route, source.data(), request.invite)?;
+            let (limits, _package_fee) = pay_join_package_verification(store)?;
+            sdk.preflight_recovered_add_package_data(
+                verifier,
+                source.data(),
+                request,
+                clock,
+                limits,
+            )?;
+            let (native, cut, _) = keys.member_entry();
+            sdk.bind_native_member_source(verifier, native, cut)
+                .map_err(|_| refused())?;
+            read.require_current_cold(parent)?;
+            require()?;
+            if caller.is_cancelled() {
+                return Err(refused());
+            }
+            Ok(())
+        })
+    }
+
     pub(in crate::store) fn save(
         &mut self,
         (store, source, governed, sdk): (
@@ -61,7 +131,7 @@ impl RecoveredFounderInvite {
             require_live(keys)?;
             if self.pending.is_none() {
                 let mut read = InviteRecoveryRead::prepare(store, Some(head))?;
-                read.capture_cold(parent)?;
+                read.capture_cold(parent, true)?;
                 let saved = read.recover_cold(request, route, source.data())?;
                 require()?;
                 read.require_current_cold(parent)?;

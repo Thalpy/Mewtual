@@ -179,17 +179,30 @@ impl NativeTextColdFounderSource {
         request: &[u8],
         caller: &RequestCancellation,
     ) -> Result<Vec<u8>, AppError> {
+        let packet = catcoms_sync::V2JoinRequestPacketData::decode(request)?;
+        self.classify_recovered_join_delivery(&packet, caller)?
+            .ok_or_else(refused)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn classify_recovered_join_delivery(
+        &mut self,
+        packet: &catcoms_sync::V2JoinRequestPacketData<'_>,
+        caller: &RequestCancellation,
+    ) -> Result<Option<Vec<u8>>, AppError> {
         self.restore_first_add(caller)?;
-        let original = self.governed.as_ref().ok_or_else(refused)?;
+        let original = self.governed.as_deref_mut().ok_or_else(refused)?;
         let delivery =
             self.work
                 .with_recovered_founder_store(&self.selection, &self.source, |store| {
                     if caller.is_cancelled() {
                         return Err(refused());
                     }
-                    original.encode_join_delivery(store, &self.source, request)
+                    original.classify_join_delivery(store, &self.source, packet)
                 })?;
-        if delivery.len() > CHAT_V2_JOIN_RESPONSE_MAX_BYTES {
+        if delivery
+            .as_ref()
+            .is_some_and(|delivery| delivery.len() > CHAT_V2_JOIN_RESPONSE_MAX_BYTES)
+        {
             return Err(refused());
         }
         self.restore_first_add(caller)?;

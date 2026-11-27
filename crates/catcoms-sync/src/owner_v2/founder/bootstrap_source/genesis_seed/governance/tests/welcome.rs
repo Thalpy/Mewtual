@@ -906,7 +906,7 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
         payment(),
     )
     .is_err());
-    let restored = PreparedV2FounderRecoveredAdd::restore_selected_removal(
+    let mut restored = PreparedV2FounderRecoveredAdd::restore_selected_removal(
         original,
         selected_remove,
         &mixed,
@@ -1004,12 +1004,234 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     assert!(retired.take_frozen_data().is_some());
     drop(retired);
     assert_eq!(node.installed_add_data(), Some(fingerprint));
+    restored.bind_selected_member(verifier).unwrap();
+    let mut next_invite = Request::new(node, 97);
+    let expiry = now + 60_000;
+    next_invite.change_invite(node, |spec| spec.expires_at_ms = expiry);
+    let next_join = PreparedV2JoinRequest::prepare(
+        MlsDevice::generate().unwrap(),
+        &next_invite.invite.spec_data().anchor,
+        &next_invite.invite,
+        [98; 32],
+        now,
+        DirectJoinLimits::new(RAW, RAW, 256 * 1024).unwrap(),
+    )
+    .unwrap();
+    let packet = V2JoinRequestPacketData::decode(next_join.request_bytes_data()).unwrap();
+    let next_request = packet.founder_add_data();
+    let seed = &node.node.seed.body;
+    let (policy, l0, file_key) = next_request.verify_recovered(original).unwrap();
+    assert_eq!(policy, next_request.verify_seed(seed).unwrap());
+    assert!(l0 == &*seed.metadata.routing[0].1);
+    assert!(file_key == &*seed.metadata._file_wrap_key);
+    assert!(restored
+        .preflight_recovered_add_package_data(
+            foreign_prefix.selected_member_verifier().unwrap(),
+            original,
+            next_request,
+            &ManualClock::new(now),
+            limits,
+        )
+        .is_err());
+    restored
+        .preflight_recovered_add_package_data(
+            verifier,
+            original,
+            next_request,
+            &ManualClock::new(now),
+            limits,
+        )
+        .unwrap();
+    assert!(restored
+        .preflight_recovered_add_package_data(
+            verifier,
+            original,
+            next_request,
+            &ManualClock::new(expiry),
+            limits,
+        )
+        .is_err());
+    let owner = Native::new();
+    let other = Native::new();
+    let observation = owner.source.observe();
+    restored
+        .bind_native_member_source(
+            verifier,
+            &observation,
+            &owner.cut(NativeChatKeyPurpose::MemberAction),
+        )
+        .unwrap();
+    let paid = Arc::new(AtomicUsize::new(0));
+    let native_inputs = |origin: &Native| {
+        (
+            origin.source.observe(),
+            super::admission(&paid),
+            [
+                origin.cut(NativeChatKeyPurpose::AddSdk),
+                origin.cut(NativeChatKeyPurpose::GoverningHeader),
+                origin.cut(NativeChatKeyPurpose::JoinWelcome),
+            ],
+        )
+    };
+    assert!(restored
+        .prepare_recovered_add_data((verifier, original), next_request, native_inputs(&other))
+        .is_err());
+    assert_eq!(paid.load(SeqCst), 0);
+    restored
+        .prepare_recovered_add_data((verifier, original), next_request, native_inputs(&owner))
+        .ok()
+        .unwrap();
+    assert!(restored
+        .prepare_recovered_add_data((verifier, original), next_request, native_inputs(&owner))
+        .is_err());
+    let mut rng = ChaCha20Rng::seed_from_u64(98);
+    let clock = ManualClock::new(now);
+    assert!(restored
+        .execute_recovered_add_native(
+            (verifier, original),
+            V2FounderAddRequestData {
+                key_package: &[],
+                ..next_request
+            },
+            (&clock, &mut rng),
+        )
+        .is_err());
+    assert!(restored.completed_recovered_add_data().is_err());
+    restored
+        .execute_recovered_add_native((verifier, original), next_request, (&clock, &mut rng))
+        .unwrap();
+    let outcome = restored.completed_recovered_add_data().unwrap();
+    assert_eq!(outcome.after_epoch_data(), fingerprint.epoch + 1);
+    let commit = blake3::hash(outcome.commit_data());
+    restored
+        .execute_recovered_add_native((verifier, original), next_request, (&clock, &mut rng))
+        .unwrap();
+    assert_eq!(
+        blake3::hash(
+            restored
+                .completed_recovered_add_data()
+                .unwrap()
+                .commit_data()
+        ),
+        commit,
+    );
+    assert_eq!(restored.fingerprint_data(), fingerprint);
+    assert!(restored.recovered_add_outcome_data().is_err());
+    restored
+        .prepare_recovered_admission_data(verifier, original)
+        .unwrap();
+    let outcome = restored.recovered_add_outcome_data().unwrap();
+    assert_eq!(
+        outcome.unsigned_data().header_spec_data().parent,
+        fingerprint.header
+    );
+    assert_eq!(blake3::hash(outcome.result_data().commit_data()), commit);
+    outcome.require_request_data(next_request).unwrap();
+    let mut key = restored
+        .recovered_add_signing_parts(verifier, original)
+        .unwrap();
+    assert!(key.sign_welcome_native().is_err());
+    key.sign_header_native().unwrap();
+    let header_raw = *restored.raw_recovered_add_header_data().unwrap();
+    restored.prepare_recovered_welcome_data().unwrap();
+    assert!(!restored
+        .recovered_welcome_intent_data()
+        .unwrap()
+        .1
+        .is_empty());
+    let mut key = restored
+        .recovered_add_signing_parts(verifier, original)
+        .unwrap();
+    key.sign_header_native().unwrap();
+    key.sign_welcome_native().unwrap();
+    let welcome_raw = *restored.raw_recovered_welcome_data().unwrap();
+    restored.materialize_recovered_welcome_data().unwrap();
+    let (header, response) = restored.recovered_join_response_data().unwrap();
+    assert_eq!(header.spec().parent, fingerprint.header);
+    assert_eq!(
+        response.binding.spec_data().add_header,
+        *header.id().as_bytes()
+    );
+    assert_eq!(
+        *restored.raw_recovered_add_header_data().unwrap(),
+        header_raw
+    );
+    assert_eq!(*restored.raw_recovered_welcome_data().unwrap(), welcome_raw);
+    let foreign = other.ui.retire();
+    assert!(restored
+        .retire_recovered_add_for_closed_ui(&[Some(&foreign)], &mut rng)
+        .unwrap()
+        .is_none());
+    let ui_close = owner.ui.retire();
+    assert!(!ui_close.is_drained());
+    let retired = restored
+        .retire_recovered_add_for_closed_ui(&[Some(&ui_close)], &mut rng)
+        .unwrap()
+        .unwrap();
+    assert!(!ui_close.is_drained());
+    drop(retired);
+    assert!(ui_close.is_drained());
+    assert!(restored.recovered_add_outcome_data().is_ok());
+    let source_close = owner.source.observe_retirement();
+    assert!(restored
+        .discard_recovered_add_for_closed_source(&source_close)
+        .is_err());
     assert_eq!(
         node.prepare_member_subscription(verifier, 42).unwrap().0,
         recovered
             .selected_member_topic_data(foreign_prefix, 42)
             .unwrap()
     );
+    let (_source, signal) = tokio::sync::watch::channel(false);
+    let source = catcoms_rt::RequestCancellation::new(signal, None);
+    let old_selection = restored
+        .prepare_member_topic(verifier, 42, source.clone())
+        .unwrap()
+        .1;
+    let mut selected = Some(
+        restored
+            .derive_recovered_add_selection_data(verifier, original)
+            .unwrap(),
+    );
+    let install = restored
+        .prepare_recovered_add_install(verifier, original)
+        .unwrap();
+    assert!(install
+        .check_host_selection_data(
+            foreign_prefix.selected_member_verifier().unwrap(),
+            selected.as_ref().unwrap(),
+        )
+        .is_err());
+    assert!(install.finish_host_selected(verifier, &mut None).is_err());
+    assert_eq!(restored.fingerprint_data(), fingerprint);
+    assert!(old_selection.is_current_cached());
+    let install = restored
+        .prepare_recovered_add_install(verifier, original)
+        .unwrap();
+    install
+        .check_host_selection_data(verifier, selected.as_ref().unwrap())
+        .unwrap();
+    let expected = install.expected_data();
+    install
+        .finish_host_selected(verifier, &mut selected)
+        .unwrap();
+    assert!(selected.is_none());
+    assert_eq!(expected.epoch, fingerprint.epoch + 1);
+    assert_eq!(verifier.replay_data().header().id(), expected.header);
+    assert_eq!(restored.fingerprint_data(), expected);
+    assert!(!old_selection.is_current_cached());
+    drop(restored.take_retired_recovered_add_install().unwrap());
+    assert!(restored
+        .prepare_member_topic(verifier, 42, source)
+        .unwrap()
+        .1
+        .is_current_cached());
+    owner.source.close();
+    restored
+        .discard_recovered_add_for_closed_source(&source_close)
+        .unwrap();
+    assert!(source_close.is_drained());
+    assert!(restored.recovered_add_outcome_data().is_err());
 }
 
 async fn complete_original_welcome(native_joiner: bool) {

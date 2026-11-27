@@ -543,6 +543,28 @@ impl MemberOutboxMount {
         .ok_or_else(|| MemberOutboxRefusal::Incomplete.into())
     }
 
+    /// Use under the original row's exclusive runtime after checking that
+    /// no member save End survives. Settle only the exact existing outbox
+    /// so an uncertain original cannot silently cross a governing cut.
+    pub(in crate::store) fn require_quiescent_for_add(
+        &self,
+        store: &ServerStore,
+        context: MemberOutboxContextData,
+        key: &[u8; 32],
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<(), MemberOutboxError> {
+        self.with_existing_outbox(store, context, key, rng, |state, _| {
+            if matches!(
+                state.custody,
+                Some(MemberOriginalCustody::Prepared(_) | MemberOriginalCustody::Unresolved { .. })
+            ) {
+                return Err(MemberOutboxRefusal::Busy.into());
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     fn with_existing_outbox<T>(
         &self,
         store: &ServerStore,

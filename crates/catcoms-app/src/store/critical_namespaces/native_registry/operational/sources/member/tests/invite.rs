@@ -3776,7 +3776,26 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             let request = covered_request.expect("the original request reached the warm founder");
             let mut wrong = request.to_vec();
             *wrong.last_mut().unwrap() ^= 1;
-            for (bytes, valid) in [(bytes::Bytes::from(wrong), false), (request, true)] {
+            // A new independently signed request and fresh KeyPackage do
+            // not make this already consumed invitation usable again.
+            let retry = catcoms_sync::PreparedV2JoinRequest::prepare(
+                catcoms_mls::MlsDevice::generate().unwrap(),
+                anchor,
+                invite.binding(),
+                [0xa7; 32],
+                now,
+                catcoms_sync::DirectJoinLimits::new(
+                    2 * 1024 * 1024, 2 * 1024 * 1024, 256 * 1024,
+                ).unwrap(),
+            ).unwrap();
+            let mut conflicting = vec![request[0]];
+            conflicting.extend_from_slice(retry.request_bytes_data());
+            assert_ne!(conflicting.as_slice(), request.as_ref());
+            for (bytes, valid) in [
+                (bytes::Bytes::from(wrong), false),
+                (bytes::Bytes::from(conflicting), false),
+                (request, true),
+            ] {
                 let send = probe.request_connected(
                     peer,
                     crate::store::critical_namespaces::native_registry::operational::governed::JOIN_PROTOCOL,

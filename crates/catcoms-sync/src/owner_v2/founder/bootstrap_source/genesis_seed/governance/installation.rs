@@ -120,14 +120,20 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
     }
 
     pub fn take_retired_install_data(&mut self) -> Result<RetiredV2FounderAddInstall, SyncError> {
-        let p = self.pending.as_ref().ok_or_else(unavailable)?;
-        if p.retired_core.is_none() || p.retired_sdk.is_none() {
-            return Err(unavailable());
-        }
-        Ok(RetiredV2FounderAddInstall {
-            _original: self.pending.take().expect("checked original retired Add"),
-        })
+        take_retired_add(&mut self.pending)
     }
+}
+
+pub(super) fn take_retired_add(
+    pending: &mut Option<Box<PendingAdd>>,
+) -> Result<RetiredV2FounderAddInstall, SyncError> {
+    let p = pending.as_ref().ok_or_else(unavailable)?;
+    if p.retired_core.is_none() || p.retired_sdk.is_none() {
+        return Err(unavailable());
+    }
+    Ok(RetiredV2FounderAddInstall {
+        _original: pending.take().expect("checked original retired Add"),
+    })
 }
 
 impl PreparedV2FounderAddInstall<'_> {

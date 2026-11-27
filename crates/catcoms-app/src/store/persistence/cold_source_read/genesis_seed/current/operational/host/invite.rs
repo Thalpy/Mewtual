@@ -4,7 +4,8 @@ use crate::store::critical_namespaces::archive_bootstrap::founder::NativeFounder
 use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
 use crate::store::native_text_invite::PreparedNativeTextInvitePacket;
 use crate::store::persistence::v2_text::PreparedV2TextParentCapture;
-use crate::store::{NativeTextInviteRecovery, NativeTextSavedInvite};
+use crate::store::{NativeTextInviteRecovery, NativeTextSavedInvite, ServerStore};
+use catcoms_mls::persist::text_current_add::TextCurrentAddLimits;
 use catcoms_rt::{NativeChatKeyEnds, RequestCancellation};
 use catcoms_sync::owner_v2::{
     PreparedV2FounderInviteData, V2FounderInviteRequestData, V2GenesisSeedData,
@@ -43,6 +44,24 @@ const INVITE_BYTES: usize = FOUNDER_INVITE_DATA_BYTES
     + journal::SIGNING_JOURNAL_BYTES
     + 4 * std::mem::size_of::<PendingInvite>()
     + 4096;
+
+fn pay_join_package_verification(
+    store: &ServerStore,
+) -> Result<(TextCurrentAddLimits, CatalogReadReservation), AppError> {
+    let limits = TextCurrentAddLimits::governed_text_v2();
+    let pool = &store
+        .archive_bootstrap_policy
+        .as_ref()
+        .ok_or_else(refused)?
+        .pending
+        .pool;
+    let bytes = limits.package_typed_bytes
+        + 4 * catcoms_sync::owner_v2::MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES
+        + 16 * 1024;
+    let fee = pool.try_reserve(bytes)?;
+    fee.validate(pool, bytes)?;
+    Ok((limits, fee))
+}
 
 impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextHost<T, R> {
     #[cfg(test)]
@@ -234,19 +253,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> PreparedV2TextH
         })?;
         self.require_member_quiescent_for_add(layout)?;
         let store = layout.checked_store()?;
-        let limits =
-            catcoms_mls::persist::text_current_add::TextCurrentAddLimits::governed_text_v2();
-        let pool = &store
-            .archive_bootstrap_policy
-            .as_ref()
-            .ok_or_else(refused)?
-            .pending
-            .pool;
-        let bytes = limits.package_typed_bytes
-            + 4 * catcoms_sync::owner_v2::MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES
-            + 16 * 1024;
-        let fee = pool.try_reserve(bytes)?;
-        fee.validate(pool, bytes)?;
+        let (limits, _package_fee) = pay_join_package_verification(store)?;
         if negative.is_cancelled() {
             return Err(refused());
         }

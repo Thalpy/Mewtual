@@ -558,9 +558,15 @@ mounted row and carrier. Cold founder startup restores ordinary member history
 and its original listener from a covered Add. If no governing Add has entered,
 startup authenticates the original promoted genesis and exposes its singleton
 roster and saved local history. A founder restored at a covered Add or Remove
-can save an invitation and recover that exact packet after restart. Fresh cold
-Add, authoring before the first governing Add, and automatic peer discovery
-remain open.
+can save an invitation and recover that exact packet after restart. Its
+native listener can also select a new Add for a fresh request. It checks the
+same original invitation files and predecessor graph, covers the SDK and
+both signing stages, and syncs the immutable archive and child Head before
+installing the matching MLS and Core successors. The connected reply is
+read from the authenticated selected archive. An exact retry in the same
+runtime can continue its original covered work. Cold recovery before a
+complete Head has been selected, same-vault rejoin, authoring before the
+first governing Add, and automatic peer discovery remain open.
 
 The warm joined node can draw and sign an ordinary action through the original
 native Joiner Source. Its signing cut requires the ordinary member purpose and

@@ -1,5 +1,48 @@
 # Mewtual; Handover
 
+## Fresh Add on a recovered founder
+
+The native listener can answer a fresh signed invitation after recovering a
+selected Add or Remove. The original runtime retains the exact request and
+its paid journal, covers each native key stage, and selects matching durable
+MLS and Core state before it releases a Welcome. A lost response can use the
+selected archive. The writer rejects a different request while its original
+transaction is pending. It uses the existing encrypted Add and Head format.
+
+The initial Windows native test passed a real TCP Add after a selected
+Remove and two founder restarts, then confirmed the new Admission after
+another restart. Review identified lock placement, final file checks and
+payment tail defects. The corrected version runs the SDK outside Root and
+rechecks the actual invitation, journal and selector at the key and commit
+boundaries. The focused native test and race coverage on the corrected
+version are pending.
+
+Recovery of a crash before complete Head selection and rejoin in the same
+member vault remain open. Chat V2 stays disabled.
+
+
+## 27 November 2026 — Prepare a real Add on the recovered founder graph
+
+The recovered founder can stage one private MLS Add in Sync using its
+original policy, L0 routing and file keys, the checked selected Core
+parent, and distinct native SDK, Header, and Welcome key cuts. Exact
+retries reuse the same result. The selected graph stays at its previous
+epoch until the host covers and installs the successor. The UI lock and
+permanent Source close reclaim the original cuts and Ends before drain.
+
+Cold join classification uses the original founder and signed genesis
+anchor. It returns a historical response for the exact original request,
+rejects a different request that reuses a consumed invitation, and only
+reports an unused nonce after rereading the original predecessor digests.
+The desktop listener still serves historical responses only.
+
+Focused Windows Sync tests passed through the actual MLS Add after a
+restored Remove, cached Header and Welcome signing, and native-key
+retirement fixtures. Two focused Windows App tests passed, covering the
+mounted TCP request and predecessor identity and byte checks. The tests
+use controlled native credentials. Durable cold Add selection, fresh
+desktop admission, and rejoin remain open.
+
 ## 27 November 2026 — Save invitations at a restored founder's selected parent
 
 The disabled native Chat V2 founder restored after a covered Add or Remove
@@ -35,13 +78,12 @@ archive write. The full frontend suite passed with 3,948 tests and the
 additional compiled Svelte dialog test passed separately. The browser
 flow could not connect to the local browser debugger.
 
-The native audit request parser passed. The first mounted run stopped
-before its audit assertions when an existing archive read received a
-transient Busy before scheduling. The fixture now retries that exact
-read. The warm/cold audit and final source retirement checks are
-pending. Audit covers selected received records on this device.
-It does not include the founder's own outbox or unproven late originals
-from removed members. Chat V2 remains disabled.
+The native parser and mounted Windows desktop audit scenario passed on
+the integrated invitation stack at 675ca565. The scenario covered
+founder and joined role checks, warm and cold reads, and the original
+Source retiring while the response waited. Audit covers selected received
+records on this device. Own outbox audit and unproven late originals
+from removed members remain open. Chat V2 stays disabled.
 
 ## 26 November 2026 — Restore approved joined contacts after reopening
 
