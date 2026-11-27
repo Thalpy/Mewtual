@@ -14,6 +14,9 @@ use std::collections::BTreeSet;
 
 const ACTION_LIMIT: usize = 64;
 const LEDGER_WORK: usize = 4 * ACTION_LIMIT + MAX_PARENTS;
+// A complete archive read can scan every target and examine every parent
+// edge of the loaded ledger. Each node is expanded at most once.
+pub(in crate::store) const ARCHIVED_PROJECTION_WORK: usize = (1 + MAX_PARENTS) * ACTION_LIMIT;
 
 /// The archive revision, projection view and ledger stay owned until final UI
 /// publication. A joined view also retains its original invocation sender.
