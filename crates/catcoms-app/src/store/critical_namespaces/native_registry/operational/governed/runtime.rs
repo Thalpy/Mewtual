@@ -410,6 +410,7 @@ impl NativeTextRemovedJoinedVault {
 }
 
 pub struct NativeTextRejoinTransportRetirement(Arc<join_tcp::Transport>);
+catcoms_rt::redacted_debug! { NativeTextRejoinTransportRetirement; }
 
 impl NativeTextRejoinTransportRetirement {
     /// True only when the original reservation and actor have both drained.

@@ -11,6 +11,9 @@ pub(super) mod files;
 pub(super) const COMMANDS: &[&str] = &["rejoin_server"];
 const BUSY: &str = "Rejoin is busy. Try the same invitation again.";
 const FAILED: &str = "Rejoin did not finish. Try the same invitation again.";
+const NEED_NEW_INVITE: &str = "This invite expired. Ask for a new invite.";
+const CONNECT_FAILED: &str = "Could not connect to the invited founder.";
+const NETWORK_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
 const INPUT: &str = "Enter a Chat V2 invite and the founder’s approved IP address.";
 
 pub(super) fn handles(command: &str) -> bool {
@@ -23,7 +26,6 @@ struct Invocation {
     scope: RequestCancellation,
     invite: Zeroizing<Vec<u8>>,
     host: IpAddr,
-    _permit: OwnedSemaphorePermit,
     _credits: [NativeUiInvocationMetadata; 8],
 }
 
@@ -87,12 +89,6 @@ fn capture(state: &AppState, body: &InvokeBody) -> Result<Invocation, &'static s
     if host.is_unspecified() || host.is_multicast() {
         return Err(INPUT);
     }
-    let permit = state
-        .native_text
-        .inflight
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| BUSY)?;
     let first = state.native_text.ui_budget.prepare().map_err(|_| BUSY)?;
     let mut credits = Vec::with_capacity(8);
     credits.push(first);
@@ -108,7 +104,6 @@ fn capture(state: &AppState, body: &InvokeBody) -> Result<Invocation, &'static s
         scope,
         invite: decoded,
         host,
-        _permit: permit,
         _credits: credits.try_into().ok().expect("eight independent credits"),
     })
 }
@@ -138,17 +133,19 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
     }
     let app = invoke.message.webview_ref().app_handle().clone();
     let state = app.state::<AppState>();
-    let call = match capture(&state, invoke.message.payload()) {
-        Ok(call) => Arc::new(call),
-        Err(error) => {
-            invoke.resolver.reject(error);
-            return true;
-        }
-    };
+    // Rejoin has its own paid position. A retired vault can authenticate
+    // again while the previous generation still owns its old TCP exchange.
     let work = match state.native_text.rejoin_operation.enter() {
         Ok(work) => work,
         Err(_) => {
             invoke.resolver.reject(BUSY);
+            return true;
+        }
+    };
+    let call = match capture(&state, invoke.message.payload()) {
+        Ok(call) => Arc::new(call),
+        Err(error) => {
+            invoke.resolver.reject(error);
             return true;
         }
     };
@@ -178,6 +175,26 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
     true
 }
 
+fn pending_message(error: catcoms_app::AppError) -> &'static str {
+    match error {
+        catcoms_app::AppError::ChatV2RejoinNeedsFreshInvite => NEED_NEW_INVITE,
+        _ => FAILED,
+    }
+}
+
+async fn await_exchange<T>(
+    mut scope: RequestCancellation,
+    clock: &impl Clock,
+    network: impl Future<Output = Result<T, &'static str>>,
+) -> Result<T, &'static str> {
+    tokio::select! {
+        biased;
+        _ = scope.cancelled() => Err(listing::STALE),
+        _ = clock.sleep(NETWORK_LIMIT) => Err(CONNECT_FAILED),
+        result = network => result,
+    }
+}
+
 async fn execute(state: &AppState, call: &Arc<Invocation>) -> Result<Checkpoint, String> {
     let original = call.clone();
     let start = files::run(state, call, move |vault, ui| {
@@ -200,7 +217,7 @@ async fn execute(state: &AppState, call: &Arc<Invocation>) -> Result<Checkpoint,
                         Ok(Start::Checkpoint(Checkpoint::RestartToContinue))
                     }
                     Ok(false) => Err(BUSY.into()),
-                    Err(_) => Err(FAILED.into()),
+                    Err(error) => Err(pending_message(error).into()),
                 };
             }
             Ok(true) => {}
@@ -213,7 +230,7 @@ async fn execute(state: &AppState, call: &Arc<Invocation>) -> Result<Checkpoint,
                 &original.scope,
                 &mut OsCryptoRng,
             )
-            .map_err(|_| FAILED)?
+            .map_err(pending_message)?
             .ok_or(BUSY)?;
         if vault
             .recover_rejoin_received(&ui, (&invite, token), &original.scope, &mut OsCryptoRng)
@@ -236,10 +253,17 @@ async fn execute(state: &AppState, call: &Arc<Invocation>) -> Result<Checkpoint,
         Start::Checkpoint(step) => return Ok(step),
         Start::Local => None,
         Start::Connect(exchange) => {
-            exchange
-                .connect_approved_host(&call.invite()?, call.host, &state.endpoint_dials)
-                .await
-                .map_err(|_| "Could not connect to the invited founder.")?;
+            let network = async {
+                exchange
+                    .connect_approved_host(&call.invite()?, call.host, &state.endpoint_dials)
+                    .await
+                    .map_err(|_| CONNECT_FAILED)?;
+                exchange.receive().await.map_err(|_| FAILED)
+            };
+            // The lower request can wait for actor command capacity
+            // before observing cancellation. Own the entire network wait
+            // here. Dropping the exchange revokes the same actor signal.
+            let delivery = await_exchange(call.scope.clone(), &SystemClock, network).await?;
             #[cfg(test)]
             {
                 let edge = state
@@ -252,7 +276,7 @@ async fn execute(state: &AppState, call: &Arc<Invocation>) -> Result<Checkpoint,
                     edge.wait_once().await;
                 }
             }
-            Some(exchange.receive().await.map_err(|_| FAILED)?)
+            Some(delivery)
         }
     };
     let original = call.clone();
@@ -285,4 +309,43 @@ async fn execute(state: &AppState, call: &Arc<Invocation>) -> Result<Checkpoint,
         Ok(Checkpoint::RestartToActivate)
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use catcoms_rt::ManualClock;
+    use std::{future::pending, task::Poll};
+
+    #[tokio::test]
+    async fn rejoin_network_wait_fences_a_pending_request_and_simultaneous_reply() {
+        let (signal, receiver) = tokio::sync::watch::channel(false);
+        let scope = RequestCancellation::new(receiver, None);
+        let clock = ManualClock::default();
+        let wait = await_exchange(scope.clone(), &clock, pending::<Result<(), _>>());
+        tokio::pin!(wait);
+        std::future::poll_fn(|cx| {
+            assert!(wait.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        signal.send_replace(true);
+        assert_eq!(wait.await, Err(listing::STALE));
+        assert_eq!(
+            await_exchange(scope, &clock, async { Ok(()) }).await,
+            Err(listing::STALE)
+        );
+
+        let (_signal, receiver) = tokio::sync::watch::channel(false);
+        let scope = RequestCancellation::new(receiver, None);
+        let wait = await_exchange(scope, &clock, pending::<Result<(), _>>());
+        tokio::pin!(wait);
+        std::future::poll_fn(|cx| {
+            assert!(wait.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        clock.advance_ms(NETWORK_LIMIT.as_millis().try_into().unwrap());
+        assert_eq!(wait.await, Err(CONNECT_FAILED));
+    }
 }

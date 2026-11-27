@@ -35,6 +35,14 @@ const MAX_SOURCE: usize = 512 * 1024 + MAX_V2_JOIN_REQUEST_PACKET_BYTES + 1024;
 const MAX_PENDING: usize = 40 + 36 + 36 + 2 + 28 + 4 + MAX_SOURCE;
 const WORK_BYTES: usize = 8 * MAX_PENDING + 4 * MAX_ATTEMPT + 4 * 1024 * 1024;
 
+/// An unselected catalog can only precede an untouched rejoin. Stage itself
+/// is a separate catalog role and may be resumed from its authenticated bytes.
+pub(super) fn require_unstarted(store: &ServerStore) -> Result<(), AppError> {
+    absent(&fixed(store, false, ATTEMPT)?)?;
+    absent(&fixed(store, false, PENDING)?)?;
+    received::require_absent(store)
+}
+
 /// Covered historical data for an exact signed A2 request. It cannot start
 /// transport, enter the Welcome SDK or install active membership.
 pub struct NativeTextRejoinPendingReceipt {
@@ -730,9 +738,6 @@ impl ServerStore {
             // An orphaned or unresolved reply cannot be reassigned to a
             // replacement attempt. Preserve it and refuse before entropy.
             received::require_absent(self)?;
-            if invite.binding().expired_at_data(now_ms) {
-                return Err(denied());
-            }
             self.with_rejoin_donor(registration, |layout, raw| {
                 RecoveredPinnedPending::require_rejoin_invite(
                     &key,
@@ -742,6 +747,9 @@ impl ServerStore {
                     invite.binding(),
                 )
             })?;
+            if invite.binding().expired_at_data(now_ms) {
+                return Err(AppError::ChatV2RejoinNeedsFreshInvite);
+            }
             let sealed_attempt = seal_frame(
                 &key,
                 ATTEMPT_PURPOSE,
@@ -779,9 +787,11 @@ impl ServerStore {
                     original.retire_unentered(self, inventory, (&attempt_path, &pending_path))?;
                 } else {
                     absent(&attempt_path)?;
+                    absent(&pending_path)?;
+                    received::require_absent(self)?;
                 }
                 *slot = None;
-                return Err(denied());
+                return Err(AppError::ChatV2RejoinNeedsFreshInvite);
             }
         }
         if original.pending.is_none() {

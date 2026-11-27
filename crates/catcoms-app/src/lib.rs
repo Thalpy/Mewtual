@@ -190,6 +190,9 @@ pub enum AppError {
     /// confirm the result or acquire the selected rejoin catalog.
     #[error("Reopen the vault to confirm the saved rejoin.")]
     ChatV2RejoinCatalogReopen,
+    /// The retired mount has no covered request for this expired invitation.
+    #[error("This invite expired. Ask for a new invite.")]
+    ChatV2RejoinNeedsFreshInvite,
     /// The join did not finalize before the wall-clock deadline; e.g. an Option-C admin invite
     /// whose owner never came online to serialize the Add. The user can retry.
     #[error("the join timed out before it finalized; try again")]

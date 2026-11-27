@@ -1849,13 +1849,16 @@ async fn check_routed_rejoin(
                 .await
                 .expect("lock does not join the original TCP reply");
             assert!(found_value(locked.await.unwrap())["continuity_error"].is_null());
+            // Authenticate another generation while a genuine, verified
+            // response still belongs to the retired invocation.
+            unlock_current(&app, &main, &queue).await;
+            assert!(!work.is_finished());
             edge.release.notify_one();
             work.await.unwrap();
             refused(old.await.unwrap());
             assert!(!path
                 .join("chat-critical-namespaces.rejoin-received.bin")
                 .exists());
-            unlock_current(&app, &main, &queue).await;
         }
         let reply = invite_command(&main, "rejoin_server", args.clone());
         timeout(Duration::from_secs(60), run(&queue))
@@ -2608,21 +2611,29 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
         let caller = catcoms_rt::RequestCancellation::new(signal, None);
         let first_packet = hex::decode(invite.as_str().unwrap()).unwrap();
         let first_packet = NativeTextInvitePacketData::decode(&first_packet).unwrap();
-        for (packet, time) in [(&first_packet, 0), (&replacement, u64::MAX)] {
-            assert!(
-                retired
-                    .select_rejoin_catalog_for_invite(
-                        &catalog_ui,
-                        packet,
-                        time,
-                        &caller,
-                        &mut NeverRng,
-                    )
-                    .is_err()
-            );
-            assert_eq!(std::fs::read(&catalog).unwrap(), before);
-            assert!(!stage.exists());
-        }
+        assert!(
+            retired
+                .select_rejoin_catalog_for_invite(
+                    &catalog_ui,
+                    &first_packet,
+                    0,
+                    &caller,
+                    &mut NeverRng,
+                )
+                .is_err()
+        );
+        assert!(matches!(
+            retired.select_rejoin_catalog_for_invite(
+                &catalog_ui,
+                &replacement,
+                u64::MAX,
+                &caller,
+                &mut NeverRng,
+            ),
+            Err(catcoms_app::AppError::ChatV2RejoinNeedsFreshInvite)
+        ));
+        assert_eq!(std::fs::read(&catalog).unwrap(), before);
+        assert!(!stage.exists());
         #[derive(Debug)]
         struct FirstStageOnly {
             path: PathBuf,
@@ -2819,6 +2830,12 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
             .unwrap();
         let ui = retired.admit_rejoin_ui(&mut candidate).unwrap();
         let saved = if scenario == MembershipAfterRemove::RejoinActive {
+            let expired = (&replacement, token, u64::MAX);
+            assert!(matches!(
+                retired.cover_rejoin_pending(&ui, expired, &caller, &mut NeverRng),
+                Err(catcoms_app::AppError::ChatV2RejoinNeedsFreshInvite)
+            ));
+            assert!(!attempt.exists() && !pending.exists());
             let before_key = caller
                 .clone()
                 .with_authority(Arc::new(FirstStageOnly::new(attempt.clone())));
@@ -2840,7 +2857,9 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                 .cover_rejoin_pending(&ui, inputs, &original, &mut rng)
                 .is_err());
             assert!(original.is_cancelled() && pending.is_file());
-            retired.cover_rejoin_pending(&ui, inputs, &caller, &mut NeverRng)
+            // Authentic covered Pending retains its original request
+            // even if the invitation expires before this reply is recovered.
+            retired.cover_rejoin_pending(&ui, expired, &caller, &mut NeverRng)
         } else {
             retired.cover_rejoin_pending(&ui, inputs, &caller, &mut OsCryptoRng)
         }
@@ -2868,6 +2887,40 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
         assert_eq!(warm.context, saved.context);
         drop((old_ui, ui, candidate, retired));
         wait_for_original_vault().await;
+
+        if scenario == MembershipAfterRemove::RejoinActive {
+            // Restore only the genuine catalog from before ID9. The two
+            // files for the exact covered Pending still bind ID9 ciphertext.
+            std::fs::write(&catalog, &before).unwrap();
+            let (device, window, work) = app(member_path.clone(), None, true);
+            unlock_current(&device, &window, &work).await;
+            let input = serde_json::json!({
+                "inviteHex": hex::encode(&replacement_bytes),
+                "approvedHost": "127.0.0.1",
+            });
+            let reply = invite_command(&window, "rejoin_server", input);
+            run(&work).await;
+            let tauri::ipc::InvokeResponse::Err(error) = reply.await.unwrap() else {
+                panic!("a rolled-back catalog cannot select another rejoin");
+            };
+            assert_eq!(
+                error.0,
+                serde_json::json!("Rejoin did not finish. Try the same invitation again.")
+            );
+            assert!(!stage.exists());
+            assert_eq!(std::fs::read(&catalog).unwrap(), before);
+            assert_eq!(std::fs::read(&attempt).unwrap(), attempt_bytes);
+            assert_eq!(std::fs::read(&pending).unwrap(), pending_bytes);
+            let state = device.state::<AppState>();
+            let close = register_vault_close(&state).await.unwrap();
+            sources::close_server_rows(&state, &SystemClock)
+                .await
+                .unwrap();
+            drop((close, state));
+            drop((window, device));
+            wait_for_original_vault().await;
+            std::fs::write(&catalog, &bytes).unwrap();
+        }
 
         let (mut reopened, ui_budget) = open();
         let mut candidate = reopened

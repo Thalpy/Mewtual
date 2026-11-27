@@ -131,8 +131,11 @@ the original affine vault to a blocking worker and parks its exact return
 in a paid slot, including on unwind. Lock fences the generation before
 it waits for older file custody. The network phase restores the Store
 first and uses only the original cancellable TCP exchange. Irreversible
-close also waits for that operation and its actual TCP actor. Neither
-checkpoint receipt grants a live row.
+close also waits for that operation and its actual TCP actor. The full
+network wait observes the original cancelled scope even before enqueue.
+A pre-ID9 Current with later rejoin journals cannot replace their bound
+catalog ciphertext. The command reports expiry only for a verified
+invite without a saved request. A live row requires cold activation.
 
 A warm retired writer can discard only its own held exact unentered
 Attempt or SDK Attempt, with every subsequent role absent. It covers

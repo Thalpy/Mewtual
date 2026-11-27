@@ -11,8 +11,12 @@ The command never retains a passphrase across network I/O.
 
 Lock waits for any previously admitted exact file loan and cancels
 the original network scope without joining it. Close drains the real
-replacement TCP listener. Later same-device successors, automatic
-restart and final acceptance remain open. Chat V2 stays disabled.
+replacement TCP listener. The Windows TCP fixtures prove both rejoin
+checkpoints, reauthentication before an old verified response returns,
+A2 chat in both directions, and refusal of a pre-ID9 catalog with a
+surviving Pending. The exact request recovers after its matching catalog
+is restored. Later same-device successors, automatic restart, and final
+acceptance remain open. Chat V2 stays disabled.
 
 ## Finish or retire an interrupted rejoin key operation
 

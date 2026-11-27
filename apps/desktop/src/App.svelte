@@ -7108,7 +7108,7 @@
       if (current()) rejoinNotice = typeof error === "string" ? error
         : error instanceof Error ? error.message : "Could not rejoin. Try the same invite again.";
     } finally {
-      if (current()) rejoinBusy = false;
+      if (generation === uiStateLoadGeneration) rejoinBusy = false;
     }
   }
 
