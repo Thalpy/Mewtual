@@ -228,7 +228,7 @@ impl NativeTextJoinedStorage {
         rng: &mut impl CryptoRngCore,
         current: crate::store::V2CurrentLayoutPolicy,
     ) -> Result<Self, AppError> {
-        Ok(Self {
+        let opened = Self {
             pending: None,
             recovered_tcp: None,
             index: upgrade_source::owning::Store::open_native_startup(
@@ -238,7 +238,16 @@ impl NativeTextJoinedStorage {
                 current,
                 Self::opening_policy()?,
             )?,
-        })
+        };
+        // Surviving rejoin evidence belongs only to the previously
+        // registered joined vault. It cannot become an empty or founder
+        // startup if some older catalog files are restored.
+        if opened.index.has_rejoin_evidence()?
+            && opened.recovered_join_registration_data()?.is_none()
+        {
+            return Err(refused());
+        }
+        Ok(opened)
     }
 
     pub fn row_count_data(&self) -> Result<usize, AppError> {
@@ -255,6 +264,9 @@ impl NativeTextJoinedStorage {
         if self.pending.is_some() || self.recovered_tcp.is_some() || self.row_count_data()? != 0 {
             return Err(refused());
         }
+        if self.index.has_rejoin_evidence()? {
+            return Err(refused());
+        }
         self.index.require_empty_mounted_joined_pins()?;
         crate::store::NativeTextVault::from_recovered_joined_index(self.index, session, budget)
     }
@@ -268,6 +280,9 @@ impl NativeTextJoinedStorage {
         budget: crate::store::NativeUiInvocationBudget,
     ) -> Result<crate::store::NativeTextVault, AppError> {
         if self.pending.is_some() || self.recovered_tcp.is_some() || self.row_count_data()? != 0 {
+            return Err(refused());
+        }
+        if self.index.has_rejoin_evidence()? {
             return Err(refused());
         }
         self.index.require_native_joined_without_row()?;

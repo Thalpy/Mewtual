@@ -1736,6 +1736,11 @@ async fn native_text_rejoin_index_recovers_saved_invite_and_preserves_original_m
     native_text_membership_removal_reopen(MembershipAfterRemove::RejoinIndex).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_rejoin_activates_the_replacement_row_on_startup() {
+    native_text_membership_removal_reopen(MembershipAfterRemove::RejoinActive).await;
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MembershipAfterRemove {
     Retired,
@@ -1746,6 +1751,146 @@ enum MembershipAfterRemove {
     RejoinWelcome,
     RejoinPrefix,
     RejoinIndex,
+    RejoinActive,
+}
+
+async fn check_active_rejoin(
+    path: std::path::PathBuf,
+    old_port: u16,
+    (founder, founder_queue, founder_row): (
+        &tauri::WebviewWindow<MockRuntime>,
+        &Queue,
+        &serde_json::Value,
+    ),
+    (retired, expected, invite): (
+        &serde_json::Value,
+        catcoms_app::store::NativeTextRejoinIndexReceipt,
+        &[u8],
+    ),
+) {
+    // Rejoining must work even if another process owns A1's old port.
+    let _occupied_a1 = std::net::TcpListener::bind(("0.0.0.0", old_port)).unwrap();
+    let (member, window, queue) = app(path, None, true);
+    unlock_current(&member, &window, &queue).await;
+    let resume = resume_request(&window);
+    run(&queue).await;
+    let result = found_value(resume.await.unwrap());
+    let rows = result["servers"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    let active = &rows[0];
+    assert_eq!(active["server"].as_u64(), Some(expected.row.id));
+    assert_ne!(active["context"], retired["context"]);
+    let old = native_send_request(&window, retired, 190, "The removed row cannot publish");
+    let old_work = queue.lock().unwrap().pop();
+    if let Some(work) = old_work {
+        work.await;
+    }
+    refused(old.await.unwrap());
+
+    let exact = invite_command(
+        &window,
+        "join_server",
+        serde_json::json!({
+            "inviteHex": hex::encode(invite), "approvedHost": "127.0.0.1",
+            "displayName": "Member", "serverName": "Joined group", "isDm": false,
+            "allowSwitchboards": false,
+        }),
+    );
+    run(&queue).await;
+    let returned = found_value(exact.await.unwrap());
+    assert_eq!(returned["server"].as_u64(), Some(expected.row.id));
+    assert_eq!(returned["context"], active["context"]);
+
+    let post = native_send_request(&window, active, 191, "Saved by the replacement admission");
+    run(&queue).await;
+    let post = found_value(post.await.unwrap());
+    assert_eq!(post["disposition"], "saved-local");
+    let reply = native_send_request(
+        founder,
+        founder_row,
+        192,
+        "Received by the replacement admission",
+    );
+    run(founder_queue).await;
+    let reply = found_value(reply.await.unwrap());
+    assert_eq!(reply["disposition"], "saved-local");
+    async fn wait_for_archive(
+        window: &tauri::WebviewWindow<MockRuntime>,
+        queue: &Queue,
+        row: &serde_json::Value,
+        action: &serde_json::Value,
+    ) -> serde_json::Value {
+        timeout(Duration::from_secs(40), async {
+            loop {
+                let item = command_value_after_busy(
+                    window,
+                    queue,
+                    "get_message_page",
+                    history::BUSY,
+                    removal_history_args(row, serde_json::json!({"archivedAction": action})),
+                )
+                .await;
+                if !item["item"].is_null() {
+                    return item;
+                }
+                SystemClock.sleep(Duration::from_millis(40)).await;
+            }
+        })
+        .await
+        .expect("the other native member selects the exact original under A2")
+    }
+    let found = wait_for_archive(founder, founder_queue, founder_row, &post["message_id"]).await;
+    assert_eq!(found["item"]["text"], "Saved by the replacement admission");
+    let joined = wait_for_archive(&window, &queue, active, &reply["message_id"]).await;
+    assert_eq!(
+        joined["item"]["text"],
+        "Received by the replacement admission"
+    );
+
+    // The next governing operation uses A2's own covered Outcome before
+    // retiring the replacement and emitting its terminal notification.
+    use tauri::Listener;
+    let (notice, removed) = oneshot::channel();
+    member.once_any("chat-v2-membership", move |event| {
+        let value: serde_json::Value = serde_json::from_str(event.payload()).unwrap();
+        let _ = notice.send(value);
+    });
+    let roster = command_value_after_busy(
+        founder, founder_queue, "get_native_chat_members", membership::BUSY,
+        serde_json::json!({"server": founder_row["server"], "expectedContext": founder_row["context"]}),
+    ).await;
+    let replacement = roster["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["founder"] == false)
+        .expect("the replacement is the only nonfounder admission");
+    let result = command_value_after_busy(
+        founder,
+        founder_queue,
+        "remove_native_chat_member",
+        membership::BUSY,
+        serde_json::json!({
+            "server": founder_row["server"], "expectedContext": founder_row["context"],
+            "expectedAdmission": replacement["admission"],
+        }),
+    )
+    .await;
+    assert!(result.is_null());
+    let removed = timeout(Duration::from_secs(40), removed)
+        .await
+        .expect("the covered A2 self-Remove publishes its terminal result")
+        .unwrap();
+    assert_eq!(removed["server"].as_u64(), Some(expected.row.id));
+    assert_eq!(removed["context"], active["context"]);
+    assert_eq!(removed["removed"], true);
+
+    let state = member.state::<AppState>();
+    let close = register_vault_close(&state).await.unwrap();
+    sources::close_server_rows(&state, &SystemClock)
+        .await
+        .unwrap();
+    drop((close, state));
 }
 
 async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) {
@@ -1984,6 +2129,7 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
         wait_for_original_vault().await;
         let catalog = member_path.join("chat-critical-namespaces.bin");
         let before = std::fs::read(&catalog).unwrap();
+        let old_port = std::cell::Cell::new(0);
         let open_retired_with_ui = |atoms| {
             let mut rng = OsCryptoRng;
             let registry = Registry::default();
@@ -1994,6 +2140,7 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                 boot::current_policy().unwrap(),
             )
             .unwrap();
+            old_port.set(storage.recovered_join_transport_data().unwrap().unwrap().1);
             let (_lifetime, signal) = tokio::sync::watch::channel(false);
             let negative = catcoms_rt::RequestCancellation::new(signal, None);
             let runtime = storage
@@ -2247,7 +2394,12 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
         let caller = catcoms_rt::RequestCancellation::new(signal, None);
         let attempt = member_path.join("chat-critical-namespaces.rejoin-attempt.bin");
         let pending = member_path.join("chat-critical-namespaces.rejoin-pending.bin");
-        let inputs = (&replacement, [95; 32], now);
+        let token = if scenario == MembershipAfterRemove::RejoinActive {
+            joining::request_token(&replacement)
+        } else {
+            [95; 32]
+        };
+        let inputs = (&replacement, token, now);
         lock.store(true, Ordering::SeqCst);
         assert!(retired
             .cover_rejoin_pending(&old_ui, inputs, &caller, &mut NeverRng)
@@ -2283,12 +2435,7 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
             std::fs::rename(original, path).unwrap();
         }
         let warm = retired
-            .cover_rejoin_pending(
-                &ui,
-                (&replacement, [95; 32], u64::MAX),
-                &caller,
-                &mut NeverRng,
-            )
+            .cover_rejoin_pending(&ui, (&replacement, token, u64::MAX), &caller, &mut NeverRng)
             .unwrap()
             .unwrap();
         assert_eq!(warm.request_digest, saved.request_digest);
@@ -2307,7 +2454,7 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                 if let Some(receipt) = reopened
                     .cover_rejoin_pending(
                         &ui,
-                        (&replacement, [95; 32], u64::MAX),
+                        (&replacement, token, u64::MAX),
                         &caller,
                         &mut NeverRng,
                     )
@@ -2359,6 +2506,7 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                 | MembershipAfterRemove::RejoinWelcome
                 | MembershipAfterRemove::RejoinPrefix
                 | MembershipAfterRemove::RejoinIndex
+                | MembershipAfterRemove::RejoinActive
         ) {
             let admit = |owner: &catcoms_app::store::NativeTextRemovedJoinedVault, generation| {
                 let mut prepared = owner
@@ -2371,12 +2519,7 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
             std::fs::rename(&pending, &held).unwrap();
             std::fs::write(&pending, &pending_bytes).unwrap();
             assert!(reopened
-                .prepare_rejoin_exchange(
-                    admit(&reopened, 2),
-                    &replacement,
-                    [95; 32],
-                    caller.clone()
-                )
+                .prepare_rejoin_exchange(admit(&reopened, 2), &replacement, token, caller.clone())
                 .is_err());
             std::fs::remove_file(&pending).unwrap();
             std::fs::rename(&held, &pending).unwrap();
@@ -2384,12 +2527,7 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
             let scheduler = catcoms_discovery::EndpointDialScheduler::new(Default::default());
             let host = std::net::Ipv4Addr::LOCALHOST.into();
             let old = reopened
-                .prepare_rejoin_exchange(
-                    admit(&reopened, 2),
-                    &replacement,
-                    [95; 32],
-                    caller.clone(),
-                )
+                .prepare_rejoin_exchange(admit(&reopened, 2), &replacement, token, caller.clone())
                 .unwrap()
                 .expect("the original A1 listener drained");
             lock.store(true, Ordering::SeqCst);
@@ -2405,19 +2543,14 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
             let original_received =
                 member_path.join("chat-critical-namespaces.rejoin-received.bin");
             let local_ui = admit(&reopened, 3);
-            let invitation = (&replacement, [95; 32]);
+            let invitation = (&replacement, token);
             assert!(reopened
                 .recover_rejoin_received(&local_ui, invitation, &caller, &mut NeverRng)
                 .unwrap()
                 .is_none());
             assert!(!original_received.exists());
             let exchange = reopened
-                .prepare_rejoin_exchange(
-                    admit(&reopened, 3),
-                    &replacement,
-                    [95; 32],
-                    caller.clone(),
-                )
+                .prepare_rejoin_exchange(admit(&reopened, 3), &replacement, token, caller.clone())
                 .unwrap()
                 .unwrap();
             exchange
@@ -2461,6 +2594,7 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                     MembershipAfterRemove::RejoinWelcome
                         | MembershipAfterRemove::RejoinPrefix
                         | MembershipAfterRemove::RejoinIndex
+                        | MembershipAfterRemove::RejoinActive
                 ) {
                     let NativeTextRejoinWelcomeStatus::Covered(result) = reopened
                         .cover_rejoin_welcome(&local_ui, invitation, &caller, &mut OsCryptoRng)
@@ -2485,7 +2619,9 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                     member_path.join("chat-critical-namespaces.rejoin-initial-prefix.bin");
                 let covered_prefix = if matches!(
                     scenario,
-                    MembershipAfterRemove::RejoinPrefix | MembershipAfterRemove::RejoinIndex,
+                    MembershipAfterRemove::RejoinPrefix
+                        | MembershipAfterRemove::RejoinIndex
+                        | MembershipAfterRemove::RejoinActive,
                 ) {
                     let result = reopened
                         .cover_rejoin_prefix(&local_ui, invitation, &caller, &mut OsCryptoRng)
@@ -2516,7 +2652,10 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                 };
                 let index_path =
                     member_path.join("chat-critical-namespaces.rejoin-native-index.bin");
-                let covered_index = if scenario == MembershipAfterRemove::RejoinIndex {
+                let covered_index = if matches!(
+                    scenario,
+                    MembershipAfterRemove::RejoinIndex | MembershipAfterRemove::RejoinActive
+                ) {
                     let installed = reopened
                         .cover_rejoin_index(&local_ui, invitation, &caller, &mut OsCryptoRng)
                         .unwrap()
@@ -2598,12 +2737,52 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                     assert_eq!(std::fs::read(&index_path).unwrap(), raw);
                     drop((ui, capture, cold));
                     wait_for_original_vault().await;
+                    if scenario == MembershipAfterRemove::RejoinActive {
+                        // Put back the real pre-ID9 catalog and park the three
+                        // original Remove files. A2's surviving Index must
+                        // prevent this partial rollback from restoring A1.
+                        let name = selector.file_name().unwrap().to_str().unwrap();
+                        let roles = [
+                            selector.clone(),
+                            selector.with_file_name(
+                                name.replace("joined-member-selected", "joined-member-add"),
+                            ),
+                            selector.with_file_name(
+                                name.replace("joined-member-selected", "joined-member-header")
+                                    .replace(".2.bin", ".2.first.bin"),
+                            ),
+                        ];
+                        let parked = roles
+                            .each_ref()
+                            .map(|role| role.with_extension("rollback-for-test"));
+                        for (role, saved) in roles.iter().zip(&parked) {
+                            std::fs::rename(role, saved).unwrap();
+                        }
+                        std::fs::write(&catalog, &before).unwrap();
+                        assert_eq!(
+                            removed_response(member_path.clone()).await,
+                            serde_json::json!("Could not unlock the existing Chat V2 vault."),
+                        );
+                        wait_for_original_vault().await;
+                        assert_eq!(std::fs::read(&index_path).unwrap(), raw);
+                        std::fs::write(&catalog, &bytes).unwrap();
+                        for (role, saved) in roles.iter().zip(&parked) {
+                            std::fs::rename(saved, role).unwrap();
+                        }
+                        check_active_rejoin(
+                            member_path.clone(),
+                            old_port.get(),
+                            (&main, &founder_queue, &found),
+                            (&joined, expected, &replacement_bytes),
+                        )
+                        .await;
+                    }
                     return;
                 }
                 let replay = cold
                     .cover_rejoin_pending(
                         &ui,
-                        (&replacement, [95; 32], u64::MAX),
+                        (&replacement, token, u64::MAX),
                         &caller,
                         &mut NeverRng,
                     )

@@ -281,6 +281,13 @@ impl Physical {
         &self,
         data: crate::store::NativeTextJoinedRegistrationData,
     ) -> Result<(), AppError> {
+        let store = self.current()?.checked_store()?;
+        if store
+            .with_installed_rejoin(|original| original.row(store, data).map(drop))?
+            .is_some()
+        {
+            return Ok(());
+        }
         self.with_registered_native_join(data, |_, _| Ok(()))
     }
 
@@ -584,6 +591,16 @@ impl Physical {
         data: crate::store::NativeTextJoinedRegistrationData,
         complete_under_cell: impl FnOnce(&ServerStore, &UpgradeInventory) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
+        self.with_owned_join_inventory(data, |store, inventory| {
+            complete_under_cell(store, &inventory)
+        })
+    }
+
+    fn with_owned_join_inventory<T>(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+        complete_under_cell: impl FnOnce(&ServerStore, UpgradeInventory) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
         let cell = self.cell.try_lock().map_err(|_| refused())?;
         cell.require_idle()?;
         self.handler.require_idle_cached()?;
@@ -599,7 +616,46 @@ impl Physical {
         if store.recovered_join_registration_data()? != Some(data) {
             return Err(refused());
         }
-        complete_under_cell(store, &inventory)
+        complete_under_cell(store, inventory)
+    }
+
+    pub(super) fn has_rejoin_index(&self) -> Result<bool, AppError> {
+        self.current()?.checked_store()?.has_rejoin_index()
+    }
+
+    pub(super) fn has_rejoin_evidence(&self) -> Result<bool, AppError> {
+        self.current()?.checked_store()?.has_rejoin_evidence()
+    }
+
+    pub(super) fn recover_installed_rejoin(
+        &self,
+        registration: crate::store::NativeTextJoinedRegistrationData,
+        removal: catcoms_sync::SelectedRejoinRemoval,
+        negative: &catcoms_rt::RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<crate::store::NativeTextJoinedRegistrationData>, AppError> {
+        if !self.rejoin_catalog_selected()? {
+            return Err(refused());
+        }
+        self.with_owned_join_inventory(registration, |store, inventory| {
+            if !store.has_rejoin_index()? {
+                return Ok(None);
+            }
+            store
+                .recover_installed_rejoin(inventory, (registration, removal), negative, rng)
+                .map(Some)
+        })
+    }
+
+    pub(super) fn attach_recovered_rejoin<R: CryptoRngCore>(
+        &self,
+        inputs: &mut Option<JoinedRuntimeInputs<catcoms_net::MeshService, R>>,
+        output: &mut Option<catcoms_sync::ClosedV2JoinedNode<catcoms_net::MeshService, R>>,
+    ) -> Result<(), AppError> {
+        let store = self.current()?.checked_store()?;
+        store
+            .with_installed_rejoin_mut(|original| original.attach(store, inputs, output))?
+            .ok_or_else(refused)
     }
 
     pub(super) fn prepare_recovered_native_join_tcp(
@@ -610,7 +666,13 @@ impl Physical {
         let store = self.current()?.checked_store()?;
         let (mount, fee) =
             self.joined_exchange_resources(catcoms_net::NATIVE_TCP_LIFETIME_BYTES)?;
-        let seed = store.recovered_join_transport_seed(data)?;
+        let seed = match store.with_installed_rejoin(|original| {
+            original.row(store, *data)?;
+            original.prepare_tcp(store)
+        })? {
+            Some(seed) => seed,
+            None => store.recovered_join_transport_seed(data)?,
+        };
         if mount.is_cancelled() {
             return Err(refused());
         }
@@ -1960,6 +2022,24 @@ impl MetadataWork {
             self.physical.handler.debit(),
             self.physical.handler.pool(),
         )?;
+        if let Some((row, prior)) = store.with_installed_rejoin(|original| {
+            if warm.is_some() {
+                return Err(refused());
+            }
+            Ok((original.row(store, data)?, original.prior_registration()))
+        })? {
+            let (_, names) =
+                super::super::super::super::lifecycle::preparation::observe_registered_native_join(
+                    store, &inventory, prior,
+                )?;
+            inventory.require(store)?;
+            return Ok((row, names));
+        }
+        // A genuine older A1 can still be restored from old files. Surviving
+        // A2 evidence prevents publishing it through the normal row route.
+        if store.has_rejoin_evidence()? {
+            return Err(refused());
+        }
         let result =
             super::super::super::super::lifecycle::preparation::observe_registered_native_join(
                 store, &inventory, data,

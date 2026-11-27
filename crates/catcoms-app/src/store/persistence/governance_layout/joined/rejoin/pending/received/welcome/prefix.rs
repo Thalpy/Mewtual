@@ -8,7 +8,9 @@ use catcoms_replication::chat::{
 
 mod index;
 pub use index::NativeTextRejoinIndexReceipt;
-pub(in crate::store) use index::{RejoinIndexInputs, RejoinIndexOwner, RejoinIndexRecovery};
+pub(in crate::store) use index::{
+    InstalledRejoin, RejoinIndexInputs, RejoinIndexOwner, RejoinIndexRecovery,
+};
 
 const PREFIX: &str = "chat-critical-namespaces.rejoin-initial-prefix.bin";
 const PREFIX_TAG: &str = "catcoms/chat-v2/rejoin-initial-prefix/v1";
@@ -29,7 +31,7 @@ pub(super) fn require_unstarted(store: &ServerStore) -> Result<(), AppError> {
 }
 
 pub(in crate::store) struct RejoinPrefixOwner {
-    core: JoinedCore,
+    core: std::sync::Arc<JoinedCore>,
     frame: Option<JournalFrame>,
     // Keep the receipt after finish consumes the pending Core transition.
     receipt: Option<NativeTextRejoinPrefixReceipt>,
@@ -208,7 +210,7 @@ impl ServerStore {
             // Sync issues this particular prefix only once per closed graph.
             // Keep it before any further file or lifecycle work can refuse.
             *slot = Some(Box::new(RejoinPrefixOwner {
-                core,
+                core: std::sync::Arc::new(core),
                 frame: None,
                 receipt: None,
                 pending_cookie: pending.cookie().clone(),
@@ -252,7 +254,9 @@ impl ServerStore {
         require()?;
         frame.require(&prefix_path)?;
         if prefix.receipt.is_none() {
-            prefix.core.finish()?;
+            std::sync::Arc::get_mut(&mut prefix.core)
+                .ok_or_else(denied)?
+                .finish()?;
             let selected = prefix.core.selected_data().ok_or_else(denied)?;
             if (selected.governing_add, selected.epoch) != (receipt.header, receipt.epoch)
                 || selected.own_admission == removal.1

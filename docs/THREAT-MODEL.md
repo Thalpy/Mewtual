@@ -97,7 +97,15 @@ the intent only from held, authenticated Attempt and Pending files,
 then rechecks the same parents and UI generation before returning.
 An existing successor with a missing parent denies recovery before
 any replacement prefix is written. The covered Index4 receipt grants
-no live membership.
+no live membership. Authenticated startup can use the private held
+Index4 owner with its exact files, closed SDK graph and selected Core
+prefix. When a replacement selector is present, startup first verifies
+the original removal in isolation, without an A1 network listener.
+A2 gets its own native row, transport, source and governing context.
+An older catalog with surviving rejoin records cannot issue an active
+A1, idle or founder owner. This check detects partial rollback that
+leaves those records. A coherent rollback of the whole vault is
+outside this proof.
 
 Cold founder startup can complete a fully staged later Add only after vault
 authentication and replay under the original pin. It retains and rechecks

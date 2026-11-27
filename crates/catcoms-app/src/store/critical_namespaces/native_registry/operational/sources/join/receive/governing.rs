@@ -382,20 +382,23 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                         original: response.original.clone(),
                     }));
                     let result = if runtime.recovered.is_some() {
-                        store.cover_recovered_member_add(node, &response.frame, &signal, rng)
+                        store.observe_recovered_member_add(node, &response.frame, &signal, rng)
                     } else {
                         pending
                             .io
                             .as_mut()
                             .ok_or(Refusal::Unavailable)?
                             .cover_member_add(store, node, &response.frame, &signal, rng)
+                            .map(|transition| (transition, Ok(())))
                     };
-                    let transition = result.map_err(|error| match error {
+                    let classify = |error| match error {
                         AppError::Io(_) => Refusal::Busy,
                         _ => Refusal::Failed,
-                    })?;
+                    };
+                    let (transition, verified) = result.map_err(classify)?;
                     let terminal = transition.terminal_data();
                     retired = Some(transition);
+                    verified.map_err(classify)?;
                     mount.require_live(store).map_err(|_| Refusal::Cancelled)?;
                     if let Some(terminal) = terminal {
                         return Ok(terminal);

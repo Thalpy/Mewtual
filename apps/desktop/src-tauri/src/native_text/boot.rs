@@ -165,19 +165,14 @@ impl Bootstrap {
                                         row.instance,
                                     );
                                 }
-                                let runtime = storage
-                                    .bind_recovered_native_runtime(
-                                        rng,
-                                        Box::new(SystemClock),
-                                        &negative,
-                                    )
-                                    .map_err(|_| EXISTING)?;
-                                let (vault, sources) = runtime
-                                    .into_recovered_native_sources(
+                                let (vault, sources) = storage
+                                    .into_native_startup_sources(
                                         atoms,
                                         budget.clone(),
                                         &source_policy,
                                         &negative,
+                                        (rng, Box::new(SystemClock)),
+                                        (OsCryptoRng, Box::new(SystemClock)),
                                     )
                                     .map_err(|error| match error {
                                         catcoms_app::AppError::ChatV2MembershipRemoved => {

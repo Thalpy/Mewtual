@@ -17,7 +17,7 @@ const INDEX_STAGE: &str = "chat-critical-namespaces.joined-pin.stage";
 const SOURCE_FEE: usize = 12 * MAX_FRAME + 4 * 1024 * 1024;
 const SOURCE_ID_DOMAIN: &str = "catcoms/private-chat-v2-native-pending-source-id/v1";
 mod registration;
-mod welcome;
+pub(super) mod welcome;
 pub(in crate::store) use registration::JoinedRegistrationDependency;
 pub(in crate::store) use welcome::RecoveredMemberPrefix;
 pub(super) use welcome::{reserve_sdk_graph, JoinedCore};
@@ -264,6 +264,11 @@ impl ServerStore {
         expected: NativeTextJoinedRegistrationData,
         request: &catcoms_sync::V2MemberAddRequestData,
     ) -> Result<Vec<u8>, AppError> {
+        if let Some(frame) =
+            self.with_installed_rejoin(|owner| owner.encode_successor(self, expected, request))?
+        {
+            return Ok(frame);
+        }
         if self.recovered_join_registration_data()? != Some(expected) {
             return Err(denied());
         }
@@ -290,6 +295,35 @@ impl ServerStore {
         caller: &catcoms_rt::RequestCancellation,
         rng: &mut impl catcoms_rt::CryptoRngCore,
     ) -> Result<critical_namespaces::joined_pin::welcome::RetiredJoinedMembership, AppError> {
+        let (retired, verified) = self.observe_recovered_member_add(node, delivery, caller, rng)?;
+        verified?;
+        Ok(retired)
+    }
+
+    /// Return the actual retired graph even if the final physical reproof
+    /// refuses. Native must still revoke the terminal source and drop that
+    /// graph outside its guards. Only successful reproof may report success.
+    pub(in crate::store) fn observe_recovered_member_add<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &self,
+        node: &mut catcoms_sync::ClosedV2JoinedNode<T, R>,
+        delivery: &[u8],
+        caller: &catcoms_rt::RequestCancellation,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+    ) -> Result<
+        (
+            critical_namespaces::joined_pin::welcome::RetiredJoinedMembership,
+            Result<(), AppError>,
+        ),
+        AppError,
+    > {
+        if let Some(retired) = self.with_installed_rejoin_mut(|owner| {
+            owner.cover_successor(self, node, delivery, caller, rng)
+        })? {
+            return Ok(retired);
+        }
         let (_, context) = self.selected_pending_join_data()?.ok_or_else(denied)?;
         let (retired, verified) = {
             let mut slot = self.joined_pin_index.try_lock().map_err(|_| denied())?;
@@ -303,8 +337,7 @@ impl ServerStore {
             let retired = welcome.cover_member_add(self, context, node, delivery, caller, rng)?;
             (retired, selected.require(self))
         };
-        verified?;
-        Ok(retired)
+        Ok((retired, verified))
     }
 
     #[cfg(all(test, any(windows, target_os = "linux")))]
@@ -391,6 +424,11 @@ impl ServerStore {
         &self,
         expected: NativeTextJoinedRegistrationData,
     ) -> Result<RecoveredMemberPrefix, AppError> {
+        if let Some(prefix) =
+            self.with_installed_rejoin(|owner| owner.capture_prefix(self, expected))?
+        {
+            return Ok(prefix);
+        }
         if self.recovered_join_registration_data()? != Some(expected) {
             return Err(denied());
         }

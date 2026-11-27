@@ -682,9 +682,10 @@ registration, Welcome and Remove stay in place through this step.
 The new admission descends from the exact selected removal. The retired
 owner can exchange the saved request over TCP and cover its Welcome,
 Outcome, signed prefix and Index4. The covered successor retains the old
-row and selects one replacement row. Saved outbox originals keep their
-original scopes. Live attachment, renderer rejoin, further same-device
-successors and physical acceptance remain open.
+row and selects one replacement row. Native startup attaches the exact
+replacement and replays its subsequent governing history. Saved outbox
+originals keep their original scopes. Starting rejoin from the renderer,
+further same-device successors and physical acceptance remain open.
 
 ## Acceptance before enabling
 

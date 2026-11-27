@@ -509,7 +509,9 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextJoinedRuntime<T, R> {
         }
         // During rejoin staging ID9 still owns the retired A1 row. Neither
         // a storage-only caller nor native startup may use an active A1.
-        if self.storage.index.rejoin_catalog_selected()? {
+        if self.storage.index.rejoin_catalog_selected()?
+            || self.storage.index.has_rejoin_evidence()?
+        {
             return Err(refused());
         }
         let (head, own, epoch) = node.selected_join_data().map_err(|_| refused())?;
@@ -636,20 +638,151 @@ impl<R: CryptoRngCore> NativeTextJoinedRuntime<catcoms_net::MeshService, R> {
             return Ok(NativeTextJoinedRecovery::Removed(original));
         }
         let native_tcp = self.storage.recovered_tcp.take().ok_or_else(refused)?;
-        let budget = policy.prepare()?;
-        let vault = crate::store::NativeTextVault::from_recovered_joined_index(
+        finish_recovered_node(
             self.storage.index,
-            session,
-            ui_budget,
+            (self.node.take(), receipt, native_tcp, self._fee),
+            (session, ui_budget, policy),
+            negative,
+        )
+    }
+}
+
+impl NativeTextJoinedStorage {
+    /// Recover a registered native member on authenticated startup. A
+    /// present replacement index must match the original terminal proof.
+    pub fn into_native_startup_sources<R: CryptoRngCore>(
+        mut self,
+        session: (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
+        ui_budget: crate::store::NativeUiInvocationBudget,
+        policy: &crate::store::NativeTextSourcePolicy,
+        negative: &RequestCancellation,
+        (first_rng, first_clock): (R, Box<dyn catcoms_rt::Clock + Send>),
+        (mut replacement_rng, replacement_clock): (R, Box<dyn catcoms_rt::Clock + Send>),
+    ) -> Result<
+        (
+            crate::store::NativeTextVault,
+            crate::store::NativeTextSources<catcoms_net::MeshService, R>,
+        ),
+        AppError,
+    > {
+        if !self.index.has_rejoin_index()? {
+            return self
+                .bind_recovered_native_runtime(first_rng, first_clock, negative)
+                .map_err(|(_, error)| error)?
+                .into_recovered_native_sources(session, ui_budget, policy, negative);
+        }
+        if self.pending.is_some()
+            || self.row_count_data()? != 1
+            || !self.index.rejoin_catalog_selected()?
+            || negative.is_cancelled()
+        {
+            return Err(refused());
+        }
+        let first = self
+            .recovered_join_registration_data()?
+            .ok_or_else(refused)?;
+        self.index.require_registered_native_join(first)?;
+        let (_, fee) = self.index.joined_exchange_resources(
+            runtime_invoice::<catcoms_rt::MemNetwork, R>() + 16 * 1024,
         )?;
-        let mut sources = vault
-            .capture_native_sources(budget)
-            .finish()
-            .map_err(|_| refused())?;
-        sources.install_recovered_joined(self.node.take(), receipt, native_tcp, self._fee)?;
+        // The retired proof needs its complete local MLS graph for replay,
+        // but only in isolation. Its old TCP port and keys stay unused.
+        let predecessor = catcoms_rt::Hub::new().join(first.transport_data().0);
+        let mut inputs = Some((predecessor, first_rng, first_clock));
+        let mut node = None;
+        let removal = self
+            .index
+            .attach_recovered_joined_node(&mut inputs, &mut node)?
+            .ok_or_else(refused)?;
+        let first_node = node.as_ref().ok_or_else(refused)?;
+        if first_node.original_join_data() != first.selected_data()
+            || removal.1 != first.selected_data().1
+            || negative.is_cancelled()
+        {
+            return Err(refused());
+        }
+        drop((node, inputs, fee));
+        let replacement = self
+            .index
+            .recover_installed_rejoin(first, removal, negative, &mut replacement_rng)?
+            .ok_or_else(refused)?;
+        match attach_recovered_rejoin(
+            self.index,
+            replacement,
+            (replacement_rng, replacement_clock),
+            (session, ui_budget, policy),
+            negative,
+        )? {
+            NativeTextJoinedRecovery::Active(vault, sources) => Ok((vault, sources)),
+            NativeTextJoinedRecovery::Removed(_) => Err(refused()),
+        }
+    }
+}
+type NativeRejoinSession<'a> = (
+    (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
+    crate::store::NativeUiInvocationBudget,
+    &'a crate::store::NativeTextSourcePolicy,
+);
+
+fn attach_recovered_rejoin<R: CryptoRngCore>(
+    index: upgrade_source::owning::Store,
+    replacement: NativeTextJoinedRegistrationData,
+    (rng, clock): (R, Box<dyn catcoms_rt::Clock + Send>),
+    startup: NativeRejoinSession<'_>,
+    negative: &RequestCancellation,
+) -> Result<NativeTextJoinedRecovery<R>, AppError> {
+    let require = || {
         if negative.is_cancelled() {
             return Err(refused());
         }
-        Ok(NativeTextJoinedRecovery::Active(vault, sources))
+        index.require_registered_native_join(replacement)
+    };
+    require()?;
+    let (_, fee) =
+        index.joined_exchange_resources(runtime_invoice::<catcoms_net::MeshService, R>())?;
+    let (_, owner_fee) = index.joined_exchange_resources(32 * 1024)?;
+    let transport = Arc::new(join_tcp::Transport::paid(owner_fee));
+    let mut original = transport.checkout(
+        replacement.transport_data(),
+        || index.prepare_recovered_native_join_tcp(&replacement),
+        require,
+    )?;
+    let mut inputs = Some((original.take()?, rng, clock));
+    original.attached();
+    let mut node = None;
+    index.attach_recovered_rejoin(&mut inputs, &mut node)?;
+    require()?;
+    finish_recovered_node(
+        index,
+        (node, replacement, transport, fee),
+        startup,
+        negative,
+    )
+}
+
+type RecoveredJoinNode<R> = (
+    Option<ClosedV2JoinedNode<catcoms_net::MeshService, R>>,
+    NativeTextJoinedRegistrationData,
+    Arc<join_tcp::Transport>,
+    CatalogReadReservation,
+);
+
+fn finish_recovered_node<R: CryptoRngCore>(
+    index: upgrade_source::owning::Store,
+    (node, receipt, transport, fee): RecoveredJoinNode<R>,
+    (session, ui_budget, policy): NativeRejoinSession<'_>,
+    negative: &RequestCancellation,
+) -> Result<NativeTextJoinedRecovery<R>, AppError> {
+    let budget = policy.prepare()?;
+    let vault =
+        crate::store::NativeTextVault::from_recovered_joined_index(index, session, ui_budget)?;
+    let mut sources = vault
+        .capture_native_sources(budget)
+        .finish()
+        .map_err(|_| refused())?;
+    sources.install_recovered_joined(node, receipt, transport, fee)?;
+    if negative.is_cancelled() {
+        return Err(refused());
     }
+    Ok(NativeTextJoinedRecovery::Active(vault, sources))
 }

@@ -19,7 +19,7 @@ use critical_namespaces::joined_pin::pending::SelectedJoinData;
 use critical_namespaces::joined_pin::welcome as codec;
 use std::sync::Arc;
 
-mod member_add;
+pub(in crate::store::persistence::governance_layout::joined) mod member_add;
 
 pub(super) const ENTRY: &str = "chat-critical-namespaces.joined-welcome-entry.bin";
 pub(super) const OUTCOME: &str = "chat-critical-namespaces.joined-welcome-outcome.bin";
@@ -301,13 +301,19 @@ struct ClosedOutcome {
 pub(in crate::store) struct RecoveredMemberPrefix(Arc<JoinedCore>);
 
 impl RecoveredMemberPrefix {
+    pub(in crate::store::persistence::governance_layout::joined) fn capture(
+        core: &Arc<JoinedCore>,
+    ) -> Self {
+        Self(Arc::clone(core))
+    }
+
     pub(in crate::store) fn member_parts(&self) -> (&PreparedV2JoinedPrefix, &ProjectionGroupView) {
         (&self.0.core, &self.0._view)
     }
 }
 
 pub(in crate::store::persistence::governance_layout::joined) struct JoinedCore {
-    core: PreparedV2JoinedPrefix,
+    pub(in crate::store::persistence::governance_layout::joined) core: PreparedV2JoinedPrefix,
     expected: V2HostSelectionExpectation,
     initial: Option<SelectedJoinData>,
     public_headers: (OwnerHeaderId, OwnerHeaderId),

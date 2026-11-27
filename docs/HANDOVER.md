@@ -112,6 +112,22 @@ replay bounds remain open. So do the 2,048-record and 256 MiB archive
 ceilings and independent founder replay of an unsaved received original.
 Chat V2 stays disabled.
 
+## Reopen the replacement membership through native startup
+
+An authenticated startup with the covered replacement index replays the
+first membership's terminal Remove without opening its old TCP port.
+The replacement uses its own reserved transport, registered row, closed
+Welcome and later governing journal. The per-vault outbox and received
+history remain available under their existing scope.
+
+The Windows native fixture reopens with the old port occupied, verifies
+that only the replacement row is present, exchanges real messages with
+the founder and observes a later selected Remove. It also refuses the
+earlier catalog and membership files when the replacement index survives
+a partial rollback. Starting a same-vault rejoin from the renderer,
+further same-device successors and final acceptance remain open.
+Chat V2 remains disabled.
+
 ## Cover and recover the replacement membership's native index
 
 The original retired vault can cover an Index4 successor under the

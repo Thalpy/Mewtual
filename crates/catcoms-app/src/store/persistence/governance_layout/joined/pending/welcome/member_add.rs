@@ -12,7 +12,7 @@ const MAX_EPOCH: u64 = MAX_V2_GOVERNING_JOIN_STEPS as u64;
 const RECORD_FEE: usize = 8 * (codec::MEMBER_ADD_FRAME + codec::MEMBER_SELECTION_FRAME + 1) + 4096;
 
 #[derive(Default)]
-pub(super) struct MemberAdds {
+pub(in crate::store::persistence::governance_layout::joined) struct MemberAdds {
     covered: Vec<Covered>,
     pending: Option<Pending>,
     evicted: bool,
@@ -140,7 +140,9 @@ impl MemberAdds {
         Ok(())
     }
 
-    pub(super) fn require_current(&self) -> Result<(), AppError> {
+    pub(in crate::store::persistence::governance_layout::joined) fn require_current(
+        &self,
+    ) -> Result<(), AppError> {
         if self.pending.is_some() || self.evicted || self.fork.is_some() {
             return Err(denied());
         }
@@ -160,7 +162,7 @@ impl MemberAdds {
         self.covered.try_reserve(1).map_err(|_| denied())
     }
 
-    pub(super) fn encode_selected_successor(
+    pub(in crate::store::persistence::governance_layout::joined) fn encode_selected_successor(
         &self,
         store: &ServerStore,
         context: V2PendingJoinContextData,
@@ -186,7 +188,10 @@ impl MemberAdds {
         Ok(data.delivery)
     }
 
-    pub(super) fn cover<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore>(
+    pub(in crate::store::persistence::governance_layout::joined) fn cover<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
         &mut self,
         (store, context): (&ServerStore, V2PendingJoinContextData),
         welcome: &[u8],
@@ -326,7 +331,10 @@ impl MemberAdds {
         Ok(retired)
     }
 
-    pub(super) fn recover<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore>(
+    pub(in crate::store::persistence::governance_layout::joined) fn recover<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
         &mut self,
         store: &ServerStore,
         context: V2PendingJoinContextData,

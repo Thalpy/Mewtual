@@ -28,7 +28,7 @@ use crate::store::persistence::governance_layout::joined::{
         RejoinIndexInputs, RejoinIndexRecovery, RejoinPendingOwner, RejoinPrefixInputs,
         RejoinReceivedInput, RejoinReceivedOwner, RejoinWelcomeKeyEntry, RejoinWelcomeOwners,
     },
-    AcceptedFirstJoin, JoinedPendingIo, JoinedPinOpening,
+    AcceptedFirstJoin, JoinedPendingIo, JoinedPinOpening, JoinedRuntimeInputs,
 };
 use crate::store::persistence::native_registry::lifecycle::upgrade::{UpgradeInventory, UpgradeIo};
 use crate::store::{ServerStore, V2CurrentLayoutStore};
@@ -660,6 +660,39 @@ impl Store {
     ) -> Result<crate::store::NativeTextRejoinIndexReceipt, AppError> {
         self.physical
             .recover_rejoin_index(original, sources, caller, rng, require_current)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn has_rejoin_index(
+        &self,
+    ) -> Result<bool, AppError> {
+        self.physical.has_rejoin_index()
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn has_rejoin_evidence(
+        &self,
+    ) -> Result<bool, AppError> {
+        self.physical.has_rejoin_evidence()
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn recover_installed_rejoin(
+        &self,
+        registration: crate::store::NativeTextJoinedRegistrationData,
+        removal: catcoms_sync::SelectedRejoinRemoval,
+        negative: &catcoms_rt::RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<crate::store::NativeTextJoinedRegistrationData>, AppError> {
+        self.physical
+            .recover_installed_rejoin(registration, removal, negative, rng)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn attach_recovered_rejoin<
+        R: CryptoRngCore,
+    >(
+        &self,
+        inputs: &mut Option<JoinedRuntimeInputs<catcoms_net::MeshService, R>>,
+        output: &mut Option<catcoms_sync::ClosedV2JoinedNode<catcoms_net::MeshService, R>>,
+    ) -> Result<(), AppError> {
+        self.physical.attach_recovered_rejoin(inputs, output)
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn select_retired_rejoin_catalog(
