@@ -142,6 +142,12 @@ fn attempt_plain(
     Ok(Zeroizing::new(encoded.finish()))
 }
 
+struct OpenedPending {
+    receipt: NativeTextRejoinPendingReceipt,
+    recovered: RecoveredV2PendingJoinSource,
+    transport: JoinedTransportReservation,
+}
+
 fn verify_pending(
     binding: &Binding,
     invite: &NativeTextInvitePacketData<'_>,
@@ -149,6 +155,16 @@ fn verify_pending(
     limits: DirectJoinLimits,
     frame: &[u8],
 ) -> Result<NativeTextRejoinPendingReceipt, AppError> {
+    open_pending(binding, invite, key, limits, frame).map(|original| original.receipt)
+}
+
+fn open_pending(
+    binding: &Binding,
+    invite: &NativeTextInvitePacketData<'_>,
+    key: &[u8; 32],
+    limits: DirectJoinLimits,
+    frame: &[u8],
+) -> Result<OpenedPending, AppError> {
     let plain = open_frame(key, PENDING_PURPOSE, frame)?;
     let mut decoded = Decoder::new(&plain);
     let malformed = |_| denied();
@@ -183,21 +199,25 @@ fn verify_pending(
     if recovered.rejoin_remove_data() != Some(binding.removal) {
         return Err(denied());
     }
-    Ok(NativeTextRejoinPendingReceipt {
-        request_digest: binding.require_original(recovered.request_bytes_data(), invite)?,
-        context: binding.context,
+    Ok(OpenedPending {
+        receipt: NativeTextRejoinPendingReceipt {
+            request_digest: binding.require_original(recovered.request_bytes_data(), invite)?,
+            context: binding.context,
+        },
+        recovered,
+        transport,
     })
 }
 
-fn cover_existing(path: &Path, original: &OpenedArchiveObject) -> Result<(), AppError> {
-    let identity = session_id(&original.0).map_err(io)?;
+fn cover_existing(path: &Path, original: &File, frame: &[u8]) -> Result<(), AppError> {
+    let identity = session_id(original).map_err(io)?;
     let (file, opened) = open_exact_write(path, WriteMode::Existing)?;
     if opened != identity {
         return Err(denied());
     }
-    exact_held(path, &file, identity, &original.1)?;
+    exact_held(path, &file, identity, frame)?;
     sync_selected_catalog(&file).map_err(io)?;
-    exact_held(path, &file, identity, &original.1)
+    exact_held(path, &file, identity, frame)
 }
 
 pub(in crate::store) type RejoinKeyEntry<'a> = (
@@ -207,6 +227,7 @@ pub(in crate::store) type RejoinKeyEntry<'a> = (
 );
 
 pub(in crate::store) struct WarmRejoinPending {
+    cookie: std::sync::Arc<()>,
     binding: Binding,
     attempt: Zeroizing<Vec<u8>>,
     attempt_file: Option<CreatedStage>,
@@ -217,6 +238,60 @@ pub(in crate::store) struct WarmRejoinPending {
     key_may_have_entered: bool,
     _lease: catcoms_storage::VaultPhysicalWorkLease,
     _fee: CatalogReadReservation,
+}
+
+pub(in crate::store) struct ColdRejoinPending {
+    cookie: std::sync::Arc<()>,
+    binding: Binding,
+    attempt: OpenedArchiveObject,
+    pending: OpenedArchiveObject,
+    _lease: catcoms_storage::VaultPhysicalWorkLease,
+    fee: CatalogReadReservation,
+}
+
+pub(in crate::store) enum RejoinPendingOwner {
+    Warm(Box<WarmRejoinPending>),
+    Cold(Box<ColdRejoinPending>),
+}
+
+impl RejoinPendingOwner {
+    fn invoice(&self) -> &CatalogReadReservation {
+        match self {
+            Self::Warm(original) => &original._fee,
+            Self::Cold(original) => &original.fee,
+        }
+    }
+
+    fn cookie(&self) -> &std::sync::Arc<()> {
+        match self {
+            Self::Warm(original) => &original.cookie,
+            Self::Cold(original) => &original.cookie,
+        }
+    }
+
+    pub(in crate::store) fn matches_cookie(&self, original: &std::sync::Arc<()>) -> bool {
+        std::sync::Arc::ptr_eq(self.cookie(), original)
+    }
+
+    fn files(&self, binding: &Binding) -> Result<[(&File, &[u8]); 2], AppError> {
+        match self {
+            Self::Warm(warm) if &warm.binding == binding => Ok([
+                (
+                    &warm.attempt_file.as_ref().ok_or_else(denied)?.file,
+                    &warm.attempt,
+                ),
+                (
+                    &warm.pending_file.as_ref().ok_or_else(denied)?.file,
+                    warm.pending.as_ref().ok_or_else(denied)?,
+                ),
+            ]),
+            Self::Cold(cold) if &cold.binding == binding => Ok([
+                (&cold.attempt.0, &cold.attempt.1),
+                (&cold.pending.0, &cold.pending.1),
+            ]),
+            _ => Err(denied()),
+        }
+    }
 }
 
 fn cover_new(path: &Path, frame: &[u8], file: &mut Option<CreatedStage>) -> Result<(), AppError> {
@@ -234,14 +309,147 @@ fn cover_new(path: &Path, frame: &[u8], file: &mut Option<CreatedStage>) -> Resu
     exact_retained(path, file.as_ref().ok_or_else(denied)?, frame)
 }
 
+/// Paid custody issued only after re-covering both exact journal files.
+pub(in crate::store) struct PreparedRejoinTransport {
+    pub(in crate::store) recovered: RecoveredV2PendingJoinSource,
+    pub(in crate::store) seed: Zeroizing<[u8; 32]>,
+    pub(in crate::store) local: (catcoms_rt::PeerId, u16),
+    pub(in crate::store) receipt: NativeTextRejoinPendingReceipt,
+    pub(in crate::store) cookie: std::sync::Arc<()>,
+    pub(in crate::store) mount: catcoms_rt::RequestCancellation,
+    pub(in crate::store) transport_lease: catcoms_storage::VaultPhysicalWorkLease,
+    pub(in crate::store) pool: CriticalCatalogReadPool,
+    pub(in crate::store) exchange_fee: CatalogReadReservation,
+}
+
+fn existing_rejoin_files(
+    attempt_path: &Path,
+    pending_path: &Path,
+) -> Result<Option<(OpenedArchiveObject, OpenedArchiveObject)>, AppError> {
+    let Some(attempt) = read(attempt_path, MAX_ATTEMPT)? else {
+        absent(pending_path)?;
+        return Ok(None);
+    };
+    let pending = read(pending_path, MAX_PENDING)?.ok_or_else(denied)?;
+    Ok(Some((attempt, pending)))
+}
+
+fn require_held_rejoin_files(
+    paths: [&Path; 2],
+    files: [(&File, &[u8]); 2],
+) -> Result<(), AppError> {
+    for (path, (file, frame)) in paths.into_iter().zip(files) {
+        exact_held(path, file, session_id(file).map_err(io)?, frame)?;
+    }
+    Ok(())
+}
+
 impl ServerStore {
+    fn open_covered_rejoin_files(
+        &self,
+        inventory: &UpgradeInventory,
+        binding: &Binding,
+        (key, invite, limits): (&[u8; 32], &NativeTextInvitePacketData<'_>, DirectJoinLimits),
+        paths: [&Path; 2],
+        files: [(&File, &[u8]); 2],
+    ) -> Result<OpenedPending, AppError> {
+        require_held_rejoin_files(paths, files)?;
+        if open_frame(key, ATTEMPT_PURPOSE, files[0].1)? != attempt_plain(binding, invite)? {
+            return Err(denied());
+        }
+        let opened = open_pending(binding, invite, key, limits, files[1].1)?;
+        for (path, (file, frame)) in paths.into_iter().zip(files) {
+            cover_existing(path, file, frame)?;
+        }
+        inventory.sync_rejoin_catalog_parent(self)?;
+        require_held_rejoin_files(paths, files)?;
+        self.require_recovered_joined_removal(binding.previous, binding.removal)?;
+        absent(&fixed(self, false, REJOIN_STAGE)?)?;
+        inventory.require(self)?;
+        Ok(opened)
+    }
+
+    /// Reprove a completed replacement request for an explicitly approved
+    /// native exchange. This path never admits a device or Welcome cut.
+    pub(in crate::store) fn prepare_rejoin_transport(
+        &self,
+        inventory: &UpgradeInventory,
+        (registration, removal): (NativeTextJoinedRegistrationData, SelectedRejoinRemoval),
+        slot: &mut Option<RejoinPendingOwner>,
+        (invite, token): (&NativeTextInvitePacketData<'_>, [u8; 32]),
+    ) -> Result<PreparedRejoinTransport, AppError> {
+        let catalog = self.cover_selected_rejoin_catalog(registration, removal, inventory)?;
+        let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        let pool = &policy.current.archive.pending.pool;
+        let binding = Binding::new(catalog, registration, removal, invite, token)?;
+        let key = Zeroizing::new(self.keys.db_key()?);
+        let attempt_path = fixed(self, false, ATTEMPT)?;
+        let pending_path = fixed(self, false, PENDING)?;
+        let paths = [attempt_path.as_path(), pending_path.as_path()];
+        let limits = DirectJoinLimits::new(
+            512 * 1024,
+            2 * 1024 * 1024,
+            MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES,
+        )
+        .map_err(|_| denied())?;
+        let opened = if let Some(original) = slot.as_ref() {
+            original.invoice().validate(pool, WORK_BYTES)?;
+            self.open_covered_rejoin_files(
+                inventory,
+                &binding,
+                (&key, invite, limits),
+                paths,
+                original.files(&binding)?,
+            )?
+        } else {
+            let fee = pool.try_reserve(WORK_BYTES)?;
+            let (attempt, pending) =
+                existing_rejoin_files(paths[0], paths[1])?.ok_or_else(denied)?;
+            let opened = self.open_covered_rejoin_files(
+                inventory,
+                &binding,
+                (&key, invite, limits),
+                paths,
+                [(&attempt.0, &attempt.1), (&pending.0, &pending.1)],
+            )?;
+            *slot = Some(RejoinPendingOwner::Cold(Box::new(ColdRejoinPending {
+                cookie: std::sync::Arc::new(()),
+                binding,
+                attempt,
+                pending,
+                _lease: self._session.retain_for_physical_work(),
+                fee,
+            })));
+            opened
+        };
+        let (peer, port, _) = opened.transport.identity_data()?;
+        let (seed, _) = opened.transport.sealed_record_data();
+        let exchange_fee = pool.try_reserve(
+            4 * (opened.recovered.request_bytes_data().len()
+                + 1
+                + catcoms_rt::CHAT_V2_JOIN_RESPONSE_MAX_BYTES)
+                + 4096,
+        )?;
+        Ok(PreparedRejoinTransport {
+            recovered: opened.recovered,
+            seed: Zeroizing::new(*seed),
+            local: (peer, port),
+            receipt: opened.receipt,
+            cookie: slot.as_ref().ok_or_else(denied)?.cookie().clone(),
+            mount: self.chat_mount.observer(),
+            transport_lease: self._session.retain_for_physical_work(),
+            pool: pool.clone(),
+            exchange_fee,
+        })
+    }
+
     /// The physical caller holds the original native registry cell and its
     /// inventory. No socket or Welcome work may follow from this receipt.
     pub(in crate::store) fn cover_rejoin_pending(
         &self,
         inventory: &UpgradeInventory,
         (registration, removal): (NativeTextJoinedRegistrationData, SelectedRejoinRemoval),
-        warm: &mut Option<Box<WarmRejoinPending>>,
+        slot: &mut Option<RejoinPendingOwner>,
         (invite, token, now_ms): (&NativeTextInvitePacketData<'_>, [u8; 32], u64),
         (native, cut, ends): RejoinKeyEntry<'_>,
         rng: &mut impl CryptoRngCore,
@@ -251,10 +459,10 @@ impl ServerStore {
         let catalog = self.cover_selected_rejoin_catalog(registration, removal, inventory)?;
         let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
         let pool = &policy.current.archive.pending.pool;
-        let fee = if let Some(original) = warm.as_ref() {
-            // The original invoice covers both the retained request and
-            // this attempt's transient sealing and read overlap.
-            original._fee.validate(pool, WORK_BYTES)?;
+        let fee = if let Some(original) = slot.as_ref() {
+            // The original invoice covers the files, retained request
+            // and their transient sealing and read overlap.
+            original.invoice().validate(pool, WORK_BYTES)?;
             None
         } else {
             Some(pool.try_reserve(WORK_BYTES)?)
@@ -277,28 +485,38 @@ impl ServerStore {
             absent(&fixed(self, false, REJOIN_STAGE)?)
         };
 
-        if warm.is_none() {
-            if let Some(covered_attempt) = read(&attempt_path, MAX_ATTEMPT)? {
-                if open_frame(&key, ATTEMPT_PURPOSE, &covered_attempt.1)? != attempt {
-                    return Err(denied());
-                }
-                // A durable attempt without all of the private output is
-                // ambiguous after restart. Preserve it without new key work.
-                let covered_pending = read(&pending_path, MAX_PENDING)?.ok_or_else(denied)?;
-                let result = verify_pending(&binding, invite, &key, limits, &covered_pending.1)?;
-                cover_existing(&attempt_path, &covered_attempt)?;
-                cover_existing(&pending_path, &covered_pending)?;
-                inventory.sync_rejoin_catalog_parent(self)?;
-                for (path, file) in [
-                    (&attempt_path, &covered_attempt),
-                    (&pending_path, &covered_pending),
-                ] {
-                    exact_held(path, &file.0, session_id(&file.0).map_err(io)?, &file.1)?;
-                }
+        let paths = [attempt_path.as_path(), pending_path.as_path()];
+        if let Some(original @ RejoinPendingOwner::Cold(_)) = slot.as_ref() {
+            let opened = self.open_covered_rejoin_files(
+                inventory,
+                &binding,
+                (&key, invite, limits),
+                paths,
+                original.files(&binding)?,
+            )?;
+            require()?;
+            return Ok(opened.receipt);
+        }
+        if slot.is_none() {
+            if let Some((attempt, pending)) = existing_rejoin_files(paths[0], paths[1])? {
+                let opened = self.open_covered_rejoin_files(
+                    inventory,
+                    &binding,
+                    (&key, invite, limits),
+                    paths,
+                    [(&attempt.0, &attempt.1), (&pending.0, &pending.1)],
+                )?;
                 require()?;
-                return Ok(result);
+                *slot = Some(RejoinPendingOwner::Cold(Box::new(ColdRejoinPending {
+                    cookie: std::sync::Arc::new(()),
+                    binding,
+                    attempt,
+                    pending,
+                    _lease: self._session.retain_for_physical_work(),
+                    fee: fee.ok_or_else(denied)?,
+                })));
+                return Ok(opened.receipt);
             }
-            absent(&pending_path)?;
             if invite.binding().expired_at_data(now_ms) {
                 return Err(denied());
             }
@@ -312,7 +530,8 @@ impl ServerStore {
                 )
             })?;
             let sealed_attempt = seal_frame(&key, ATTEMPT_PURPOSE, &attempt, rng)?;
-            *warm = Some(Box::new(WarmRejoinPending {
+            *slot = Some(RejoinPendingOwner::Warm(Box::new(WarmRejoinPending {
+                cookie: std::sync::Arc::new(()),
                 binding,
                 attempt: sealed_attempt,
                 attempt_file: None,
@@ -323,9 +542,11 @@ impl ServerStore {
                 key_may_have_entered: false,
                 _lease: self._session.retain_for_physical_work(),
                 _fee: fee.ok_or_else(denied)?,
-            }));
+            })));
         }
-        let original = warm.as_mut().ok_or_else(denied)?;
+        let Some(RejoinPendingOwner::Warm(original)) = slot.as_mut() else {
+            return Err(denied());
+        };
         if original.binding != binding {
             return Err(denied());
         }

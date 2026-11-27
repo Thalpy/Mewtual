@@ -260,6 +260,10 @@ impl Transport {
 }
 
 impl Loan {
+    pub(super) fn is_for_original(&self, original: &Arc<Transport>) -> bool {
+        Arc::ptr_eq(&self.original, original)
+    }
+
     pub(super) fn borrow(&self) -> Result<&MeshService, AppError> {
         self.transport.as_deref().ok_or_else(refused)
     }

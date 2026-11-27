@@ -1,5 +1,21 @@
 # Mewtual; Handover
 
+## Exchange a saved replacement membership request
+
+A retired vault can reuse its covered replacement Pending over TCP. It
+retains the original Attempt and Pending files on warm and cold paths,
+and checks their identities and contents before starting a new exchange.
+The caller approves a numeric host for the exact invited peer. The
+authenticated response must match the saved request and the original
+Remove before the native caller receives it.
+
+The Windows native test passed an actual first Join, Remove, cold
+reopen and A2 request to the founder. It also refused an equal-byte
+replacement of the Pending file and a previous UI generation. The test
+holds the A1 retirement and checks that it remains selected throughout.
+The delivery is held in memory. Durable delivery, Welcome processing,
+membership installation and the renderer route remain open.
+
 ## Save the exact second membership request
 
 A newly opened retired vault covers the selected ID9 catalog again before
@@ -19,9 +35,9 @@ a current UI generation. Errors after entry retain the attempt.
 
 The Windows fixture passed real first membership, selected removal and
 warm and cold rejoin Pending recovery using a new invite. The new native
-backend returns historical receipts. The renderer command, A2 transport,
-Welcome and outcome files, Index4 activation and real multi-device
-acceptance are still open.
+backend returns historical receipts. The separate exchange now carries
+these saved bytes over TCP. Welcome and outcome files, Index4 activation,
+the renderer route and real multi-device acceptance are still open.
 
 ## Same-device rejoin proof and cold removal
 

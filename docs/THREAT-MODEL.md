@@ -45,6 +45,14 @@ verifying its child and checking the selected local stores. An original
 page, approval and connection bound the request. Chains have a fixed
 deadline, attempt cap and depth cap.
 
+For same-device Chat V2 rejoin, the retired vault retains the exact
+Attempt and Pending file handles across the exchange. It authenticates
+and rechecks both files, the selected ID9 catalog, and the original A1
+Remove. The A2 TCP loan binds the current UI generation, vault mount,
+explicit numeric host and authenticated founder peer. The response must
+verify against the original request and the Remove-to-Add prefix. The
+returned delivery grants no MLS Welcome or active member authority.
+
 Cold founder startup can complete a fully staged later Add only after vault
 authentication and replay under the original pin. It retains and rechecks
 the named parent, archive, stage and each journal record against their

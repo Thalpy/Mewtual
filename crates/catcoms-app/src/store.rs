@@ -126,7 +126,8 @@ pub use critical_namespaces::{
     NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob,
 };
 pub use critical_namespaces::{
-    NativeTextJoinedRecovery, NativeTextJoinedRuntime, NativeTextRemovedJoinedVault,
+    NativeTextJoinedRecovery, NativeTextJoinedRuntime, NativeTextRejoinDelivery,
+    NativeTextRejoinExchange, NativeTextRemovedJoinedVault,
 };
 pub(crate) use mounted::LegacyStoreCustody;
 pub use mounted::{MountedLeaseRefusal, MountedLeaseRefusalKind, MountedVault};

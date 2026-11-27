@@ -536,6 +536,24 @@ impl Store {
         self.physical.cover_selected_rejoin_catalog(data, removal)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_rejoin_transport(
+        &self,
+        original: (
+            crate::store::NativeTextJoinedRegistrationData,
+            catcoms_sync::SelectedRejoinRemoval,
+        ),
+        warm: &mut Option<
+            crate::store::persistence::governance_layout::joined::rejoin::RejoinPendingOwner,
+        >,
+        invitation: (&crate::store::NativeTextInvitePacketData<'_>, [u8; 32]),
+    ) -> Result<
+        crate::store::persistence::governance_layout::joined::rejoin::PreparedRejoinTransport,
+        AppError,
+    > {
+        self.physical
+            .prepare_rejoin_transport(original, warm, invitation)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn cover_rejoin_pending(
         &self,
         original: (
@@ -543,7 +561,7 @@ impl Store {
             catcoms_sync::SelectedRejoinRemoval,
         ),
         warm: &mut Option<
-            Box<crate::store::persistence::governance_layout::joined::rejoin::WarmRejoinPending>,
+            crate::store::persistence::governance_layout::joined::rejoin::RejoinPendingOwner,
         >,
         request: (&crate::store::NativeTextInvitePacketData<'_>, [u8; 32], u64),
         native: crate::store::persistence::governance_layout::joined::rejoin::RejoinKeyEntry<'_>,
