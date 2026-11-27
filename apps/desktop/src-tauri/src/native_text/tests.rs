@@ -1528,12 +1528,18 @@ async fn native_text_rejoin_exchange_uses_the_cold_original_pending_over_tcp() {
     native_text_membership_removal_reopen(MembershipAfterRemove::RejoinExchange).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_rejoin_received_data_recovers_without_network_or_key_entry() {
+    native_text_membership_removal_reopen(MembershipAfterRemove::RejoinReceived).await;
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MembershipAfterRemove {
     Retired,
     NewMember,
     StagedAdd,
     RejoinExchange,
+    RejoinReceived,
 }
 
 async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) {
@@ -2082,7 +2088,10 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
         assert_eq!(std::fs::read(&catalog).unwrap(), bytes);
         assert_eq!(std::fs::read(&selector).unwrap(), selector_bytes);
         std::fs::write(&pending, &pending_bytes).unwrap();
-        if scenario == MembershipAfterRemove::RejoinExchange {
+        if matches!(
+            scenario,
+            MembershipAfterRemove::RejoinExchange | MembershipAfterRemove::RejoinReceived
+        ) {
             let admit = |owner: &catcoms_app::store::NativeTextRemovedJoinedVault, generation| {
                 let mut prepared = owner
                     .prepare_rejoin_ui(generation, ui_budget.prepare().unwrap())
@@ -2125,6 +2134,15 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                 .is_err());
             drop(old);
 
+            let original_received =
+                member_path.join("chat-critical-namespaces.rejoin-received.bin");
+            let local_ui = admit(&reopened, 3);
+            let invitation = (&replacement, [95; 32]);
+            assert!(reopened
+                .recover_rejoin_received(&local_ui, invitation, &caller, &mut NeverRng)
+                .unwrap()
+                .is_none());
+            assert!(!original_received.exists());
             let exchange = reopened
                 .prepare_rejoin_exchange(
                     admit(&reopened, 3),
@@ -2148,9 +2166,108 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
             assert_eq!(std::fs::read(&catalog).unwrap(), bytes);
             assert_eq!(std::fs::read(&pending).unwrap(), pending_bytes);
 
-            lock.store(true, Ordering::SeqCst);
-            assert!(!delivery.is_for_original_cached(&reopened));
-            drop((delivery, ui, candidate, reopened));
+            if scenario == MembershipAfterRemove::RejoinReceived {
+                let receipt = delivery
+                    .cover(&mut reopened, invitation, &mut OsCryptoRng)
+                    .unwrap();
+                assert_eq!(receipt.request_digest, saved.request_digest);
+                assert_ne!(receipt.delivery_digest, [0; 32]);
+                let raw = std::fs::read(&original_received).unwrap();
+                let renamed = original_received.with_extension("received-for-test");
+                std::fs::rename(&original_received, &renamed).unwrap();
+                std::fs::write(&original_received, &raw).unwrap();
+                assert!(reopened
+                    .recover_rejoin_received(&local_ui, invitation, &caller, &mut NeverRng)
+                    .is_err());
+                std::fs::remove_file(&original_received).unwrap();
+                std::fs::rename(&renamed, &original_received).unwrap();
+                assert_eq!(
+                    reopened
+                        .recover_rejoin_received(&local_ui, invitation, &caller, &mut NeverRng)
+                        .unwrap(),
+                    Some(receipt),
+                );
+                drop((local_ui, ui, candidate, reopened));
+                wait_for_original_vault().await;
+
+                let (mut cold, ui_budget) = open();
+                timeout(Duration::from_secs(10), async {
+                    while cold.removal_data().unwrap().is_none() {
+                        SystemClock.sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                let mut capture = cold
+                    .prepare_rejoin_ui(3, ui_budget.prepare().unwrap())
+                    .finish()
+                    .unwrap();
+                let ui = cold.admit_rejoin_ui(&mut capture).unwrap();
+                let replay = cold
+                    .cover_rejoin_pending(
+                        &ui,
+                        (&replacement, [95; 32], u64::MAX),
+                        &caller,
+                        &mut NeverRng,
+                    )
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(replay.request_digest, saved.request_digest);
+                let partial = &raw[..raw.len() / 2];
+                std::fs::write(&original_received, partial).unwrap();
+                assert!(cold
+                    .recover_rejoin_received(&ui, invitation, &caller, &mut NeverRng)
+                    .is_err());
+                assert_eq!(std::fs::read(&original_received).unwrap(), partial);
+                std::fs::write(&original_received, &raw).unwrap();
+                assert_eq!(
+                    cold.recover_rejoin_received(&ui, invitation, &caller, &mut NeverRng)
+                        .unwrap(),
+                    Some(receipt),
+                );
+                assert_eq!(std::fs::read(&original_received).unwrap(), raw);
+                assert_eq!(cold.removal_data().unwrap(), Some(proof));
+                drop((ui, capture, cold));
+                wait_for_original_vault().await;
+
+                let held_attempt = attempt.with_extension("rejoin-attempt-held-for-test");
+                let held_pending = pending.with_extension("rejoin-pending-held-for-test");
+                std::fs::rename(&attempt, &held_attempt).unwrap();
+                std::fs::rename(&pending, &held_pending).unwrap();
+                let (mut orphaned, ui_budget) = open();
+                timeout(Duration::from_secs(10), async {
+                    while orphaned.removal_data().unwrap().is_none() {
+                        SystemClock.sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                let mut capture = orphaned
+                    .prepare_rejoin_ui(3, ui_budget.prepare().unwrap())
+                    .finish()
+                    .unwrap();
+                let ui = orphaned.admit_rejoin_ui(&mut capture).unwrap();
+                assert!(orphaned
+                    .cover_rejoin_pending(&ui, inputs, &caller, &mut NeverRng)
+                    .is_err());
+                assert!(!attempt.exists() && !pending.exists());
+                assert_eq!(std::fs::read(&original_received).unwrap(), raw);
+                std::fs::rename(&held_attempt, &attempt).unwrap();
+                std::fs::rename(&held_pending, &pending).unwrap();
+                assert_eq!(
+                    orphaned
+                        .cover_rejoin_pending(&ui, inputs, &caller, &mut NeverRng)
+                        .unwrap()
+                        .unwrap()
+                        .request_digest,
+                    saved.request_digest,
+                );
+                drop((ui, capture, orphaned));
+            } else {
+                lock.store(true, Ordering::SeqCst);
+                assert!(!delivery.is_for_original_cached(&reopened));
+                drop((delivery, local_ui, ui, candidate, reopened));
+            }
             wait_for_original_vault().await;
             let founder_state = founder.state::<AppState>();
             let close = register_vault_close(&founder_state).await.unwrap();

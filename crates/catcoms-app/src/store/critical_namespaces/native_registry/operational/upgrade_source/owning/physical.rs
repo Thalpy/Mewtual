@@ -448,10 +448,53 @@ impl Physical {
         })
     }
 
+    pub(super) fn cover_rejoin_received(
+        &self,
+        original: (
+            crate::store::NativeTextJoinedRegistrationData,
+            catcoms_sync::SelectedRejoinRemoval,
+        ),
+        funds: (&RejoinPendingOwner, &mut Option<RejoinReceivedOwner>),
+        invite: (&crate::store::NativeTextInvitePacketData<'_>, [u8; 32]),
+        input: RejoinReceivedInput<'_>,
+        rng: &mut impl CryptoRngCore,
+        require_current: impl Fn() -> Result<(), AppError>,
+    ) -> Result<Option<crate::store::NativeTextRejoinReceivedReceipt>, AppError> {
+        if !self.rejoin_catalog_selected()? {
+            return Err(refused());
+        }
+        // The Received writer performs its final inventory and exact file
+        // proof here under the same cell. Do not do later physical checks
+        // after it has established the original reply receipt.
+        self.with_registered_native_join_inventory(original.0, |store, inventory| {
+            store.cover_rejoin_received(
+                inventory,
+                original,
+                funds,
+                invite,
+                input,
+                rng,
+                require_current,
+            )
+        })
+    }
+
     fn with_registered_native_join<T>(
         &self,
         data: crate::store::NativeTextJoinedRegistrationData,
         require: impl FnOnce(&ServerStore, &UpgradeInventory) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        self.with_registered_native_join_inventory(data, |store, inventory| {
+            let output = require(store, inventory)?;
+            inventory.require(store)?;
+            Ok(output)
+        })
+    }
+
+    fn with_registered_native_join_inventory<T>(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+        complete_under_cell: impl FnOnce(&ServerStore, &UpgradeInventory) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
         let cell = self.cell.try_lock().map_err(|_| refused())?;
         cell.require_idle()?;
@@ -468,9 +511,7 @@ impl Physical {
         if store.recovered_join_registration_data()? != Some(data) {
             return Err(refused());
         }
-        let output = require(store, &inventory)?;
-        inventory.require(store)?;
-        Ok(output)
+        complete_under_cell(store, &inventory)
     }
 
     pub(super) fn prepare_recovered_native_join_tcp(
