@@ -2,8 +2,12 @@
 //! There is no active member or Welcome authority at this boundary.
 use super::super::super::native_ui::UiEffectNegative;
 use super::*;
-use crate::store::persistence::governance_layout::joined::rejoin::PreparedRejoinTransport;
-use crate::store::{NativeTextInvitePacketData, NativeTextRejoinPendingReceipt};
+use crate::store::persistence::governance_layout::joined::rejoin::{
+    PreparedRejoinTransport, RejoinReceivedInput,
+};
+use crate::store::{
+    NativeTextInvitePacketData, NativeTextRejoinPendingReceipt, NativeTextRejoinReceivedReceipt,
+};
 use catcoms_rt::{Clock, PeerId, RequestAuthority, SystemClock};
 
 const TRANSPORT_CONTROL_BYTES: usize = 4096;
@@ -139,6 +143,40 @@ impl NativeTextRemovedJoinedVault {
     }
 }
 
+impl NativeTextRemovedJoinedVault {
+    /// Recover already covered delivery data under a fresh admitted UI
+    /// generation. The caller first proves the covered replacement Pending.
+    /// Nothing connects or enters a native key on this path.
+    pub fn recover_rejoin_received(
+        &mut self,
+        ui: &UiCapture,
+        invite: (&NativeTextInvitePacketData<'_>, [u8; 32]),
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<NativeTextRejoinReceivedReceipt>, AppError> {
+        if !self.tcp_drain.is_drained() {
+            return Ok(None);
+        }
+        self.ui.require_capture(ui)?;
+        let authority = &self.ui;
+        let require_current = || {
+            if caller.is_cancelled() || !authority.is_current_cached(ui) {
+                return Err(refused());
+            }
+            Ok(())
+        };
+        let pending = self.rejoin_pending.as_ref().ok_or_else(refused)?;
+        self.index.cover_rejoin_received(
+            (self.registration, self.removal),
+            (pending, &mut self.rejoin_received),
+            invite,
+            RejoinReceivedInput::LocalRetry,
+            rng,
+            require_current,
+        )
+    }
+}
+
 impl NativeTextRejoinExchange {
     /// Dial only the original invited peer at this explicitly approved IP.
     pub async fn connect_approved_host(
@@ -191,6 +229,40 @@ pub struct NativeTextRejoinDelivery {
 }
 
 impl NativeTextRejoinDelivery {
+    /// Cover the exact received DATA under the original retired mount and
+    /// live invitation exchange. The lease survives until the write returns.
+    pub fn cover(
+        self,
+        original: &mut NativeTextRemovedJoinedVault,
+        invite: (&NativeTextInvitePacketData<'_>, [u8; 32]),
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextRejoinReceivedReceipt, AppError> {
+        if !self.is_for_original_cached(original) {
+            return Err(refused());
+        }
+        let require_current = || {
+            if self.delivery.scope.is_cancelled() || self.exchange.signal.is_cancelled() {
+                return Err(refused());
+            }
+            Ok(())
+        };
+        let pending = original.rejoin_pending.as_ref().ok_or_else(refused)?;
+        original
+            .index
+            .cover_rejoin_received(
+                (original.registration, original.removal),
+                (pending, &mut original.rejoin_received),
+                invite,
+                RejoinReceivedInput::Connected {
+                    pending_cookie: &self.exchange.cookie,
+                    delivery: &self.delivery.bytes,
+                },
+                rng,
+                require_current,
+            )?
+            .ok_or_else(refused)
+    }
+
     pub fn request_digest_data(&self) -> [u8; 32] {
         self.exchange.receipt.request_digest
     }

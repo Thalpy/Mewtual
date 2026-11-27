@@ -14,8 +14,11 @@ use catcoms_sync::SelectedRejoinRemoval;
 const REJOIN_STAGE: &str = "chat-critical-namespaces.rejoin.stage";
 
 mod pending;
-pub use pending::NativeTextRejoinPendingReceipt;
-pub(in crate::store) use pending::{PreparedRejoinTransport, RejoinKeyEntry, RejoinPendingOwner};
+pub use pending::{NativeTextRejoinPendingReceipt, NativeTextRejoinReceivedReceipt};
+pub(in crate::store) use pending::{
+    PreparedRejoinTransport, RejoinKeyEntry, RejoinPendingOwner, RejoinReceivedInput,
+    RejoinReceivedOwner,
+};
 
 /// The exact native inventory can outlive the handler scratch that checked
 /// A1. Its buffers and files always retire before its dedicated invoice.

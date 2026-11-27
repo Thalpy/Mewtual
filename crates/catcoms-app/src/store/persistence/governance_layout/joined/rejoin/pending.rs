@@ -12,6 +12,10 @@ use catcoms_sync::{
 };
 use catcoms_wire::{Decoder, Encoder};
 
+mod received;
+pub use received::NativeTextRejoinReceivedReceipt;
+pub(in crate::store) use received::{RejoinReceivedInput, RejoinReceivedOwner};
+
 const ATTEMPT: &str = "chat-critical-namespaces.rejoin-attempt.bin";
 const PENDING: &str = "chat-critical-namespaces.rejoin-pending.bin";
 const ATTEMPT_PURPOSE: &str = "catcoms/chat-v2/rejoin-attempt/v1";
@@ -322,6 +326,15 @@ pub(in crate::store) struct PreparedRejoinTransport {
     pub(in crate::store) exchange_fee: CatalogReadReservation,
 }
 
+fn pending_limits() -> Result<DirectJoinLimits, AppError> {
+    DirectJoinLimits::new(
+        512 * 1024,
+        2 * 1024 * 1024,
+        MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES,
+    )
+    .map_err(|_| denied())
+}
+
 fn existing_rejoin_files(
     attempt_path: &Path,
     pending_path: &Path,
@@ -386,12 +399,7 @@ impl ServerStore {
         let attempt_path = fixed(self, false, ATTEMPT)?;
         let pending_path = fixed(self, false, PENDING)?;
         let paths = [attempt_path.as_path(), pending_path.as_path()];
-        let limits = DirectJoinLimits::new(
-            512 * 1024,
-            2 * 1024 * 1024,
-            MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES,
-        )
-        .map_err(|_| denied())?;
+        let limits = pending_limits()?;
         let opened = if let Some(original) = slot.as_ref() {
             original.invoice().validate(pool, WORK_BYTES)?;
             self.open_covered_rejoin_files(
@@ -472,12 +480,7 @@ impl ServerStore {
         let key = Zeroizing::new(self.keys.db_key()?);
         let attempt_path = fixed(self, false, ATTEMPT)?;
         let pending_path = fixed(self, false, PENDING)?;
-        let limits = DirectJoinLimits::new(
-            512 * 1024,
-            2 * 1024 * 1024,
-            MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES,
-        )
-        .map_err(|_| denied())?;
+        let limits = pending_limits()?;
         let require = || {
             require_current()?;
             inventory.require(self)?;
@@ -517,6 +520,9 @@ impl ServerStore {
                 })));
                 return Ok(opened.receipt);
             }
+            // An orphaned or unresolved reply cannot be reassigned to a
+            // replacement attempt. Preserve it and refuse before entropy.
+            received::require_absent(self)?;
             if invite.binding().expired_at_data(now_ms) {
                 return Err(denied());
             }
@@ -551,6 +557,9 @@ impl ServerStore {
             return Err(denied());
         }
         require()?;
+        if original.pending.is_none() {
+            received::require_absent(self)?;
+        }
         cover_new(&attempt_path, &original.attempt, &mut original.attempt_file)?;
         inventory.sync_rejoin_catalog_parent(self)?;
         if original.request.is_none() {
@@ -564,6 +573,7 @@ impl ServerStore {
                 original.attempt_file.as_ref().ok_or_else(denied)?,
                 &original.attempt,
             )?;
+            received::require_absent(self)?;
             original.key_may_have_entered = true;
             let prepared = self.with_rejoin_donor(registration, |layout, raw| {
                 RecoveredPinnedPending::prepare_rejoin_from_original(
@@ -595,6 +605,7 @@ impl ServerStore {
             original.transport = Some(JoinedTransportReservation::generate(rng)?);
         }
         if original.pending.is_none() {
+            received::require_absent(self)?;
             absent(&pending_path)?;
             let request = original.request.as_mut().ok_or_else(denied)?;
             let source = request

@@ -1,5 +1,21 @@
 # Mewtual; Handover
 
+## Recover a received replacement membership reply
+
+The retired vault can cover the authenticated A2 delivery in a separate
+received-data record. It binds the selected ID9 catalog, the original
+Remove and held Attempt and Pending files to the exact delivery. A fresh
+admitted UI generation can recover that record after restart without
+contacting the founder again or generating keys. An incomplete record
+is preserved. An occupied Received with missing original request files
+prevents a new replacement attempt.
+
+The Windows native fixture passed real TCP, warm same-file retry, cold
+retry without randomness, partial-file refusal and protection of an
+orphaned Received. The A1 row remained terminal. The Welcome attempt
+fence, sealed Outcome, Index4 membership activation and renderer
+command remain open.
+
 ## Exchange a saved replacement membership request
 
 A retired vault can reuse its covered replacement Pending over TCP. It

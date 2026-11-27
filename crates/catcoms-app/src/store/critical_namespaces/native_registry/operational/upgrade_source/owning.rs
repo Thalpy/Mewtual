@@ -24,6 +24,7 @@ use crate::store::critical_namespaces::{
     native_registry::preparation::NativeRegistryHandler, pending_join_codec as grammar,
 };
 use crate::store::persistence::governance_layout::joined::{
+    rejoin::{RejoinPendingOwner, RejoinReceivedInput, RejoinReceivedOwner},
     AcceptedFirstJoin, JoinedPendingIo, JoinedPinOpening,
 };
 use crate::store::persistence::native_registry::lifecycle::upgrade::{UpgradeInventory, UpgradeIo};
@@ -570,6 +571,22 @@ impl Store {
     ) -> Result<crate::store::NativeTextRejoinPendingReceipt, AppError> {
         self.physical
             .cover_rejoin_pending(original, warm, request, native, rng, require_current)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn cover_rejoin_received(
+        &self,
+        original: (
+            crate::store::NativeTextJoinedRegistrationData,
+            catcoms_sync::SelectedRejoinRemoval,
+        ),
+        funds: (&RejoinPendingOwner, &mut Option<RejoinReceivedOwner>),
+        invite: (&crate::store::NativeTextInvitePacketData<'_>, [u8; 32]),
+        input: RejoinReceivedInput<'_>,
+        rng: &mut impl CryptoRngCore,
+        require_current: impl Fn() -> Result<(), AppError>,
+    ) -> Result<Option<crate::store::NativeTextRejoinReceivedReceipt>, AppError> {
+        self.physical
+            .cover_rejoin_received(original, funds, invite, input, rng, require_current)
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn select_retired_rejoin_catalog(

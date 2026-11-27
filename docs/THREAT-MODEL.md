@@ -52,6 +52,12 @@ Remove. The A2 TCP loan binds the current UI generation, vault mount,
 explicit numeric host and authenticated founder peer. The response must
 verify against the original request and the Remove-to-Add prefix. The
 returned delivery grants no MLS Welcome or active member authority.
+The retired vault may cover the exact authenticated reply in a private
+Received file. Warm retries retain its original identity and bytes.
+Cold recovery checks the same selected request and delivery with a fresh
+authorized UI capture. Torn records and replies missing their original
+Pending pair are preserved. Neither permits generation of a new package.
+Received conveys no information about entry into the Welcome SDK.
 
 Cold founder startup can complete a fully staged later Add only after vault
 authentication and replay under the original pin. It retains and rechecks
