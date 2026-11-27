@@ -13,6 +13,11 @@ pub const MAX_REVIEW_BODY_BYTES: usize =
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReviewCaseId([u8; 32]);
 impl ReviewCaseId {
+    /// Stable semantic case identity. Exact byte custody is checked separately.
+    pub fn from_target_data(target: &AcceptanceRecord) -> Self {
+        Self(hash(CASE_DOMAIN, &target.encode()))
+    }
+
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
@@ -90,7 +95,7 @@ impl ReviewDecisionBody {
         body_id(&self.encode())
     }
     pub fn case_id(&self) -> ReviewCaseId {
-        ReviewCaseId(hash(CASE_DOMAIN, &self.spec.target.encode()))
+        ReviewCaseId::from_target_data(&self.spec.target)
     }
     /// Strict action binding only, with the exact same limitations as AcceptanceRecord:
     /// historical ordinary/dependency rights and original Profile/Admission need verification.

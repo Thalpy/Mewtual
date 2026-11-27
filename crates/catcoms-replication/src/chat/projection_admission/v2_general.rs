@@ -24,9 +24,13 @@ macro_rules! redacted_debug {
         }
     })+ };
 }
+mod late_review;
 mod ordinary;
 mod selected_history;
 mod signing;
+pub use late_review::{
+    V2RemovedCreateEvidence, V2RemovedCreateRecord, MAX_REMOVED_CREATE_RECORD_BYTES,
+};
 pub use ordinary::{
     V2GeneralAcceptanceSource, V2LocalArchiveOriginal, V2OrdinaryDependency,
     V2OrdinaryReceiveStatus,
@@ -302,6 +306,8 @@ impl V2GeneralRetiredData {
 pub struct V2FrozenAdmission {
     admission: V2AuthenticatedAdmission,
     cut: FrozenCutData,
+    // The accepted-log tip in the cut predates the actual closing Header.
+    removal: (OwnerHeaderId, u64),
 }
 
 impl V2FrozenAdmission {
@@ -636,9 +642,17 @@ impl V2GeneralPrefixVerifier {
         // into returned archive custody; copying only its tip would discard the
         // tip-header/subject/frontier that Root must durably retain. This is fixed
         // DATA, not a new allocation or a caller-reconstructed acceptance witness.
+        let removal = (
+            next.step.next.header().id(),
+            next.step.next.mls_epoch_data(),
+        );
         let frozen = frozen_admission
             .zip(next.step.removal)
-            .map(|(admission, cut)| V2FrozenAdmission { admission, cut });
+            .map(|(admission, cut)| V2FrozenAdmission {
+                admission,
+                cut,
+                removal,
+            });
         if let Some(removed) = &next.removed {
             removed.core.life.closed.store(true, Ordering::Release);
         }

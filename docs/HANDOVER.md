@@ -69,6 +69,20 @@ the original. It checks the selected text and rejects the earlier
 publication after the delete. Total on-disk retention, deep per-action
 writer ancestry and worst-case replay latency remain open.
 
+## Verify late posts before holding them for review
+
+The Core proof binds an exact signed Create or reply to its original
+Admission and selected Remove. A signed reply with an unresolved parent
+can be identified for holding and rechecked when the exact parent is
+valid. Its immutable plaintext record retains the original envelope,
+digest and removal context. Decoding the record cannot establish local
+selection or release a post.
+
+The 49 focused Core tests passed on Windows, including changes to the
+Remove coordinates and signature, a missing or invalid reply target,
+and same-device rejoin. Encrypted storage, approved-holder delivery,
+decision selection and the admin UI remain open. Chat V2 stays disabled.
+
 ## Continue receiving when a paid history cache fills
 
 The native receiver can replace one full hot ledger and retry the same

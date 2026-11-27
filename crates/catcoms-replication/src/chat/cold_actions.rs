@@ -32,6 +32,13 @@ pub const MAX_ACTION_CHUNK_PAGE_BYTES: usize = 4
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OriginalActionDigest([u8; 32]);
 impl OriginalActionDigest {
+    /// Digest of exact bytes only. The caller separately validates the action.
+    pub(crate) fn for_original_bytes(bytes: &[u8]) -> Self {
+        let mut hasher = original_hasher();
+        hasher.update(bytes);
+        Self(*hasher.finalize().as_bytes())
+    }
+
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }

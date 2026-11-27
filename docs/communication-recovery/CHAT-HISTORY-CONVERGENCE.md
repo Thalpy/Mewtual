@@ -20,6 +20,17 @@ not grant permission to release a post. Production proof issuance/archive, admis
 handling and this timeline integration remain unfinished. The inactive typed core and its fixture
 witnesses do not activate this policy or close R6/R7.
 
+Core can verify a removed member's exact signed Create or reply for a
+hold. The proof binds the original Admission, the selected Remove and
+the exact envelope digest. A valid signed reply can be held while its
+parent is missing or still unverified. The same case must be rechecked
+once the exact parent is valid. This check does not decide whether the
+post was already verified. The bounded plaintext hold frame preserves
+the exact signature and selected Remove coordinates. Loading a frame
+requires separately replayed evidence before the host can trust those
+coordinates. Encrypted persistence, delivery from an approved holder,
+decision selection and the admin timeline remain open.
+
 29 October clarification: current desktop new-message sends use a separate save-before-export
 transaction with a persisted retry identity. The accepted-in-memory boundary below still applies
 to received history and low-level legacy mutation APIs. The integrated desktop edit/delete path
