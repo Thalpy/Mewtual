@@ -19,8 +19,8 @@ const SOURCE_ID_DOMAIN: &str = "catcoms/private-chat-v2-native-pending-source-id
 mod registration;
 mod welcome;
 pub(in crate::store) use registration::JoinedRegistrationDependency;
-pub(super) use welcome::reserve_sdk_graph;
 pub(in crate::store) use welcome::RecoveredMemberPrefix;
+pub(super) use welcome::{reserve_sdk_graph, JoinedCore};
 
 fn joined_welcome_limits() -> Result<DirectJoinLimits, AppError> {
     DirectJoinLimits::new(

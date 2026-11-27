@@ -5,6 +5,10 @@ use catcoms_replication::chat::owner_header::OwnerHeaderId;
 use catcoms_rt::RequestCancellation;
 use catcoms_sync::{RecoveredV2JoinedOutcome, SealedV2JoinedOutcome, V2JoinDeliveryData};
 
+mod prefix;
+pub use prefix::NativeTextRejoinPrefixReceipt;
+pub(in crate::store) use prefix::{RejoinPrefixInputs, RejoinPrefixOwner};
+
 const SDK_ATTEMPT: &str = "chat-critical-namespaces.rejoin-welcome-attempt.bin";
 const OUTCOME: &str = "chat-critical-namespaces.rejoin-outcome.bin";
 const ATTEMPT_TAG: &str = "catcoms/chat-v2/rejoin-welcome-attempt/v1";
@@ -17,7 +21,8 @@ const OUTCOME_WORK: usize = 6 * OUTCOME_MAX + 4 * MAX_FRAME + 4 * 1024 * 1024;
 
 pub(super) fn require_unstarted(store: &ServerStore) -> Result<(), AppError> {
     absent(&fixed(store, false, SDK_ATTEMPT)?)?;
-    absent(&fixed(store, false, OUTCOME)?)
+    absent(&fixed(store, false, OUTCOME)?)?;
+    prefix::require_unstarted(store)
 }
 
 /// Historical coordinates of the exact covered closed SDK result.
@@ -98,9 +103,11 @@ struct WarmGraph {
 /// never creates a warm graph or re-enters the Welcome SDK.
 pub(in crate::store) struct RejoinWelcomeOwner {
     warm: Option<WarmGraph>,
+    recovered: Option<Box<RecoveredV2JoinedOutcome>>,
     entry: JournalFrame,
     outcome: Option<JournalFrame>,
     receipt: Option<NativeTextRejoinOutcomeReceipt>,
+    covered: bool,
     pending_cookie: std::sync::Arc<()>,
     _lease: catcoms_storage::VaultPhysicalWorkLease,
     fee: CatalogReadReservation,
@@ -276,6 +283,7 @@ impl ServerStore {
                 (JournalFrame::selected(entry), outcome, None)
             } else {
                 absent(&outcome_path)?;
+                prefix::require_unstarted(self)?;
                 let native = native.as_mut().ok_or_else(denied)?;
                 require()?;
                 let graph_fee = super::super::super::super::pending::reserve_sdk_graph(self)?;
@@ -306,9 +314,11 @@ impl ServerStore {
             require()?;
             *slot = Some(Box::new(RejoinWelcomeOwner {
                 warm,
+                recovered: None,
                 entry,
                 outcome,
                 receipt: None,
+                covered: false,
                 pending_cookie: pending.cookie().clone(),
                 _lease: self._session.retain_for_physical_work(),
                 fee,
@@ -328,6 +338,7 @@ impl ServerStore {
         require()?;
         if original_welcome.outcome.is_none() {
             absent(&outcome_path)?;
+            prefix::require_unstarted(self)?;
             let Some(warm) = original_welcome.warm.as_mut() else {
                 original_welcome.entry.require(&entry_path)?;
                 require_current()?;
@@ -421,6 +432,7 @@ impl ServerStore {
                 return Err(denied());
             }
             original_welcome.receipt = Some(receipt);
+            original_welcome.recovered = Some(Box::new(graph));
         }
         require()?;
         original_welcome.entry.require(&entry_path)?;
@@ -430,6 +442,7 @@ impl ServerStore {
         original_welcome.entry.require(&entry_path)?;
         outcome.require(&outcome_path)?;
         require_current()?;
+        original_welcome.covered = true;
         Ok(NativeTextRejoinWelcomeStatus::Covered(receipt))
     }
 }

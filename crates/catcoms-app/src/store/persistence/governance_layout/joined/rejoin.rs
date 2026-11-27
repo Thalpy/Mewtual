@@ -15,12 +15,13 @@ const REJOIN_STAGE: &str = "chat-critical-namespaces.rejoin.stage";
 
 mod pending;
 pub use pending::{
-    NativeTextRejoinOutcomeReceipt, NativeTextRejoinPendingReceipt,
+    NativeTextRejoinOutcomeReceipt, NativeTextRejoinPendingReceipt, NativeTextRejoinPrefixReceipt,
     NativeTextRejoinReceivedReceipt, NativeTextRejoinWelcomeStatus,
 };
 pub(in crate::store) use pending::{
-    PreparedRejoinTransport, RejoinKeyEntry, RejoinPendingOwner, RejoinReceivedInput,
-    RejoinReceivedOwner, RejoinWelcomeKeyEntry, RejoinWelcomeOwner, RejoinWelcomeOwners,
+    PreparedRejoinTransport, RejoinKeyEntry, RejoinPendingOwner, RejoinPrefixInputs,
+    RejoinPrefixOwner, RejoinReceivedInput, RejoinReceivedOwner, RejoinWelcomeKeyEntry,
+    RejoinWelcomeOwner, RejoinWelcomeOwners,
 };
 
 /// The exact native inventory can outlive the handler scratch that checked

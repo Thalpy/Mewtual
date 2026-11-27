@@ -6,8 +6,8 @@ use crate::store::persistence::governance_layout::joined::rejoin::{
     PreparedRejoinTransport, RejoinReceivedInput, RejoinWelcomeKeyEntry,
 };
 use crate::store::{
-    NativeTextInvitePacketData, NativeTextRejoinPendingReceipt, NativeTextRejoinReceivedReceipt,
-    NativeTextRejoinWelcomeStatus,
+    NativeTextInvitePacketData, NativeTextRejoinPendingReceipt, NativeTextRejoinPrefixReceipt,
+    NativeTextRejoinReceivedReceipt, NativeTextRejoinWelcomeStatus,
 };
 use catcoms_rt::{Clock, PeerId, RequestAuthority, SystemClock};
 
@@ -221,6 +221,40 @@ impl NativeTextRemovedJoinedVault {
             rng,
             require_current,
         )
+    }
+
+    /// Verify and cover the replacement's initial Core history beside the
+    /// same retained closed Welcome. The registry still holds terminal A1.
+    pub fn cover_rejoin_prefix(
+        &mut self,
+        ui: &UiCapture,
+        invite: (&NativeTextInvitePacketData<'_>, [u8; 32]),
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<NativeTextRejoinPrefixReceipt>, AppError> {
+        if !self.tcp_drain.is_drained() {
+            return Ok(None);
+        }
+        self.ui.require_capture(ui)?;
+        let authority = &self.ui;
+        let require = || {
+            if caller.is_cancelled() || !authority.is_current_cached(ui) {
+                return Err(refused());
+            }
+            Ok(())
+        };
+        let pending = self.rejoin_pending.as_ref().ok_or_else(refused)?;
+        let received = self.rejoin_received.as_ref().ok_or_else(refused)?;
+        let welcome = self.rejoin_welcome.as_deref_mut().ok_or_else(refused)?;
+        self.index
+            .cover_rejoin_prefix(
+                (self.registration, self.removal),
+                (pending, received, welcome, &mut self.rejoin_prefix),
+                invite,
+                rng,
+                require,
+            )
+            .map(Some)
     }
 
     /// Recover already covered delivery data under a fresh admitted UI

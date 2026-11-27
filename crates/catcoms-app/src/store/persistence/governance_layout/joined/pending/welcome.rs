@@ -306,7 +306,7 @@ impl RecoveredMemberPrefix {
     }
 }
 
-struct JoinedCore {
+pub(in crate::store::persistence::governance_layout::joined) struct JoinedCore {
     core: PreparedV2JoinedPrefix,
     expected: V2HostSelectionExpectation,
     initial: Option<SelectedJoinData>,
@@ -318,7 +318,7 @@ struct JoinedCore {
 }
 
 impl JoinedCore {
-    fn prepare(
+    pub(in crate::store::persistence::governance_layout::joined) fn prepare(
         store: &ServerStore,
         group: &[u8],
         delivery: &[u8],
@@ -362,7 +362,17 @@ impl JoinedCore {
         })
     }
 
-    fn finish(&mut self) -> Result<(), AppError> {
+    pub(in crate::store::persistence::governance_layout::joined) fn encode_initial_history(
+        &self,
+        vault: &[u8; 32],
+    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        let append = self.core.pending_history_data().ok_or_else(denied)?;
+        encode_selected_history_node_page(vault, append).map_err(|_| denied())
+    }
+
+    pub(in crate::store::persistence::governance_layout::joined) fn finish(
+        &mut self,
+    ) -> Result<(), AppError> {
         if self.initial.is_none() {
             let retired = self
                 .core
@@ -393,7 +403,9 @@ impl JoinedCore {
         Some((selected.governing_add, selected.epoch))
     }
 
-    fn selected_data(&self) -> Option<SelectedJoinData> {
+    pub(in crate::store::persistence::governance_layout::joined) fn selected_data(
+        &self,
+    ) -> Option<SelectedJoinData> {
         self.initial
     }
 

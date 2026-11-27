@@ -62,7 +62,13 @@ possible-entry fence bound to the held Received and Pending frames.
 A verified complete Outcome recovers the closed graph. A cold
 possible-entry without Outcome preserves the journal and does not
 enter Welcome again. Index4 and a selected Core prefix are required
-before the graph can serve an active membership.
+before the graph can serve an active membership. The initial prefix
+record checks the exact paid, closed graph against the selected Add and
+the replacement Admission. It binds the signed history to the held
+Attempt, Pending, Received, SDK Attempt and Outcome. The prefix is
+covered before its Core transition can finish. Its receipt is data and
+cannot authorize native installation. A cold retry replays the original
+inputs and refuses a torn or different prefix record.
 
 Cold founder startup can complete a fully staged later Add only after vault
 authentication and replay under the original pin. It retains and rechecks

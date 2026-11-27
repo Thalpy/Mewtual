@@ -1538,6 +1538,11 @@ async fn native_text_rejoin_welcome_covers_a_closed_outcome_and_holds_ambiguous_
     native_text_membership_removal_reopen(MembershipAfterRemove::RejoinWelcome).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_rejoin_prefix_matches_the_closed_replacement_and_reopens_exactly() {
+    native_text_membership_removal_reopen(MembershipAfterRemove::RejoinPrefix).await;
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MembershipAfterRemove {
     Retired,
@@ -1546,6 +1551,7 @@ enum MembershipAfterRemove {
     RejoinExchange,
     RejoinReceived,
     RejoinWelcome,
+    RejoinPrefix,
 }
 
 async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) {
@@ -2099,6 +2105,7 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
             MembershipAfterRemove::RejoinExchange
                 | MembershipAfterRemove::RejoinReceived
                 | MembershipAfterRemove::RejoinWelcome
+                | MembershipAfterRemove::RejoinPrefix
         ) {
             let admit = |owner: &catcoms_app::store::NativeTextRemovedJoinedVault, generation| {
                 let mut prepared = owner
@@ -2196,7 +2203,10 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                         .unwrap(),
                     Some(receipt),
                 );
-                let welcome = if scenario == MembershipAfterRemove::RejoinWelcome {
+                let welcome = if matches!(
+                    scenario,
+                    MembershipAfterRemove::RejoinWelcome | MembershipAfterRemove::RejoinPrefix
+                ) {
                     let NativeTextRejoinWelcomeStatus::Covered(result) = reopened
                         .cover_rejoin_welcome(&local_ui, invitation, &caller, &mut OsCryptoRng)
                         .unwrap()
@@ -2213,6 +2223,36 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                     );
                     assert_eq!(reopened.removal_data().unwrap(), Some(proof));
                     Some(result)
+                } else {
+                    None
+                };
+                let prefix_path =
+                    member_path.join("chat-critical-namespaces.rejoin-initial-prefix.bin");
+                let covered_prefix = if scenario == MembershipAfterRemove::RejoinPrefix {
+                    let result = reopened
+                        .cover_rejoin_prefix(&local_ui, invitation, &caller, &mut OsCryptoRng)
+                        .unwrap()
+                        .unwrap();
+                    let (head, active, epoch) = result.registration.selected_data();
+                    assert_eq!(epoch, 3);
+                    assert_eq!(head, welcome.unwrap().header);
+                    assert_ne!(active, proof.1);
+                    let original = std::fs::read(&prefix_path).unwrap();
+                    let saved_file = prefix_path.with_extension("prefix-role-for-test");
+                    std::fs::rename(&prefix_path, &saved_file).unwrap();
+                    std::fs::write(&prefix_path, &original).unwrap();
+                    assert!(reopened
+                        .cover_rejoin_prefix(&local_ui, invitation, &caller, &mut NeverRng)
+                        .is_err());
+                    std::fs::remove_file(&prefix_path).unwrap();
+                    std::fs::rename(saved_file, &prefix_path).unwrap();
+                    let same = reopened
+                        .cover_rejoin_prefix(&local_ui, invitation, &caller, &mut NeverRng)
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(same.history_fingerprint, result.history_fingerprint);
+                    assert_eq!(reopened.removal_data().unwrap(), Some(proof));
+                    Some((result, original))
                 } else {
                     None
                 };
@@ -2282,10 +2322,26 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                     );
                     assert_eq!(cold.removal_data().unwrap(), Some(proof));
                 }
+                if let Some((covered, original)) = covered_prefix {
+                    let partial = &original[..original.len() / 2];
+                    std::fs::write(&prefix_path, partial).unwrap();
+                    assert!(cold
+                        .cover_rejoin_prefix(&ui, invitation, &caller, &mut NeverRng)
+                        .is_err());
+                    assert_eq!(std::fs::read(&prefix_path).unwrap(), partial);
+                    std::fs::write(&prefix_path, &original).unwrap();
+                    let recovered = cold
+                        .cover_rejoin_prefix(&ui, invitation, &caller, &mut NeverRng)
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(recovered.registration, covered.registration);
+                    assert_eq!(recovered.history_fingerprint, covered.history_fingerprint);
+                    assert_eq!(std::fs::read(&prefix_path).unwrap(), original);
+                }
                 drop((ui, capture, cold));
                 wait_for_original_vault().await;
 
-                if welcome.is_some() {
+                if scenario == MembershipAfterRemove::RejoinWelcome {
                     let sdk_attempt =
                         member_path.join("chat-critical-namespaces.rejoin-welcome-attempt.bin");
                     let sdk_outcome =

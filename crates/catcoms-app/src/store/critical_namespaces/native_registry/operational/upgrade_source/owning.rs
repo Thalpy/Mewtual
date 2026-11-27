@@ -25,8 +25,8 @@ use crate::store::critical_namespaces::{
 };
 use crate::store::persistence::governance_layout::joined::{
     rejoin::{
-        RejoinPendingOwner, RejoinReceivedInput, RejoinReceivedOwner, RejoinWelcomeKeyEntry,
-        RejoinWelcomeOwners,
+        RejoinPendingOwner, RejoinPrefixInputs, RejoinReceivedInput, RejoinReceivedOwner,
+        RejoinWelcomeKeyEntry, RejoinWelcomeOwners,
     },
     AcceptedFirstJoin, JoinedPendingIo, JoinedPinOpening,
 };
@@ -615,6 +615,21 @@ impl Store {
             rng,
             require_current,
         )
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn cover_rejoin_prefix(
+        &self,
+        original: (
+            crate::store::NativeTextJoinedRegistrationData,
+            catcoms_sync::SelectedRejoinRemoval,
+        ),
+        sources: RejoinPrefixInputs<'_>,
+        invite: (&crate::store::NativeTextInvitePacketData<'_>, [u8; 32]),
+        rng: &mut impl CryptoRngCore,
+        require_current: impl Fn() -> Result<(), AppError>,
+    ) -> Result<crate::store::NativeTextRejoinPrefixReceipt, AppError> {
+        self.physical
+            .cover_rejoin_prefix(original, sources, invite, rng, require_current)
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn select_retired_rejoin_catalog(

@@ -14,11 +14,12 @@ use catcoms_wire::{Decoder, Encoder};
 
 mod received;
 pub use received::{
-    NativeTextRejoinOutcomeReceipt, NativeTextRejoinReceivedReceipt, NativeTextRejoinWelcomeStatus,
+    NativeTextRejoinOutcomeReceipt, NativeTextRejoinPrefixReceipt, NativeTextRejoinReceivedReceipt,
+    NativeTextRejoinWelcomeStatus,
 };
 pub(in crate::store) use received::{
-    RejoinReceivedInput, RejoinReceivedOwner, RejoinWelcomeKeyEntry, RejoinWelcomeOwner,
-    RejoinWelcomeOwners,
+    RejoinPrefixInputs, RejoinPrefixOwner, RejoinReceivedInput, RejoinReceivedOwner,
+    RejoinWelcomeKeyEntry, RejoinWelcomeOwner, RejoinWelcomeOwners,
 };
 
 const ATTEMPT: &str = "chat-critical-namespaces.rejoin-attempt.bin";
