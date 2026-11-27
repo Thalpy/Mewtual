@@ -15,6 +15,7 @@ use tokio::sync::watch;
 
 mod authoring;
 mod history;
+mod invite;
 mod publication;
 mod receiving;
 mod replies;
@@ -64,6 +65,7 @@ pub struct NativeTextColdFounderSource {
     governing_ingress: Option<replies::Owner>,
     received: Option<receiving::Ledger>,
     member: Option<Box<crate::store::persistence::RecoveredMemberLane>>,
+    invite: crate::store::persistence::RecoveredFounderInvite,
     actor: Option<super::super::join_tcp::Loan>,
     tcp: Option<Arc<super::super::join_tcp::Transport>>,
     sdk: Option<PreparedV2FounderRecoveredAdd>,
@@ -107,6 +109,7 @@ impl NativeTextJoinedStorage {
                     governing_ingress: None,
                     received: None,
                     member: None,
+                    invite: Default::default(),
                     actor: None,
                     tcp: None,
                     sdk: None,

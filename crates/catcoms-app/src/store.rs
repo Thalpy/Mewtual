@@ -134,8 +134,8 @@ pub use native_text_invite::{
 };
 pub use native_text_roster::{NativeTextRoster, NativeTextRosterMember};
 pub use persistence::v2_member_transport::{
-    NativeTextFounderDependencyExchange, NativeTextFounderDependencyResponse,
-    NativeTextFounderFrameOutcome, NativeTextFounderReceived,
+    NativeTextFounderAudit, NativeTextFounderDependencyExchange,
+    NativeTextFounderDependencyResponse, NativeTextFounderFrameOutcome, NativeTextFounderReceived,
 };
 mod owner_evidence;
 pub use chat_admission::{
@@ -649,8 +649,8 @@ mod persistence {
         prepare_joined_member_history, prepare_recovered_founder_history, JoinedMemberLane,
         JoinedMemberSource, OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
         PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
-        PreparedV2UnsignedOriginalCustody, RecoveredMemberLane, RecoveredMemberSource,
-        V2AdvancedAppendBasis,
+        PreparedV2UnsignedOriginalCustody, RecoveredFounderInvite, RecoveredMemberLane,
+        RecoveredMemberSource, V2AdvancedAppendBasis,
     };
     mod current_group;
     mod current_layout;

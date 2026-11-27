@@ -770,6 +770,22 @@ async fn serve_dependencies<R: tauri::Runtime>(
             let source = source.clone();
             let _ = tauri::async_runtime::spawn_blocking(move || {
                 let _local = local;
+                #[cfg(test)]
+                let purpose = request.current_data().map(|(_, wire)| {
+                    use catcoms_sync::owner_v2::{
+                        OpenedV2ArchiveHistoryRequest, OpenedV2MemberDependencyRequest,
+                        OpenedV2MemberHistoryRequest,
+                    };
+                    if OpenedV2ArchiveHistoryRequest::recognizes(wire) {
+                        "archive inventory"
+                    } else if OpenedV2MemberDependencyRequest::recognizes_archive_relay(wire) {
+                        "archive original"
+                    } else if OpenedV2MemberHistoryRequest::recognizes(wire) {
+                        "own-outbox inventory"
+                    } else {
+                        "own original"
+                    }
+                });
                 let result = original.serve_dependency_request(
                     &row,
                     source.channel,
@@ -779,7 +795,7 @@ async fn serve_dependencies<R: tauri::Runtime>(
                 );
                 #[cfg(test)]
                 if let Err(ref failure) = result {
-                    eprintln!("joined dependency provider refused a request: {failure:?}");
+                    eprintln!("joined dependency provider refused {purpose:?}: {failure:?}");
                 }
                 result
             })

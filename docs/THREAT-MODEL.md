@@ -1,5 +1,17 @@
 # Threat model; client integrity & enforcement boundaries
 
+The native Chat V2 founder can inspect the locally selected received
+archive, including the exact original bodies of messages that were edited
+or deleted. Native checks the original founder row, channel, authentication
+and current membership before reading, then rechecks the source and UI
+generation before releasing any data to the main renderer. Each audited
+record is checked against its selected manifest and signed bytes. A pending
+archive write or corrupt selected record refuses the page without settling
+the write. This interface provides local signature and storage evidence.
+It neither establishes group-wide delivery nor grants a new membership or
+moderation permission. Members holding old ciphertext and keys may have
+the same historical plaintext independently of this native UI restriction.
+
 Chat V2 history discovery can reveal IDs and the scanned ordinal range of a
 current member's outbox to a peer with an explicitly approved signed contact
 and the current channel exporter. The native Source binds contact Admission
@@ -7247,3 +7259,11 @@ renew unknown Clock/RNG/key entry. This supplies no SavedInvite/current Add or
 publication authority. Durable KeyAttempt/cold no-resign, persistent quotas and
 covering journal/IO admission remain unfinished. Chat V2 stays OFF.
 [Detailed limits](communication-recovery/CHAT-V2-INVITE-ISSUER.md).
+
+The subsequent cold issuer checks a covered Add or Remove, the exact original
+pin and encrypted Head, and the restored founder's native JoinInvite cut.
+If any journal file exists, all three exact records must authenticate and
+link to one another before publication. A restart never retries the signer
+after an incomplete attempt. The desktop keeps the original runtime loan
+until the final row, vault and UI session checks. Fresh cold membership
+admission still requires a separate governed Add.

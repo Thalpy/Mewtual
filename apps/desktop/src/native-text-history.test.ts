@@ -1,7 +1,31 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decodeNativeOriginalPage, decodeNativeOwnMessage, decodeNativeReceived, decodeNativeReceivedNotice, readNativeOriginals, readNativeOwnMessage, updateNativeReceived } from "./native-text-history.ts";
+import { decodeNativeOriginalPage, decodeNativeOwnMessage, decodeNativeReceived, decodeNativeReceivedNotice, readNativeAudit, readNativeOriginals, readNativeOwnMessage, updateNativeReceived } from "./native-text-history.ts";
 const item={ordinal:"0",action:"01".repeat(32),signer:"02".repeat(32),channel:"9",presented_ms:"18446744073709551615",status:"pending",body:{kind:"create",text:"original",reply_to:null}};
+test("the founder audit reader binds each revision and drops replies for a departed view", async () => {
+  const scope = { server: 1, channel: "9", context: "03".repeat(32) };
+  const create = { action: item.action, signer: item.signer, original_digest: "04".repeat(32),
+    admission: "05".repeat(32), presented_ms: item.presented_ms, parents: [], body: item.body };
+  const deletion = { ...create, action: "11".repeat(32), parents: [create.action], body: { kind: "delete", create: create.action } };
+  const reply = { backend: "text-v2", scope: "selected-shared-history-audit", target: create.action,
+    next: null, items: [create, deletion] };
+  const read = await readNativeAudit(async (command, args) => {
+    assert.equal(command, "get_message_page");
+    assert.deepEqual(args, { server: 1, channel: "9", expectedContext: scope.context, auditAction: create.action, auditAfter: null, limit: 8 });
+    return reply;
+  }, scope, create.action, null, () => true);
+  assert.deepEqual(read, { items: [create, deletion], next: null });
+  for (const invalid of [
+    { ...reply, next: deletion.action },
+    { ...reply, items: [deletion, create] },
+    { ...reply, items: [create, { ...deletion, body: { ...deletion.body, create: item.signer } }] },
+    { ...reply, target: item.signer },
+  ]) {
+    await assert.rejects(readNativeAudit(async () => invalid, scope, create.action, null, () => true));
+  }
+  let current = true;
+  assert.equal(await readNativeAudit(async () => { current = false; return reply; }, scope, create.action, null, () => current), null);
+});
 test("native own-history keeps lossless cursors and rejects foreign scope or malformed bodies",()=>{
  const page={backend:"text-v2",scope:"own-saved-originals",next:"1",end_exclusive:"18446744073709551615",items:[item]};
  assert.deepEqual(decodeNativeOriginalPage(page,"0",null,"9"),page);

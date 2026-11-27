@@ -23,6 +23,17 @@ An archive stage can issue an opaque missing-parent ticket after an exact
 local miss. Only its original page can use the ticket. The worker drops
 the original stage before requesting the parent and compares the child's
 signed bytes and Admission before retrying it.
+
+The founder can read selected received history through `get_message_page`
+with `auditAction` (null for Creates, or an exact Create ActionId),
+`auditAfter` (null or an ActionId) and a limit of 1 to 8. The request uses
+the same exact server, channel and native context as other history reads.
+It returns the full signed device identity, stored Admission, original
+digest, parents and operation body. `items: null` means the archive is
+unavailable. ActionId cursors order each captured page independently of
+device timestamps. Refresh from the first page to include records whose
+IDs precede an earlier cursor.
+
 Joined contact consent is optional on the native connect command. The
 original four-field request connects once. An explicit `remember` boolean
 can add a bounded, encrypted native approval. `forget_native_chat_contacts`
@@ -9683,3 +9694,9 @@ Its `(preimage hash, expiry)` return is DATA, not an invite or Saved receipt.
 Sync's separate `JoinInvite` key tail requires Root covering/current admission
 and is not called by this production preparation. The actual journal and
 publication remain unfinished. [Contract](communication-recovery/CHAT-V2-INVITE-ISSUER.md).
+
+The subsequent native save path also supports a founder restored at a covered
+Add or Remove. The restored path uses the actual original Source and MLS
+key, the original policy and TCP reservation, and the same selected-Head
+journal. It returns the same covered packet on a cold retry. A fresh Join
+still needs a cold Add writer. [Current contract](communication-recovery/CHAT-V2-INVITE-ISSUER.md).

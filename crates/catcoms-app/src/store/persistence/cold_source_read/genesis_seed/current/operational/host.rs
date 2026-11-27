@@ -35,6 +35,7 @@ mod governed_removal;
 mod member;
 // Member save: the two-phase production path into the Store's member outbox.
 mod invite;
+pub(in crate::store) use invite::RecoveredFounderInvite;
 mod member_save;
 mod projection;
 // Request DATA types travel to the regression tests only until the primary's native

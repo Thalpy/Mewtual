@@ -136,6 +136,13 @@ impl InviteSigningJournal {
         guard: &V2TextCurrentGroupGuard<'_, '_>,
     ) -> Result<(), AppError> {
         intent.bind(guard)?;
+        self.cover_bound_attempt(intent)
+    }
+
+    pub(in super::super) fn cover_bound_attempt(
+        &mut self,
+        intent: &mut InviteIntentJournal,
+    ) -> Result<(), AppError> {
         intent.require_original()?;
         let pages = intent.pages()?;
         self.require_raw_absent(pages, &intent.names.raw)?;
@@ -154,10 +161,17 @@ impl InviteSigningJournal {
         intent: &mut InviteIntentJournal,
         guard: &V2TextCurrentGroupGuard<'_, '_>,
     ) -> Result<(), AppError> {
+        intent.bind(guard)?;
+        self.require_bound_attempt(intent)
+    }
+
+    pub(in super::super) fn require_bound_attempt(
+        &mut self,
+        intent: &mut InviteIntentJournal,
+    ) -> Result<(), AppError> {
         if !self.attempt_covered {
             return Err(refused());
         }
-        intent.bind(guard)?;
         intent.require_original()?;
         let pages = intent.pages()?;
         self.attempt.require_exact(pages, &intent.names.attempt)?;
@@ -192,10 +206,17 @@ impl InviteSigningJournal {
         intent: &mut InviteIntentJournal,
         guard: &V2TextCurrentGroupGuard<'_, '_>,
     ) -> Result<(), AppError> {
+        intent.bind(guard)?;
+        self.cover_bound_raw(intent)
+    }
+
+    pub(in super::super) fn cover_bound_raw(
+        &mut self,
+        intent: &mut InviteIntentJournal,
+    ) -> Result<(), AppError> {
         if !self.attempt_covered || self.unexpected_raw {
             return Err(refused());
         }
-        intent.bind(guard)?;
         intent.require_original()?;
         let pages = intent.pages()?;
         self.attempt.require_exact(pages, &intent.names.attempt)?;

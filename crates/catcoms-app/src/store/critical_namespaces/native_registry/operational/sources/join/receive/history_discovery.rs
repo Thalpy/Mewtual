@@ -11,6 +11,7 @@ use catcoms_net::{
     NativeChatMemberDependencyExchange, NativeChatMemberDependencyIncoming,
     NativeChatMemberDependencyObservation,
 };
+use catcoms_replication::chat::Body;
 use catcoms_rt::{ConnectionLease, TransportError};
 use catcoms_sync::owner_v2::{
     PreparedV2ArchiveHistoryRequest, PreparedV2MemberHistoryRequest, V2ArchiveHistoryCursor,
@@ -179,6 +180,16 @@ impl NativeTextJoinedHistoryPage {
         self.query.is_current(&self.query.row)
     }
 
+    #[cfg(feature = "native-chat-test-hooks")]
+    #[doc(hidden)]
+    pub fn current_checks_for_test(&self) -> (bool, bool, bool) {
+        (
+            self.query.row.is_current_cached(),
+            self.query.observation.is_current_cached(),
+            !self.query.signal.is_cancelled(),
+        )
+    }
+
     pub fn action_at(&self, index: usize) -> Option<ActionId> {
         if !self.is_current_cached() {
             return None;
@@ -276,6 +287,57 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             return Err(Refusal::Stale);
         }
         Ok(selected)
+    }
+
+    /// A clean own outbox can cover an offered archive Create for this sweep.
+    /// The semantic ID proves local custody of the operation. Archive custody,
+    /// the holder's signature bytes, and delivery remain independent.
+    pub fn covers_discovered_own_create(
+        &self,
+        selection: &NativeTextJoinedRowSelection,
+        page: &NativeTextJoinedHistoryPage,
+        action: ActionId,
+        caller: &RequestCancellation,
+    ) -> Result<bool, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        if !page.query.is_current(selection) || !page.page.contains(action) {
+            return Err(Refusal::Stale);
+        }
+        if !matches!(&page.page, HistoryPage::Archive { .. }) {
+            return Ok(false);
+        }
+        let covered = self.with_member_receiver(selection, caller, |source| {
+            let Some(saved) = source.read_selected_own_history_action(selection, action) else {
+                return Ok(false);
+            };
+            let admission = source.registration.selected_data().1;
+            if saved.receipt().admission != admission
+                || saved.action().spec().realm.channel() != page.query.channel
+                || !matches!(saved.action().spec().body, Body::Create { .. })
+                || saved.status() == MemberEntryStatus::Settled(DispositionCode::Held)
+            {
+                return Ok(false);
+            }
+            let verifier = source
+                .prefix
+                .selected_member_verifier()
+                .map_err(|_| Refusal::Stale)?;
+            verifier
+                .observe_live_member(admission)
+                .map_err(|_| Refusal::Stale)?;
+            Ok(verifier
+                .admission(admission)
+                .and_then(|author| {
+                    author
+                        .admission_data()
+                        .matches_action_delegation(saved.action())
+                })
+                .is_ok())
+        })?;
+        if !page.query.is_current(selection) {
+            return Err(Refusal::Stale);
+        }
+        Ok(covered)
     }
 
     /// Request one page from a previously approved signed contact. This
@@ -625,6 +687,25 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
 }
 
 impl<R: CryptoRngCore> ReceiverSource<'_, R> {
+    fn read_selected_own_history_action(
+        &self,
+        selection: &NativeTextJoinedRowSelection,
+        action: ActionId,
+    ) -> Option<MemberSavedOriginal> {
+        let mount = self.store.installed_member_outbox_mount().ok()??;
+        let key = member_outbox_key(self.store).ok()?;
+        // An unavailable point lookup leaves the ordinary exact-fetch path
+        // open. It supplies no evidence of either coverage or absence.
+        mount
+            .read_selected_history_action(
+                self.store,
+                selection.original.member_outbox,
+                &key,
+                action,
+            )
+            .ok()?
+    }
+
     pub(super) fn require_history_peer(
         &self,
         selection: &NativeTextJoinedRowSelection,

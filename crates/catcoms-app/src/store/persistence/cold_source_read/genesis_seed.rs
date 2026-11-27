@@ -19,8 +19,8 @@ pub(in crate::store) use current::{
     prepare_joined_member_history, prepare_recovered_founder_history, JoinedMemberLane,
     JoinedMemberSource, OriginalV2TextResidentObservation, OriginalV2UnsignedPlanObservation,
     PreparedV2NextUnsignedAppend, PreparedV2TextResidentProjection,
-    PreparedV2UnsignedOriginalCustody, RecoveredMemberLane, RecoveredMemberSource,
-    V2AdvancedAppendBasis,
+    PreparedV2UnsignedOriginalCustody, RecoveredFounderInvite, RecoveredMemberLane,
+    RecoveredMemberSource, V2AdvancedAppendBasis,
 };
 pub use current::{
     MemberSaveJob, MemberSaveJobReport, MemberSaveNativeAdmission, PreparedColdV2GenesisCurrent,

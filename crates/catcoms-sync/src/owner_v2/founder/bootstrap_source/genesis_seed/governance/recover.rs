@@ -12,9 +12,10 @@ use catcoms_replication::chat::{
 };
 
 mod add;
-pub use add::V2RecoveredFounderAddSigning;
+mod invite;
 mod member_signing;
 mod member_transport;
+pub use add::V2RecoveredFounderAddSigning;
 
 /// Paid private graph. Source installation, Core replay and publication have
 /// their own Host proofs and cannot be authorized by these recovered labels.

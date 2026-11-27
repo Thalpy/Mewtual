@@ -24,7 +24,8 @@ use zeroize::Zeroizing;
 pub(in crate::store::persistence) mod disk;
 mod replay;
 pub(in crate::store) use disk::{
-    ArchiveRelayEntry, SharedHistoryActionPage, SharedHistoryActionQuery,
+    ArchiveRelayEntry, SelectedSharedHistoryAuditPage, SharedHistoryActionPage,
+    SharedHistoryActionQuery,
 };
 pub(in crate::store) use replay::{
     SharedHistoryMessageSelection, SharedHistoryProjectionLease, SharedHistoryReplay,

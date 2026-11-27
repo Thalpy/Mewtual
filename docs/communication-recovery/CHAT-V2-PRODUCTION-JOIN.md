@@ -557,9 +557,10 @@ temporary row capture and metadata contention. Each retry rechecks the same
 mounted row and carrier. Cold founder startup restores ordinary member history
 and its original listener from a covered Add. If no governing Add has entered,
 startup authenticates the original promoted genesis and exposes its singleton
-roster and saved local history. New cold-founder invitations, authoring before
-the first governing Add, later governing writes and automatic peer discovery
-still need implementation.
+roster and saved local history. A founder restored at a covered Add or Remove
+can save an invitation and recover that exact packet after restart. Fresh cold
+Add, authoring before the first governing Add, and automatic peer discovery
+remain open.
 
 The warm joined node can draw and sign an ordinary action through the original
 native Joiner Source. Its signing cut requires the ordinary member purpose and

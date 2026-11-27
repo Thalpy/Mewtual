@@ -1,9 +1,18 @@
-//! An independent read of the three original records. A reader never adopts a
-//! file for writing, completes a partial prefix, or obtains an invite key cut.
+//! An independent read of the three original records. Warm inspection is
+//! read-only. Cold publication can sync a complete, authenticated set as
+//! held, without repairing an incomplete record or obtaining a key cut here.
 use super::*;
+use crate::store::persistence::v2_text::ColdInviteParent;
 use crate::store::{NativeTextInviteRecovery, ServerStore};
-use catcoms_replication::chat::{join_bindings::SignedInviteBindingData, ChatError};
-use catcoms_sync::owner_v2::V2GenesisSeedData;
+use catcoms_replication::chat::{
+    join_bindings::SignedInviteBindingData,
+    owner_header::SignedOwnerHeader,
+    owner_profile::{AdmissionBody, SignedOwnerProfile},
+    ChatError,
+};
+use catcoms_sync::owner_v2::{
+    BootstrapSourceContextData, OpenedBootstrapSourceData, V2GenesisSeedData,
+};
 use signing::{open_stage, FRAME_BYTES};
 
 const READ_BYTES: usize = 6 * MAX_PATH + 6 * MAX_FRAME + 8 * FRAME_BYTES + 16 * 1024;
@@ -20,6 +29,24 @@ pub(in super::super) struct InviteRecoveryRead<'a> {
     // Files and their scratch must drain before these outside-guard owners.
     _lease: VaultPhysicalWorkLease,
     _fee: CatalogReadReservation,
+}
+
+struct InviteGenesis<'a> {
+    context: &'a BootstrapSourceContextData,
+    profile: &'a SignedOwnerProfile,
+    admission: &'a AdmissionBody,
+    header: &'a SignedOwnerHeader,
+}
+
+impl<'a> From<V2GenesisSeedData<'a>> for InviteGenesis<'a> {
+    fn from(original: V2GenesisSeedData<'a>) -> Self {
+        Self {
+            context: original.context,
+            profile: original.profile,
+            admission: original.admission,
+            header: original.header,
+        }
+    }
 }
 
 impl<'a> InviteRecoveryRead<'a> {
@@ -57,13 +84,42 @@ impl<'a> InviteRecoveryRead<'a> {
             return Err(refused());
         }
         self.context = Some(bound_context(guard, self.parent)?);
-        self.pages = Some(open_pages(guard)?);
+        self.pages = Some(open_pages(guard.target_directory_data().0)?);
+        self.capture_slots(false)?;
+        if self.intent.is_none() {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
+    /// Classify all three exact names. Cold work can start only when none
+    /// exists, even if a torn or reordered directory update lost the intent.
+    pub(in super::super) fn capture_cold(
+        &mut self,
+        guard: &ColdInviteParent<'_>,
+    ) -> Result<(), AppError> {
+        let (parent, base) = guard.context_data();
+        if !std::ptr::eq(self.store, guard.store())
+            || self.parent != Some(parent)
+            || self.pages.is_some()
+        {
+            return Err(refused());
+        }
+        self.context = Some(selected_context(base, self.parent));
+        self.pages = Some(open_pages(guard.target())?);
+        self.capture_slots(true)?;
+        if self.intent.is_none() && (self.attempt.is_some() || self.raw.is_some()) {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
+    fn capture_slots(&mut self, for_cover: bool) -> Result<(), AppError> {
         let pages = self.pages.as_ref().ok_or_else(refused)?;
-        self.intent = Some(
-            ReadObject::open(&pages.0.join(&*self.names.intent), MAX_FRAME)?.ok_or_else(refused)?,
-        );
-        self.attempt = ReadObject::open(&pages.0.join(&*self.names.attempt), FRAME_BYTES)?;
-        self.raw = ReadObject::open(&pages.0.join(&*self.names.raw), FRAME_BYTES)?;
+        self.intent = ReadObject::open(&pages.0.join(&*self.names.intent), MAX_FRAME, for_cover)?;
+        self.attempt =
+            ReadObject::open(&pages.0.join(&*self.names.attempt), FRAME_BYTES, for_cover)?;
+        self.raw = ReadObject::open(&pages.0.join(&*self.names.raw), FRAME_BYTES, for_cover)?;
         Ok(())
     }
 
@@ -78,12 +134,45 @@ impl<'a> InviteRecoveryRead<'a> {
         {
             return Err(refused());
         }
+        self.require_slots()
+    }
+
+    pub(in super::super) fn require_current_cold(
+        &mut self,
+        guard: &ColdInviteParent<'_>,
+    ) -> Result<(), AppError> {
+        let (parent, base) = guard.context_data();
+        if !std::ptr::eq(self.store, guard.store())
+            || self.parent != Some(parent)
+            || self.context != Some(selected_context(base, self.parent))
+        {
+            return Err(refused());
+        }
+        self.require_slots()
+    }
+
+    pub(in super::super) fn cover_current_cold(
+        &mut self,
+        guard: &ColdInviteParent<'_>,
+    ) -> Result<(), AppError> {
+        self.require_current_cold(guard)?;
+        for object in [&self.intent, &self.attempt, &self.raw] {
+            object
+                .as_ref()
+                .ok_or_else(refused)?
+                .file
+                .sync_all()
+                .map_err(io)?;
+        }
+        crate::store::persistence::sync_directory(&self.pages.as_ref().ok_or_else(refused)?.0)
+            .map_err(io)?;
+        self.require_current_cold(guard)
+    }
+
+    fn require_slots(&mut self) -> Result<(), AppError> {
         let pages = self.pages.as_ref().ok_or_else(refused)?;
         require_pages(pages)?;
-        self.intent
-            .as_mut()
-            .ok_or_else(refused)?
-            .require_exact(&pages.0.join(&*self.names.intent))?;
+        require_slot(&pages.0.join(&*self.names.intent), self.intent.as_mut())?;
         require_slot(&pages.0.join(&*self.names.attempt), self.attempt.as_mut())?;
         require_slot(&pages.0.join(&*self.names.raw), self.raw.as_mut())?;
         require_pages(pages)
@@ -95,7 +184,7 @@ impl<'a> InviteRecoveryRead<'a> {
         route: &[u8],
         genesis: V2GenesisSeedData<'_>,
     ) -> Result<NativeTextInviteRecovery, AppError> {
-        let (intent, signed) = self.recover(route, genesis)?;
+        let (intent, signed) = self.recover(route, genesis.into())?;
         intent.result(request, route)?;
         Ok(match signed {
             Some(signed) => NativeTextInviteRecovery::SignatureRecovered {
@@ -113,7 +202,7 @@ impl<'a> InviteRecoveryRead<'a> {
         route: &[u8],
         genesis: V2GenesisSeedData<'_>,
     ) -> Result<(), AppError> {
-        let (_, signed) = self.recover(route, genesis)?;
+        let (_, signed) = self.recover(route, genesis.into())?;
         let signed = signed.ok_or_else(refused)?;
         if incoming.encode() != signed.encode() {
             return Err(refused());
@@ -121,10 +210,34 @@ impl<'a> InviteRecoveryRead<'a> {
         Ok(())
     }
 
+    /// Return only a fully authenticated, already covered signature or a
+    /// complete absence. Incomplete states cannot seed a cold signer.
+    pub(in super::super) fn recover_cold(
+        &self,
+        request: V2FounderInviteRequestData,
+        route: &[u8],
+        source: &OpenedBootstrapSourceData,
+    ) -> Result<Option<SignedInviteBindingData>, AppError> {
+        if self.intent.is_none() && self.attempt.is_none() && self.raw.is_none() {
+            self.pages.as_ref().ok_or_else(refused)?;
+            return Ok(None);
+        }
+        let original = source.genesis_public_data();
+        let genesis = InviteGenesis {
+            context: original.context_data(),
+            profile: original.profile_data(),
+            admission: original.admission_data(),
+            header: original.header_data(),
+        };
+        let (intent, signed) = self.recover(route, genesis)?;
+        intent.result(request, route)?;
+        signed.map(Some).ok_or_else(refused)
+    }
+
     fn recover(
         &self,
         route: &[u8],
-        genesis: V2GenesisSeedData<'_>,
+        genesis: InviteGenesis<'_>,
     ) -> Result<(Intent, Option<SignedInviteBindingData>), AppError> {
         let context = self.context.ok_or_else(refused)?;
         let intent_frame = self.intent.as_ref().ok_or_else(refused)?;
@@ -188,14 +301,14 @@ struct ReadObject {
 }
 
 impl ReadObject {
-    fn open(path: &Path, cap: usize) -> Result<Option<Self>, AppError> {
+    fn open(path: &Path, cap: usize, for_cover: bool) -> Result<Option<Self>, AppError> {
         match fs::symlink_metadata(path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(io(e)),
             Ok(m) if !regular(&m) || m.len() <= 40 || m.len() > cap as u64 => return Err(refused()),
             Ok(_) => {}
         }
-        let mut file = open_readonly(path)?;
+        let mut file = open_held(path, for_cover)?;
         let id = session_id(&file).map_err(io)?;
         named(path, &file, id)?;
         let frame = read_capped(&mut file, cap)?;
@@ -230,11 +343,17 @@ fn require_slot(path: &Path, record: Option<&mut ReadObject>) -> Result<(), AppE
 }
 
 #[cfg(target_os = "linux")]
-fn open_readonly(path: &Path) -> Result<File, AppError> {
+fn open_held(path: &Path, for_cover: bool) -> Result<File, AppError> {
     use rustix::fs::{open, Mode, OFlags};
     open(
         path,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        (if for_cover {
+            OFlags::RDWR
+        } else {
+            OFlags::RDONLY
+        }) | OFlags::NOFOLLOW
+            | OFlags::NONBLOCK
+            | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map(File::from)
@@ -242,17 +361,18 @@ fn open_readonly(path: &Path) -> Result<File, AppError> {
 }
 
 #[cfg(windows)]
-fn open_readonly(path: &Path) -> Result<File, AppError> {
+fn open_held(path: &Path, for_cover: bool) -> Result<File, AppError> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
     OpenOptions::new()
         .read(true)
+        .write(for_cover)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
         .map_err(io)
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-fn open_readonly(_path: &Path) -> Result<File, AppError> {
+fn open_held(_path: &Path, _for_cover: bool) -> Result<File, AppError> {
     Err(refused())
 }

@@ -11,7 +11,7 @@ use crate::store::persistence::v2_member_transport::{
     NativeTextFounderDependencyResponse, NativeTextFounderFrameOutcome, NativeTextFounderReceived,
 };
 use crate::store::persistence::v2_shared_history::SharedHistoryActionQuery;
-use crate::store::NativeTextJoinedArchivedActions;
+use crate::store::{NativeTextFounderAudit, NativeTextJoinedArchivedActions};
 use catcoms_net::{
     NativeChatMemberDependencyIncoming, NativeChatMemberDependencyRequests, NativeChatMemberFrame,
     NativeChatMemberGossip, NativeChatMemberGossipError, NativeChatMemberGossipEvent,
@@ -388,6 +388,38 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
             _ => Err(V2MemberSaveRefusal::Failed),
         }
     }
+
+    /// Read selected signed Creates, or the exact target's retained originals,
+    /// under the live founder source. This cannot settle archive writes.
+    pub fn audit_founder_history(
+        self,
+        channel: u128,
+        target: Option<ActionId>,
+        after: Option<ActionId>,
+        limit: usize,
+        caller: &RequestCancellation,
+    ) -> Result<NativeTextFounderAudit, V2MemberSaveRefusal> {
+        let (cell, mut keys) = self.prepare_keys()?;
+        let source = keys.member_entry().1.observe_current();
+        let caller = connected::constrain_founder_transport(
+            self.scope.clone(),
+            source,
+            caller.clone(),
+            None,
+        );
+        let query = SharedHistoryActionQuery {
+            target,
+            after,
+            limit,
+        };
+        match self
+            .finish_prepared((cell, keys))?
+            .run_founder_member_receive(channel, FounderReceiveOperation::Audit(query), &caller)?
+        {
+            FounderReceiveOutcome::Audit(audit) => Ok(audit),
+            _ => Err(V2MemberSaveRefusal::Failed),
+        }
+    }
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
@@ -462,6 +494,9 @@ fn run_recovered_receive(
             FounderReceiveOutcome::RecoveredProjection(
                 founder.archived_message_projection(channel, action, caller, rng)?,
             )
+        }
+        FounderReceiveOperation::Audit(query) => {
+            FounderReceiveOutcome::Audit(founder.selected_history_audit(channel, query, caller)?)
         }
     })
 }

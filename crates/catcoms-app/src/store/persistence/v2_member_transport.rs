@@ -4,12 +4,14 @@ catcoms_rt::redacted_debug! {
     NativeTextFounderDependencyResponse;
     NativeTextFounderReceived;
     NativeTextFounderFrameOutcome;
+    NativeTextFounderAudit;
 }
 
 use super::v2_member_outbox::{member_outbox_key, MemberDebtBatch, MemberSavedOriginal};
 use super::v2_shared_history::{
-    PreparedSharedHistoryRecord, SharedHistoryActionPage, SharedHistoryActionQuery,
-    SharedHistoryProjectionLease, SharedHistoryScope, SHARED_HISTORY_RECORD_FEE,
+    PreparedSharedHistoryRecord, SelectedSharedHistoryAuditPage, SharedHistoryActionPage,
+    SharedHistoryActionQuery, SharedHistoryProjectionLease, SharedHistoryScope,
+    SHARED_HISTORY_RECORD_FEE,
 };
 use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
 use crate::store::critical_namespaces::refused;
@@ -21,8 +23,9 @@ use catcoms_net::{
     NativeChatMemberFrame,
 };
 use catcoms_replication::chat::{
-    ActionId, ActionState, ChatLedger, GuardedMessageProjection, ProjectionView,
-    V2GeneralPrefixVerifier, V2OrdinaryReceiveStatus, MAX_PARENTS,
+    cold_actions::AssembledActionOriginal, owner_facts::OwnerFactId, ActionId, ActionState,
+    ChatLedger, GuardedMessageProjection, ProjectionView, V2GeneralPrefixVerifier,
+    V2OrdinaryReceiveStatus, MAX_PARENTS,
 };
 use catcoms_rt::{CryptoRngCore, RequestCancellation, Topic, TransportError};
 use catcoms_sync::owner_v2::{
@@ -548,6 +551,46 @@ pub(in crate::store) enum FounderReceiveOperation<'a> {
     Read(ActionId),
     ArchivePage(SharedHistoryActionQuery),
     ArchiveMessage(ActionId),
+    Audit(SharedHistoryActionQuery),
+}
+
+/// A founder's paid page of checked local archive records. The scope is a
+/// negative observation only. The runtime and archive remain with the owner.
+pub struct NativeTextFounderAudit {
+    page: Option<SelectedSharedHistoryAuditPage>,
+    signal: RequestCancellation,
+}
+
+impl NativeTextFounderAudit {
+    pub(in crate::store) fn new(
+        page: Option<SelectedSharedHistoryAuditPage>,
+        signal: RequestCancellation,
+    ) -> Self {
+        Self { page, signal }
+    }
+
+    pub fn is_current_cached(&self) -> bool {
+        !self.signal.is_cancelled()
+    }
+
+    /// Permit inspection only while the original founder source and
+    /// covered membership remain live. None means the archive was unavailable.
+    pub fn with_records<T>(
+        &self,
+        read: impl FnOnce(Option<&[(OwnerFactId, AssembledActionOriginal)]>, Option<ActionId>) -> T,
+    ) -> Result<T, Refusal> {
+        if !self.is_current_cached() {
+            return Err(Refusal::Stale);
+        }
+        let result = read(
+            self.page.as_ref().map(|page| page.records.as_slice()),
+            self.page.as_ref().and_then(|page| page.next),
+        );
+        if !self.is_current_cached() {
+            return Err(Refusal::Stale);
+        }
+        Ok(result)
+    }
 }
 
 /// The original founder receiver's update for a verified action.
@@ -617,5 +660,6 @@ pub(in crate::store) enum FounderReceiveOutcome {
     ),
     ArchivePage(Option<SharedHistoryActionPage>),
     ArchiveMessage(Option<FounderArchivedMessage>),
+    Audit(NativeTextFounderAudit),
     RecoveredProjection(Option<NativeTextJoinedMemberProjection>),
 }

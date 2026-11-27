@@ -22,6 +22,43 @@ mounted TCP request and predecessor identity and byte checks. The tests
 use controlled native credentials. Durable cold Add selection, fresh
 desktop admission, and rejoin remain open.
 
+## 27 November 2026 — Save invitations at a restored founder's selected parent
+
+The disabled native Chat V2 founder restored after a covered Add or Remove
+uses its original policy, TCP reservation and verified native signing key to
+save an invitation. The same exact packet can be reissued after a restart.
+Torn, orphaned and foreign journal data are refused and preserved.
+
+The Windows App all-features compile check and both focused native tests
+passed. The mounted regression covered a real Remove, exact cold replay
+after another process restart and refusal with the torn signature and its
+companion files preserved. The native parser test also passed.
+
+The cold listener still needs a fresh governed Add before another member can
+use this invitation. Rejoin in the removed member's original vault, the
+combined suites and physical acceptance remain open. Chat V2 stays disabled.
+
+## 26 November 2026 — Founder read of retained received history
+
+The founder can open Chat history from the Chat V2 Members panel. It
+lists originals in this device's selected received archive and shows
+the signed edits and deletions for an exact message. The same native
+authorization covers warm and restored founders. An unfinished archive
+write or corrupt selected record refuses the read without settling it.
+
+Focused Windows App tests passed for bounded original and revision
+pages, authenticated restart, corrupt selected records and an unfinished
+archive write. The full frontend suite passed with 3,948 tests and the
+additional compiled Svelte dialog test passed separately. The browser
+flow could not connect to the local browser debugger.
+
+The native parser and mounted Windows desktop audit scenario passed on
+the integrated invitation stack at 675ca565. The scenario covered
+founder and joined role checks, warm and cold reads, and the original
+Source retiring while the response waited. Audit covers selected received
+records on this device. Own outbox audit and unproven late originals
+from removed members remain open. Chat V2 stays disabled.
+
 ## 26 November 2026 — Restore approved joined contacts after reopening
 
 The disabled native Chat V2 joined row can remember a signed contact for
@@ -44,19 +81,46 @@ Header. A change of governing state requires fresh contact consent.
 This does not cover governed rejoin or physical network acceptance.
 Chat V2 remains disabled.
 
+## 27 November 2026 — Keep paid history replay moving
+
+The joined worker advances a paid original in short local slices before
+starting unrelated inventory work. Each slice releases the row permit.
+Local admission contention leaves the wire attempt budget intact and the
+original deadline still applies.
+
+A clean own outbox can prove that the author already has an archive-offered
+Create or reply. This skips one inventory fetch. Received audit data and
+notifications are unchanged. The shortcut does not apply to edits, deletes,
+or a targeted replay that needs the peer's exact signed bytes.
+
+The focused mounted Windows App test passed over actual TCP, including the
+own Create hit, Edit and Delete exclusions, and the separate received
+archive. Prior native combined runs selected the offline Edit and Delete
+but did not select the deepest reply within the test's deadline. Native
+execution of the revised worker and wider acceptance remain open.
+
 ## 26 November 2026 — Fetch exact missing parents before the next archive page
 
 A verified archive-stage miss can steer the desktop to a specific missing
 parent. The worker retains the original page scope and signed identities,
 drops the child's staging ledger, and selects the parent before retrying
 the same child. Each chain has a fixed deadline, depth and attempt limit.
+An authenticated exact reply can wait for local staging with its
+original connection, approval, deadline and memory reservation. Local
+transport saturation has a distinct pre-submission result and preserves
+the wire retry. A running replay gets shorter local turns while idle
+peer scans keep their ordinary interval.
 
 The focused Windows mounted App test passed with the offline founder's
 Edit presented before its Create. It rejected a ticket presented with
 another opened page, fetched the exact parent, checked the same signed
 Edit on retry and verified the edited message after reopening. The
 adversarial re-review found no remaining blocker, high or medium finding.
-The native scheduler and own-outbox fallback still need execution evidence.
+The focused Windows transport test held the lower owner after caller
+cancellation, observed local Busy, then observed a real retry after
+the lower owner retired. An earlier desktop run selected the offline
+author's Edit and Delete but missed the deepest nested reply within
+the scenario's bound. The latest combined desktop regression is pending.
 
 Chat V2 remains disabled. Cold contact approval, governed rejoin,
 authorized audit and wider acceptance remain open.
