@@ -379,10 +379,12 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             selection,
             channel,
             caller.clone(),
-            |source, ledger, view| {
+            |_| Ok(Some(())),
+            |source, ledger, view, ()| {
                 source.replay_archived_message(ledger, view, create, &caller, rng)
             },
-        )?;
+        )?
+        .ok_or(V2MemberSaveRefusal::Unavailable)?;
         let Some(selected) = selected else {
             return Ok(None);
         };
@@ -509,24 +511,39 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         channel: u128,
         caller: RequestCancellation,
     ) -> Result<NativeTextJoinedMemberLedger, V2MemberSaveRefusal> {
-        self.prepare_member_ledger_with(selection, channel, caller, |_, _, _| Ok(()))
-            .map(|(ledger, ())| ledger)
+        self.prepare_member_ledger_with(
+            selection,
+            channel,
+            caller,
+            |_| Ok(Some(())),
+            |_, _, _, ()| Ok(()),
+        )?
+        .map(|(ledger, ())| ledger)
+        .ok_or(V2MemberSaveRefusal::Unavailable)
     }
 
-    fn prepare_member_ledger_with<T>(
+    fn prepare_member_ledger_with<T, U>(
         self,
         selection: &NativeTextJoinedRowSelection,
         channel: u128,
         caller: RequestCancellation,
+        prepare: impl FnOnce(&ReceiverSource<'_, R>) -> Result<Option<T>, V2MemberSaveRefusal>,
         populate: impl FnOnce(
             &ReceiverSource<'_, R>,
             &mut ChatLedger,
             &ProjectionView,
-        ) -> Result<T, V2MemberSaveRefusal>,
-    ) -> Result<(NativeTextJoinedMemberLedger, T), V2MemberSaveRefusal> {
+            T,
+        ) -> Result<U, V2MemberSaveRefusal>,
+    ) -> Result<Option<(NativeTextJoinedMemberLedger, U)>, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
-        let (view, ledger, observed, authentication, result, fee) =
-            self.with_member_receiver(selection, &caller, |source| {
+        let Some((view, ledger, observed, authentication, result, fee)) = self
+            .with_member_receiver(selection, &caller, |source| {
+                // Authenticate the wire reply before allocating a ledger.
+                // Both phases use this same checked physical receiver and
+                // its selected prefix, including after a cold reopen.
+                let Some(original) = prepare(&source)? else {
+                    return Ok(None);
+                };
                 let ReceiverSource {
                     metadata,
                     node,
@@ -562,9 +579,12 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 let authentication = metadata
                     .authentication_negative()
                     .map_err(|_| Refusal::Unavailable)?;
-                let result = populate(&source, &mut ledger, &view)?;
-                Ok((view, ledger, observed, authentication, result, fee))
-            })?;
+                let result = populate(&source, &mut ledger, &view, original)?;
+                Ok(Some((view, ledger, observed, authentication, result, fee)))
+            })?
+        else {
+            return Ok(None);
+        };
         let (invocation, live) = watch::channel(false);
         let authority = Arc::new(JoinEffect {
             scope: self.original.scope,
@@ -575,7 +595,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             row: Some(selection.clone()),
         });
         let signal = observed.constrain(caller.with_authority(authority));
-        Ok((
+        Ok(Some((
             NativeTextJoinedMemberLedger {
                 _invocation: invocation,
                 view,
@@ -585,7 +605,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 _fee: fee,
             },
             result,
-        ))
+        )))
     }
 
     /// Admit a live network original into this exact channel ledger. A missing
