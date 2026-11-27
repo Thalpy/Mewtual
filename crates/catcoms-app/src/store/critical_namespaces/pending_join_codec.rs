@@ -376,12 +376,30 @@ pub(super) fn parse_joined_history_family<'a>(
     domain: &[u8; 32],
     executing: bool,
 ) -> Result<Parsed<'a>, AppError> {
+    parse_joined_archive_family(plain, domain, executing, false)
+}
+
+pub(super) fn parse_native_rejoin_startup<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
+    parse_joined_archive_family(plain, domain, executing, true)
+}
+
+fn parse_joined_archive_family<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+    rejoin: bool,
+) -> Result<Parsed<'a>, AppError> {
     let parsed = parse_known(
         plain,
         domain,
         SupportedLayout {
             joined_pin: true,
             shared_history: true,
+            rejoin,
             ..SupportedLayout::GOVERNANCE_LAYOUT
                 .executing(executing)
                 .member_outbox(true)
@@ -401,19 +419,7 @@ pub(super) fn parse_rejoin_native_registry_layout<'a>(
     domain: &[u8; 32],
     executing: bool,
 ) -> Result<Parsed<'a>, AppError> {
-    let parsed = parse_known(
-        plain,
-        domain,
-        SupportedLayout {
-            joined_pin: true,
-            shared_history: true,
-            rejoin: true,
-            ..SupportedLayout::GOVERNANCE_LAYOUT
-                .executing(executing)
-                .member_outbox(true)
-                .native_registry(Some(3))
-        },
-    )?;
+    let parsed = parse_native_rejoin_startup(plain, domain, executing)?;
     if parsed.rejoin_payload.is_none() {
         return Err(refused());
     }

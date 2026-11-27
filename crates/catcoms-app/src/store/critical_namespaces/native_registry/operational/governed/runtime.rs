@@ -100,6 +100,33 @@ impl NativeTextRemovedJoinedVault {
         }
         Ok(true)
     }
+
+    /// Cover a local rejoin catalog candidate on disk. Current, the selected
+    /// membership and the native index remain unchanged. The next opener can
+    /// authenticate and reuse this exact complete candidate.
+    pub fn stage_rejoin_catalog(&mut self, rng: &mut dyn CryptoRngCore) -> Result<bool, AppError> {
+        if !self.prepare_rejoin_catalog(rng)? {
+            return Ok(false);
+        }
+        let prepared = self.rejoin_catalog.as_mut().ok_or_else(refused)?;
+        self.index.stage_retired_rejoin_catalog(prepared)?;
+        Ok(true)
+    }
+
+    /// Publish and cover the original Stage as Current. The old mount never
+    /// becomes an A2 source. On success or after a restart, use the native
+    /// cold opener to acquire the selected catalog in a fresh mount.
+    pub fn select_rejoin_catalog(&mut self, rng: &mut dyn CryptoRngCore) -> Result<bool, AppError> {
+        if !self.tcp_drain.is_drained() {
+            return Ok(false);
+        }
+        if self.rejoin_catalog.is_none() && !self.prepare_rejoin_catalog(rng)? {
+            return Ok(false);
+        }
+        let prepared = self.rejoin_catalog.as_mut().ok_or_else(refused)?;
+        self.index.select_retired_rejoin_catalog(prepared)?;
+        Ok(true)
+    }
 }
 
 impl NativeTextJoinedStorage {
@@ -241,7 +268,10 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextJoinedRuntime<T, R> {
         caller: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<(OwnerHeaderId, OwnerFactId, u64), AppError> {
-        if self.storage.pending.is_some() || caller.is_cancelled() {
+        if self.storage.pending.is_some()
+            || caller.is_cancelled()
+            || self.storage.index.rejoin_catalog_selected()?
+        {
             return Err(refused());
         }
         let node = self
@@ -374,6 +404,11 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextJoinedRuntime<T, R> {
                 return Err(refused());
             }
             return Ok(RecoveredJoinedMembership::Removed(removal));
+        }
+        // During rejoin staging ID9 still owns the retired A1 row. Neither
+        // a storage-only caller nor native startup may use an active A1.
+        if self.storage.index.rejoin_catalog_selected()? {
+            return Err(refused());
         }
         let (head, own, epoch) = node.selected_join_data().map_err(|_| refused())?;
         Ok(RecoveredJoinedMembership::Active(head, own, epoch))

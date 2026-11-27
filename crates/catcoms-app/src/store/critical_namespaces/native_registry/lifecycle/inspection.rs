@@ -53,6 +53,22 @@ impl Handler {
             layout,
             &layout.encode_data()?,
         )?;
+        if self.accepts_rejoin_startup() {
+            let key = Zeroizing::new(store.keys.db_key()?);
+            let rejoin = super::super::super::rejoin_namespace::has_rejoin_descriptor(
+                &key,
+                inventory.catalog(),
+                &expected.vault,
+            )?;
+            if rejoin
+                && (inventory.seed().is_some()
+                    || inventory.catalog_stage().is_some()
+                    || inventory.index_stage().is_some()
+                    || inventory.has_upgrade_outputs())
+            {
+                return Err(refused());
+            }
+        }
         if let Some(raw) = inventory.seed() {
             let key = Zeroizing::new(store.keys.db_key()?);
             match preparation::Output::decode_seed(&key, expected, raw) {

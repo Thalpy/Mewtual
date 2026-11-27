@@ -1905,36 +1905,41 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
         wait_for_original_vault().await;
         let catalog = member_path.join("chat-critical-namespaces.bin");
         let before = std::fs::read(&catalog).unwrap();
-        let mut rng = OsCryptoRng;
-        let registry = Registry::default();
-        let storage = NativeTextJoinedStorage::open_for_native_startup(
-            &member_path,
-            SECRET.as_bytes(),
-            &mut rng,
-            boot::current_policy().unwrap(),
-        )
-        .unwrap();
-        let (_lifetime, signal) = tokio::sync::watch::channel(false);
-        let negative = catcoms_rt::RequestCancellation::new(signal, None);
-        let runtime = storage
-            .bind_recovered_native_runtime(OsCryptoRng, Box::new(SystemClock), &negative)
-            .map_err(|(_, error)| error)
-            .unwrap();
-        let NativeTextJoinedRecovery::Removed(mut retired) = runtime
-            .into_recovered_joined_membership(
-                (
-                    Arc::new(AtomicU64::new(1)),
-                    Arc::new(AtomicU64::new(0)),
-                    Arc::new(AtomicBool::new(false)),
-                ),
-                registry.ui_budget.clone(),
-                &registry.sources.policy(),
-                &negative,
+        let open_retired = || {
+            let mut rng = OsCryptoRng;
+            let registry = Registry::default();
+            let storage = NativeTextJoinedStorage::open_for_native_startup(
+                &member_path,
+                SECRET.as_bytes(),
+                &mut rng,
+                boot::current_policy().unwrap(),
             )
-            .unwrap()
-        else {
-            panic!("a proven terminal row must retain retired storage only");
+            .unwrap();
+            let (_lifetime, signal) = tokio::sync::watch::channel(false);
+            let negative = catcoms_rt::RequestCancellation::new(signal, None);
+            let runtime = storage
+                .bind_recovered_native_runtime(OsCryptoRng, Box::new(SystemClock), &negative)
+                .map_err(|(_, error)| error)
+                .unwrap();
+            let NativeTextJoinedRecovery::Removed(retired) = runtime
+                .into_recovered_joined_membership(
+                    (
+                        Arc::new(AtomicU64::new(1)),
+                        Arc::new(AtomicU64::new(0)),
+                        Arc::new(AtomicBool::new(false)),
+                    ),
+                    registry.ui_budget.clone(),
+                    &registry.sources.policy(),
+                    &negative,
+                )
+                .unwrap()
+            else {
+                panic!("a proven terminal row must retain retired storage only");
+            };
+            retired
         };
+        let mut retired = open_retired();
+        let mut rng = OsCryptoRng;
         timeout(Duration::from_secs(10), async {
             while !retired.prepare_rejoin_catalog(&mut rng).unwrap() {
                 SystemClock.sleep(Duration::from_millis(10)).await;
@@ -1991,8 +1996,128 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
         std::fs::remove_file(fork).unwrap();
         assert_eq!(retired.removal_data().unwrap(), Some(proof));
         assert!(retired.prepare_rejoin_catalog(&mut NeverRng).unwrap());
+        let stage = member_path.join("chat-critical-namespaces.rejoin.stage");
+        assert!(!stage.exists());
+        assert!(retired.stage_rejoin_catalog(&mut NeverRng).unwrap());
+        let bytes = std::fs::read(&stage).unwrap();
+        assert_eq!(std::fs::read(&catalog).unwrap(), before);
+        assert_ne!(bytes, before);
+        let held_stage = stage.with_extension("held-stage-for-test");
+        std::fs::rename(&stage, &held_stage).unwrap();
+        std::fs::write(&stage, &bytes).unwrap();
+        assert!(retired.stage_rejoin_catalog(&mut NeverRng).is_err());
+        assert_eq!(std::fs::read(&stage).unwrap(), bytes);
+        std::fs::remove_file(&stage).unwrap();
+        std::fs::rename(&held_stage, &stage).unwrap();
+        assert!(retired.stage_rejoin_catalog(&mut NeverRng).unwrap());
+        drop(retired);
+        wait_for_original_vault().await;
+
+        let mut reopened = open_retired();
+        timeout(Duration::from_secs(10), async {
+            while !reopened.stage_rejoin_catalog(&mut NeverRng).unwrap() {
+                SystemClock.sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a complete authenticated Stage is reused on cold open");
+        assert_eq!(std::fs::read(&stage).unwrap(), bytes);
+        assert_eq!(std::fs::read(&catalog).unwrap(), before);
+        drop(reopened);
+        wait_for_original_vault().await;
+
+        // A fresh owner has no authority to finish a short Stage write.
+        let partial = &bytes[..bytes.len() / 2];
+        std::fs::write(&stage, partial).unwrap();
+        let mut retired = open_retired();
+        timeout(Duration::from_secs(10), async {
+            loop {
+                match retired.stage_rejoin_catalog(&mut NeverRng) {
+                    Err(_) => break,
+                    Ok(false) => SystemClock.sleep(Duration::from_millis(10)).await,
+                    Ok(true) => panic!("partial cold Stage claimed a completed write"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&stage).unwrap(), partial);
         assert_eq!(std::fs::read(&catalog).unwrap(), before);
         drop(retired);
+        wait_for_original_vault().await;
+
+        // Select the same complete Stage through the production writer.
+        // The old mount retains only its historical proof after the rename.
+        std::fs::write(&stage, &bytes).unwrap();
+        let mut retired = open_retired();
+        timeout(Duration::from_secs(10), async {
+            while !retired.stage_rejoin_catalog(&mut NeverRng).unwrap() {
+                SystemClock.sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let conflict = member_path.join("chat-critical-namespaces.replace.tmp");
+        std::fs::write(&conflict, b"unresolved competing catalog").unwrap();
+        assert!(retired.select_rejoin_catalog(&mut NeverRng).is_err());
+        assert_eq!(std::fs::read(&catalog).unwrap(), before);
+        assert_eq!(std::fs::read(&stage).unwrap(), bytes);
+        std::fs::remove_file(conflict).unwrap();
+
+        assert!(retired.select_rejoin_catalog(&mut NeverRng).unwrap());
+        assert!(retired.select_rejoin_catalog(&mut NeverRng).unwrap());
+        assert_eq!(std::fs::read(&catalog).unwrap(), bytes);
+        assert!(!stage.exists());
+        assert!(
+            retired.removal_data().is_err(),
+            "the old Current lost custody"
+        );
+        assert!(matches!(
+            catcoms_storage::vault::acquire_vault_session(&member_path),
+            Err(catcoms_storage::StorageError::VaultBusy)
+        ));
+        drop(retired);
+        wait_for_original_vault().await;
+
+        for relative in [
+            "chat-critical-namespaces.replace.tmp",
+            "chat-critical-namespaces.native-registry.seed",
+            "chat-critical-namespaces.native-index3.seed",
+            "chat-owner-v2/native-registry.stage",
+        ] {
+            let conflict = member_path.join(relative);
+            assert!(conflict.parent().unwrap().is_dir());
+            assert!(!conflict.exists());
+            std::fs::write(&conflict, b"unresolved original work").unwrap();
+            let result = NativeTextJoinedStorage::open_for_native_startup(
+                &member_path,
+                SECRET.as_bytes(),
+                &mut NeverRng,
+                boot::current_policy().unwrap(),
+            );
+            assert!(result.is_err(), "ID9 must refuse {relative}");
+            assert_eq!(
+                std::fs::read(&conflict).unwrap(),
+                b"unresolved original work"
+            );
+            assert_eq!(std::fs::read(&catalog).unwrap(), bytes);
+            std::fs::remove_file(conflict).unwrap();
+        }
+        let reopened = open_retired();
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(data) = reopened.removal_data().unwrap() {
+                    assert_eq!(data, proof);
+                    break;
+                }
+                SystemClock.sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cold startup replays the original terminal A1 beneath ID9");
+        assert_eq!(std::fs::read(&catalog).unwrap(), bytes);
+        assert!(!stage.exists());
+        drop(reopened);
         wait_for_original_vault().await;
     }
 
