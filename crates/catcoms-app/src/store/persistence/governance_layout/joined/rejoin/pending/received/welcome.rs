@@ -222,7 +222,7 @@ impl ServerStore {
             .pool;
         pending.invoice().validate(pool, WORK_BYTES)?;
         received._fee.validate(pool, WORK)?;
-        if !pending.matches_cookie(&received.pending_cookie) {
+        if !received.covered || !pending.matches_cookie(&received.pending_cookie) {
             return Err(denied());
         }
         let binding = Binding::new(catalog, registration, removal, invite, token)?;

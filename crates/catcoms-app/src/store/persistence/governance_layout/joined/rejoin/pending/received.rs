@@ -44,6 +44,7 @@ pub(in crate::store) struct RejoinReceivedOwner {
     held: Held,
     frame: Zeroizing<Vec<u8>>,
     pending_cookie: std::sync::Arc<()>,
+    covered: bool,
     _lease: catcoms_storage::VaultPhysicalWorkLease,
     _fee: CatalogReadReservation,
 }
@@ -213,6 +214,7 @@ impl ServerStore {
                 held: candidate.0,
                 frame: candidate.1,
                 pending_cookie: pending.cookie().clone(),
+                covered: false,
                 _lease: self._session.retain_for_physical_work(),
                 _fee: fee,
             });
@@ -235,6 +237,8 @@ impl ServerStore {
         // Return only while its reply still names the held original file.
         record.require(&path)?;
         require_current()?;
+        // A matching name alone cannot prove the earlier durability barrier.
+        record.covered = true;
         Ok(Some(receipt))
     }
 }
