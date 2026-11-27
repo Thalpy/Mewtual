@@ -4,6 +4,7 @@ catcoms_rt::redacted_debug! {
     NativeChatMemberDependencyRequests;
     NativeChatMemberDependencyIncoming;
     NativeChatMemberDependencyExchange;
+    NativeChatMemberInventoryExchange;
 }
 
 use super::native_chat_join::{
@@ -32,6 +33,7 @@ pub struct NativeChatMemberDependencies {
     pub(super) commands: mpsc::WeakSender<Command>,
     pub(super) connections: Weak<Connections>,
     pub(super) outbound: Weak<Semaphore>,
+    pub(super) inventory_outbound: Weak<Semaphore>,
     pub(super) local: PeerId,
 }
 
@@ -72,6 +74,15 @@ impl NativeChatMemberDependencies {
     pub fn capture_request(&self, peer: PeerId) -> Option<NativeChatMemberDependencyExchange> {
         let connection = connection_leases::current(&self.connections.upgrade()?, peer)?;
         Some(self.exchange(peer, connection, None))
+    }
+
+    /// Capture a bounded history inventory request on its own lower slot.
+    /// The trusted App selects this lane before sealing the inventory. The
+    /// received wire still enters the original dependency protocol.
+    pub fn capture_inventory(&self, peer: PeerId) -> Option<NativeChatMemberInventoryExchange> {
+        let mut exchange = self.capture_request(peer)?;
+        exchange.outbound = self.inventory_outbound.clone();
+        Some(NativeChatMemberInventoryExchange(exchange))
     }
 
     /// Use only the original connected carrier of this received frame. An
@@ -197,6 +208,28 @@ pub struct NativeChatMemberDependencyExchange {
     peer: PeerId,
     observation: NativeChatMemberDependencyObservation,
     outbound: Weak<Semaphore>,
+}
+
+/// An outbound inventory can remain in the driver after its upper await
+/// ends. Its separately bounded slot cannot occupy the exact-request slot.
+pub struct NativeChatMemberInventoryExchange(NativeChatMemberDependencyExchange);
+
+impl NativeChatMemberInventoryExchange {
+    pub fn observe_route(&self) -> NativeChatMemberDependencyObservation {
+        self.0.observe_route()
+    }
+
+    pub fn observe_connection(&self) -> ConnectionLease {
+        self.0.observe_connection()
+    }
+
+    pub async fn request(
+        self,
+        sealed: &[u8],
+        caller: RequestCancellation,
+    ) -> Result<Bytes, TransportError> {
+        self.0.request(sealed, caller).await
+    }
 }
 
 impl NativeChatMemberDependencyExchange {
@@ -365,6 +398,129 @@ mod tests {
     };
     use std::time::Duration;
     use tokio::sync::watch;
+
+    #[tokio::test]
+    async fn native_inventory_keeps_its_own_physical_slot_while_another_peer_answers_exact() {
+        let native = |seed, listen: bool| {
+            let mut preparation = NativeTcpPreparation::new((), Arc::new(()));
+            let addresses = listen.then(|| "/ip4/127.0.0.1/tcp/0".parse().unwrap());
+            preparation
+                .build(
+                    keypair_from_seed([seed; 32]).unwrap(),
+                    addresses.as_slice(),
+                    &[],
+                )
+                .unwrap()
+        };
+        let (source, _, _) = native(122, false);
+        let (holder_a, a_address_peer, _) = native(123, true);
+        let (holder_b, b_address_peer, _) = native(124, true);
+        let lane = source.native_chat_member_dependencies().unwrap();
+        let (_owner, signal) = watch::channel(false);
+        let scope = RequestCancellation::new(signal, None);
+        tokio::time::timeout(Duration::from_secs(15), async {
+            for (holder, address_peer) in [(&holder_a, a_address_peer), (&holder_b, b_address_peer)]
+            {
+                let address = holder.next_listen_addr().await.unwrap();
+                assert_eq!(
+                    source
+                        .dial_outcome(format!("{address}/p2p/{address_peer}").parse().unwrap())
+                        .await
+                        .unwrap(),
+                    catcoms_rt::DialSubmission::Submitted
+                );
+                source
+                    .wait_for_peer_connected(holder.local_peer())
+                    .await
+                    .unwrap();
+            }
+            let a = holder_a.local_peer();
+            let b = holder_b.local_peer();
+            let stalled = lane.capture_inventory(a).unwrap();
+            let authority_a = Arc::new(OriginalRoute {
+                observation: stalled.observe_route(),
+                caller: scope.clone(),
+            });
+            let exact = lane.capture_request(b).unwrap();
+            let authority_b = Arc::new(OriginalRoute {
+                observation: exact.observe_route(),
+                caller: scope.clone(),
+            });
+            let mut requests_a = holder_a
+                .native_chat_member_dependencies()
+                .unwrap()
+                .try_attach(authority_a.clone())
+                .unwrap();
+            let mut requests_b = holder_b
+                .native_chat_member_dependencies()
+                .unwrap()
+                .try_attach(authority_b.clone())
+                .unwrap();
+            let signal = scope.clone();
+            let inventory =
+                tokio::spawn(async move { stalled.request(b"inventory", signal).await });
+            let held = requests_a.next().await.unwrap();
+            assert_eq!(held.current_data().unwrap().1, b"inventory");
+            inventory.abort();
+            assert!(inventory.await.unwrap_err().is_cancelled());
+            assert!(matches!(
+                lane.capture_inventory(b)
+                    .unwrap()
+                    .request(b"second inventory", scope.clone())
+                    .await,
+                Err(TransportError::Busy)
+            ));
+
+            let serve_exact = async {
+                let request = requests_b.next().await.unwrap();
+                assert_eq!(request.current_data().unwrap().1, b"exact original");
+                request
+                    .respond(
+                        Bytes::from_static(b"exact reply"),
+                        authority_b.clone(),
+                        Arc::new(()),
+                    )
+                    .unwrap();
+            };
+            let (reply, ()) =
+                tokio::join!(exact.request(b"exact original", scope.clone()), serve_exact);
+            assert_eq!(reply.unwrap(), Bytes::from_static(b"exact reply"));
+            assert!(
+                held.current_data().is_some(),
+                "the stalled request still holds its original responder"
+            );
+            held.respond(
+                Bytes::from_static(b"discarded inventory reply"),
+                authority_a,
+                Arc::new(()),
+            )
+            .unwrap();
+            let next_inventory = async {
+                loop {
+                    let result = lane
+                        .capture_inventory(b)
+                        .unwrap()
+                        .request(b"fresh inventory", scope.clone())
+                        .await;
+                    if !matches!(&result, Err(TransportError::Busy)) {
+                        break result;
+                    }
+                    SystemClock.sleep(Duration::from_millis(10)).await;
+                }
+            };
+            let serve_inventory = async {
+                let incoming = requests_b.next().await.unwrap();
+                assert_eq!(incoming.current_data().unwrap().1, b"fresh inventory");
+                incoming
+                    .respond(Bytes::from_static(b"fresh page"), authority_b, Arc::new(()))
+                    .unwrap();
+            };
+            let (page, ()) = tokio::join!(next_inventory, serve_inventory);
+            assert_eq!(page.unwrap(), Bytes::from_static(b"fresh page"));
+        })
+        .await
+        .expect("bounded authenticated TCP inventory and exact requests");
+    }
 
     #[tokio::test]
     async fn native_member_dependency_exchange_keeps_the_original_connected_lane() {

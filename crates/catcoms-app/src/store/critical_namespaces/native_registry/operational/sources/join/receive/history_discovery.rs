@@ -8,8 +8,8 @@ use super::dependencies::{
 use super::*;
 use crate::store::persistence::v2_member_outbox::{DispositionCode, MemberEntryStatus};
 use catcoms_net::{
-    NativeChatMemberDependencyExchange, NativeChatMemberDependencyIncoming,
-    NativeChatMemberDependencyObservation,
+    NativeChatMemberDependencyIncoming, NativeChatMemberDependencyObservation,
+    NativeChatMemberInventoryExchange,
 };
 use catcoms_replication::chat::Body;
 use catcoms_rt::{ConnectionLease, TransportError};
@@ -33,7 +33,7 @@ const PARKED_PAGE_FEE: usize = 8 * 1024;
 const ARCHIVE_ANCESTRY_FEE: usize = 4 * 1024;
 
 pub struct NativeTextJoinedHistoryExchange {
-    transport: NativeChatMemberDependencyExchange,
+    transport: NativeChatMemberInventoryExchange,
     request: HistoryRequest,
     source: HistoryQuery,
     wire_scope: HistoryWireScope,
@@ -425,7 +425,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         use V2MemberSaveRefusal as Refusal;
         let transport = self
             .dependency_lane()?
-            .capture_request(provider)
+            .capture_inventory(provider)
             .ok_or(Refusal::Unavailable)?;
         let observation = transport.observe_route();
         let connection = transport.observe_connection();

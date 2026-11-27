@@ -10,6 +10,7 @@ use catcoms_replication::chat::ActionId;
 use catcoms_rt::TransportError;
 use std::collections::VecDeque;
 use std::time::Duration;
+use tokio::task::JoinSet;
 
 const TURN: Duration = Duration::from_millis(500);
 const REPLAY_TURN: Duration = Duration::from_millis(100);
@@ -39,7 +40,7 @@ enum HistoryTurn {
 fn select_due_turn(
     due: impl Iterator<Item = Option<HistoryTurn>>,
     exact_turns: &mut u8,
-) -> Option<usize> {
+) -> Option<(usize, HistoryTurn)> {
     let mut exact = None;
     let mut discovery = None;
     for (index, turn) in due.enumerate() {
@@ -59,11 +60,13 @@ fn select_due_turn(
     match (exact, discovery) {
         (Some(exact), Some(_)) if *exact_turns < MAX_EXACT_TURNS_BEFORE_DISCOVERY => {
             *exact_turns += 1;
-            Some(exact)
+            Some((exact, HistoryTurn::Exact))
         }
         (exact, discovery) => {
             *exact_turns = 0;
-            discovery.or(exact)
+            discovery
+                .map(|index| (index, HistoryTurn::Discovery))
+                .or_else(|| exact.map(|index| (index, HistoryTurn::Exact)))
         }
     }
 }
@@ -192,18 +195,18 @@ impl PeerSweep {
         }
     }
 
-    fn due_turn(&self, now: u64) -> Option<HistoryTurn> {
-        (self.due <= now).then(|| {
-            if self
-                .page
-                .as_ref()
-                .is_some_and(|page| page.action_at(self.next_entry).is_some())
-            {
-                HistoryTurn::Exact
-            } else {
-                HistoryTurn::Discovery
-            }
-        })
+    fn due_turn(&self, now: u64, inventory_idle: bool) -> Option<HistoryTurn> {
+        if now < self.due {
+            return None;
+        }
+        if self
+            .page
+            .as_ref()
+            .is_some_and(|page| page.action_at(self.next_entry).is_some())
+        {
+            return Some(HistoryTurn::Exact);
+        }
+        inventory_idle.then_some(HistoryTurn::Discovery)
     }
 
     fn rescan_after(&mut self, delay: u64) {
@@ -275,6 +278,10 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
     let mut catalogue_due = 0;
     let mut peer_due = 0;
     let mut exact_turns = 0;
+    // A single owned inventory await can overlap exact fetch/replay. Each
+    // lane has its own paid lower slot and retains the original route.
+    let mut inventory = JoinSet::new();
+    let mut inventory_peer = None;
     let mut peer_turn_finished = false;
     loop {
         let first_slice = replay
@@ -298,6 +305,12 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
             _ = SystemClock.sleep(delay) => {}
         }
         let state = app.state::<AppState>();
+        if let Some(finished) = inventory.try_join_next() {
+            inventory_peer = None;
+            if let Ok(sweep) = finished {
+                peers.push_back(sweep);
+            }
+        }
         if let Some((mut sweep, parked)) = replay.take() {
             let mut parked = Some(parked);
             if let Some(outcome) = resume_entry(&state, source, &mut parked).await {
@@ -359,7 +372,7 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
             let updated = with_row_until(
                 &state,
                 source,
-                Some(local_turn_deadline()),
+                (Some(local_turn_deadline()), TURN),
                 move |original, row, _, scope| {
                     original.maintain_archive_relay_catalogue(&row, channel, &scope)
                 },
@@ -374,17 +387,20 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
         }
         for peer in candidates {
             for archive in [false, true] {
-                if !peers
-                    .iter()
-                    .any(|sweep| sweep.peer == peer && sweep.archive == archive)
+                if inventory_peer != Some((peer, archive))
+                    && !peers
+                        .iter()
+                        .any(|sweep| sweep.peer == peer && sweep.archive == archive)
                 {
                     peers.push_back(PeerSweep::new(peer, archive));
                 }
             }
         }
         let now = SystemClock.monotonic_ms();
-        let Some(index) = select_due_turn(
-            peers.iter().map(|sweep| sweep.due_turn(now)),
+        let Some((index, kind)) = select_due_turn(
+            peers
+                .iter()
+                .map(|sweep| sweep.due_turn(now, inventory.is_empty())),
             &mut exact_turns,
         ) else {
             continue;
@@ -392,8 +408,18 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
         // Local replay can wake early without increasing peer request cadence.
         peer_due = now.saturating_add(TURN.as_millis() as u64);
         let mut sweep = peers.remove(index).expect("selected due history peer");
+        if kind == HistoryTurn::Discovery {
+            inventory_peer = Some((sweep.peer, sweep.archive));
+            let app = app.clone();
+            let source = source.clone();
+            inventory.spawn(async move {
+                let _ = scan_inventory(&app.state::<AppState>(), &source, &mut sweep).await;
+                sweep
+            });
+            continue;
+        }
         let mut parked = None;
-        let _ = turn(&state, source, &mut sweep, &mut parked).await;
+        turn_exact(&state, source, &mut sweep, &mut parked).await;
         if let Some(parked) = parked {
             replay = Some((sweep, parked));
         } else {
@@ -420,7 +446,7 @@ async fn reconcile_archive_change(
     with_row_until(
         state,
         source,
-        Some(local_turn_deadline()),
+        (Some(local_turn_deadline()), TURN),
         move |original, row, local, scope| {
             let selected = original
                 .selected_archive_target_data(&row, channel, change.action, &scope)
@@ -432,79 +458,90 @@ async fn reconcile_archive_change(
     .flatten()
 }
 
-async fn turn(
+async fn turn_exact(
     state: &AppState,
     source: &Arc<Source>,
     sweep: &mut PeerSweep,
     parked: &mut Option<ParkedOriginal>,
+) {
+    let Some(page) = sweep.page.clone() else {
+        return;
+    };
+    let Some(action) = page.action_at(sweep.next_entry) else {
+        // The verified page may retire between the scheduler and this
+        // check. Leave its cursor for the next inventory turn to close.
+        return;
+    };
+    let now = SystemClock.monotonic_ms();
+    let mut deadline = *sweep
+        .exact_deadline
+        .get_or_insert_with(|| now.saturating_add(EXACT_ENTRY_MS));
+    if now >= deadline {
+        sweep.finish_original(false);
+        return;
+    }
+    let planned = if let Some(ancestry) = &mut sweep.ancestry {
+        if ancestry.requests == MAX_ARCHIVE_ANCESTRY_REQUESTS || now >= ancestry.deadline {
+            sweep.finish_original(false);
+            return;
+        }
+        ancestry.requests += 1;
+        deadline = deadline.min(ancestry.deadline);
+        ancestry.stack.last().expect("active original").clone()
+    } else {
+        PlannedOriginal {
+            request: ExactRequest::Offered(action),
+            expected: None,
+        }
+    };
+    #[cfg(test)]
+    eprintln!(
+        "chat history worker preparing {} entry {}",
+        if sweep.archive {
+            "archive"
+        } else {
+            "own-outbox"
+        },
+        sweep.next_entry,
+    );
+    match fetch_entry(state, source, page.clone(), planned, Some(deadline), parked).await {
+        Some(EntryResult::Covered) => sweep.finish_original(true),
+        Some(EntryResult::Empty) => sweep.holder_archive_empty(),
+        Some(EntryResult::Deferred) => sweep.finish_original(false),
+        Some(EntryResult::TryAgain) if !sweep.exact_retry => {
+            sweep.exact_retry = true;
+            sweep.due = SystemClock
+                .monotonic_ms()
+                .saturating_add(TURN.as_millis() as u64);
+        }
+        Some(EntryResult::TryAgain) => sweep.finish_original(false),
+        Some(EntryResult::LocallyBusy) => {
+            // No wire attempt entered the driver. Local admission
+            // can retry within the same original deadline.
+            if let Some(ancestry) = &mut sweep.ancestry {
+                ancestry.requests -= 1;
+            }
+            sweep.due = now.saturating_add(TURN.as_millis() as u64);
+        }
+        None => {}
+    }
+}
+
+async fn scan_inventory(
+    state: &AppState,
+    source: &Arc<Source>,
+    sweep: &mut PeerSweep,
 ) -> Option<()> {
     let page = sweep.page.clone();
-    if let Some(page) = &page {
-        if !page.is_current_cached() {
-            #[cfg(test)]
-            eprintln!(
-                "chat history worker dropped an expired page (row, route, authority): {:?}",
-                page.current_checks_for_test()
-            );
-            sweep.rescan_after(RETRY_MS);
-            return None;
-        }
-        if let Some(action) = page.action_at(sweep.next_entry) {
-            let now = SystemClock.monotonic_ms();
-            let mut deadline = *sweep
-                .exact_deadline
-                .get_or_insert_with(|| now.saturating_add(EXACT_ENTRY_MS));
-            if now >= deadline {
-                sweep.finish_original(false);
-                return None;
-            }
-            let planned = if let Some(ancestry) = &mut sweep.ancestry {
-                if ancestry.requests == MAX_ARCHIVE_ANCESTRY_REQUESTS || now >= ancestry.deadline {
-                    sweep.finish_original(false);
-                    return None;
-                }
-                ancestry.requests += 1;
-                deadline = deadline.min(ancestry.deadline);
-                ancestry.stack.last().expect("active original").clone()
-            } else {
-                PlannedOriginal {
-                    request: ExactRequest::Offered(action),
-                    expected: None,
-                }
-            };
-            #[cfg(test)]
-            eprintln!(
-                "chat history worker preparing {} entry {}",
-                if sweep.archive {
-                    "archive"
-                } else {
-                    "own-outbox"
-                },
-                sweep.next_entry,
-            );
-            match fetch_entry(state, source, page.clone(), planned, Some(deadline), parked).await {
-                Some(EntryResult::Covered) => sweep.finish_original(true),
-                Some(EntryResult::Empty) => sweep.holder_archive_empty(),
-                Some(EntryResult::Deferred) => sweep.finish_original(false),
-                Some(EntryResult::TryAgain) if !sweep.exact_retry => {
-                    sweep.exact_retry = true;
-                    sweep.due = SystemClock
-                        .monotonic_ms()
-                        .saturating_add(TURN.as_millis() as u64);
-                }
-                Some(EntryResult::TryAgain) => sweep.finish_original(false),
-                Some(EntryResult::LocallyBusy) => {
-                    // No wire attempt entered the driver. Local admission
-                    // can retry within the same original deadline.
-                    if let Some(ancestry) = &mut sweep.ancestry {
-                        ancestry.requests -= 1;
-                    }
-                    sweep.due = now.saturating_add(TURN.as_millis() as u64);
-                }
-                None => {}
-            }
-            return None;
-        }
+    if let Some(page) = page.as_ref().filter(|page| !page.is_current_cached()) {
+        #[cfg(test)]
+        eprintln!(
+            "chat history worker dropped an expired page (row, route, authority): {:?}",
+            page.current_checks_for_test()
+        );
+        let _ = page;
+        sweep.rescan_after(RETRY_MS);
+        return None;
     }
     if sweep.archive && sweep.total_pages == MAX_ARCHIVE_SWEEP_PAGES {
         sweep.rescan_after(if sweep.deferred { RETRY_MS } else { RESCAN_MS });
@@ -523,7 +560,7 @@ async fn turn(
     let request = with_row_until(
         state,
         source,
-        Some(local_turn_deadline()),
+        (Some(local_turn_deadline()), TURN),
         move |original, row, _, scope| match page {
             Some(page) => {
                 original.prepare_history_continuation(&row, &page, scope, &mut OsCryptoRng)
@@ -590,10 +627,14 @@ async fn turn(
         sweep.due = SystemClock.monotonic_ms().saturating_add(delay);
         return None;
     };
+    // The exact worker may be selecting a durable record. Retain this
+    // paid reply through a bounded wait for the original local permit,
+    // with the original route, approval and response scope still attached.
+    let deadline = SystemClock.monotonic_ms().saturating_add(REPLAY_MS);
     let page = with_row_until(
         state,
         source,
-        Some(local_turn_deadline()),
+        (Some(deadline), Duration::from_millis(REPLAY_MS)),
         move |original, row, _, scope| original.open_history_response(&row, reply, &scope),
     )
     .await?;
@@ -657,7 +698,7 @@ async fn fetch_entry(
     let Some(fetch) = with_row_until(
         state,
         source,
-        ancestry_deadline,
+        (ancestry_deadline, TURN),
         move |original, row, _, scope| {
             if !page.is_current_cached() {
                 return Err(V2MemberSaveRefusal::Stale);
@@ -918,7 +959,7 @@ fn local_turn_deadline() -> u64 {
 async fn with_row_until<T: Send + 'static>(
     state: &AppState,
     source: &Arc<Source>,
-    deadline: Option<u64>,
+    (deadline, maximum_wait): (Option<u64>, Duration),
     perform: impl FnOnce(
             NativeTextJoinedSelectionPreparation<OsCryptoRng>,
             NativeTextJoinedRowSelection,
@@ -931,23 +972,23 @@ async fn with_row_until<T: Send + 'static>(
     // A blocking cut retains the original row, native permit, and fees until
     // the actual work leaves, even if lock drops the async observer earlier.
     let admit = async {
-        let permit = source.member_work.foreground(source.negative()).await?;
-        let Some((original, row)) = source.capture_joined(state).await else {
-            #[cfg(test)]
-            eprintln!("chat history worker could not capture its original row");
-            return None;
-        };
-        Some((permit, original, row))
-    };
-    let (permit, original, row) = if deadline.is_some() {
-        let wait = time_remaining(deadline, TURN);
-        if wait.is_zero() {
-            return None;
+        loop {
+            let permit = source.member_work.foreground(source.negative()).await?;
+            match source.try_capture_joined(state).await {
+                Ok((original, row)) => return Some((permit, original, row)),
+                Err(JoinedCaptureRefusal::TableBusy) => {
+                    drop(permit);
+                    SystemClock.sleep(REPLAY_TURN).await;
+                }
+                Err(JoinedCaptureRefusal::Stale) => return None,
+            }
         }
-        tokio::time::timeout(wait, admit).await.ok()??
-    } else {
-        admit.await?
     };
+    let wait = time_remaining(deadline, maximum_wait);
+    if wait.is_zero() {
+        return None;
+    }
+    let (permit, original, row) = tokio::time::timeout(wait, admit).await.ok()??;
     let source = source.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;
@@ -982,21 +1023,23 @@ mod tests {
             ("D2", Some(Discovery)),
         ]);
         for expected in ["A", "B", "D1", "A", "B", "D2"] {
-            let index = select_due_turn(queued.iter().map(|(_, turn)| *turn), &mut consecutive)
-                .expect("one ready history sweep");
+            let (index, kind) =
+                select_due_turn(queued.iter().map(|(_, turn)| *turn), &mut consecutive)
+                    .expect("one ready history sweep");
             let selected = queued.remove(index).expect("index in queue");
+            assert_eq!(selected.1, Some(kind));
             assert_eq!(selected.0, expected);
             queued.push_back(selected);
         }
         assert_eq!(consecutive, 0);
         assert_eq!(
             select_due_turn([None, Some(Exact)].into_iter(), &mut consecutive),
-            Some(1)
+            Some((1, Exact))
         );
         assert_eq!(consecutive, 0);
         assert_eq!(
             select_due_turn([None, Some(Discovery)].into_iter(), &mut consecutive),
-            Some(1)
+            Some((1, Discovery))
         );
         assert_eq!(select_due_turn([None].into_iter(), &mut consecutive), None);
     }
