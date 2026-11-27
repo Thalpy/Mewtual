@@ -318,6 +318,17 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         let Some(p) = self.pending.as_mut() else {
             return Err(cut);
         };
+        p.prepare_native_stage(stage, cut)
+    }
+}
+
+impl PendingAdd {
+    pub(super) fn prepare_native_stage(
+        &mut self,
+        stage: V2FounderAddNativeStage,
+        cut: NativeChatPreparedKeyCut,
+    ) -> Result<(), NativeChatPreparedKeyCut> {
+        let p = self;
         if cut
             .require_never_entered_data(&p.original, stage.purpose())
             .is_err()

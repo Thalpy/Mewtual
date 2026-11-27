@@ -1,13 +1,85 @@
 //! The closed recovered founder's private Add candidate.
 use super::*;
-use catcoms_mls::persist::text_current_add::TextCurrentAddLimits;
+use catcoms_mls::{
+    group::text_current_add::{PreparedTextCurrentAddInstallation, RetiredTextCurrentAdd},
+    persist::text_current_add::TextCurrentAddLimits,
+};
 use catcoms_replication::chat::{
-    join_bindings::WelcomeBindingSpecData, V2GeneralPrefixVerifier, V2LiveMemberObservation,
+    join_bindings::WelcomeBindingSpecData, owner_state::transition::ReplayBody, V2GeneralCandidate,
+    V2GeneralPrefixVerifier, V2GeneralRetiredData, V2HostSelectionExpectation,
+    V2LiveMemberObservation,
 };
 use catcoms_rt::Clock;
 
 catcoms_rt::redacted_debug! {
+    PreparedV2RecoveredAddInstall<'_>;
     V2RecoveredFounderAddSigning<'_>;
+}
+
+/// Exclusive recovery-side SDK/Core install loan. The host must prove that
+/// its physical selector chose this same covered transition before using it.
+pub struct PreparedV2RecoveredAddInstall<'a> {
+    mls: PreparedTextCurrentAddInstallation<'a>,
+    live_parent: V2LiveMemberObservation,
+    founder: OwnerFactId,
+    member: &'a V2AuthenticatedAdmission,
+    expected: &'a mut V2InstalledFounderAddData,
+    after: V2InstalledFounderAddData,
+    core_retired: &'a mut Option<V2GeneralRetiredData>,
+    sdk_retired: &'a mut Option<RetiredTextCurrentAdd>,
+}
+
+impl PreparedV2RecoveredAddInstall<'_> {
+    pub fn expected_data(&self) -> V2InstalledFounderAddData {
+        self.after
+    }
+
+    fn checked_selection(
+        &self,
+        verifier: &V2GeneralPrefixVerifier,
+        candidate: &V2GeneralCandidate,
+    ) -> Result<V2HostSelectionExpectation, SyncError> {
+        let founder = verifier
+            .admission(self.founder)
+            .map_err(|_| unavailable())?;
+        if !self.live_parent.is_live_cached() || !self.member.same_original(&founder) {
+            return Err(unavailable());
+        }
+        let selection =
+            V2HostSelectionExpectation::from_trusted_host(self.after.header, self.after.state);
+        verifier
+            .check_host_selection_data(&selection, candidate)
+            .map_err(|_| unavailable())?;
+        Ok(selection)
+    }
+
+    pub fn check_host_selection_data(
+        &self,
+        verifier: &V2GeneralPrefixVerifier,
+        candidate: &V2GeneralCandidate,
+    ) -> Result<(), SyncError> {
+        self.checked_selection(verifier, candidate).map(drop)
+    }
+
+    /// After the real durable host selection, install both exact successors.
+    /// A Core refusal leaves the original MLS graph and completed Cell owned.
+    pub fn finish_host_selected(
+        self,
+        verifier: &mut V2GeneralPrefixVerifier,
+        candidate: &mut Option<V2GeneralCandidate>,
+    ) -> Result<(), SyncError> {
+        let selected =
+            self.checked_selection(verifier, candidate.as_ref().ok_or_else(unavailable)?)?;
+        let retired = verifier
+            .advance_host_selected(&selected, candidate)
+            .map_err(|_| unavailable())?;
+        // All remaining slots are exclusively borrowed. No fallible work
+        // can leave the selected verifier ahead of the recovered SDK pair.
+        *self.core_retired = Some(retired);
+        *self.sdk_retired = Some(self.mls.install());
+        *self.expected = self.after;
+        Ok(())
+    }
 }
 
 /// Borrowed native key tails for the one recovered Add. The host independently
@@ -48,6 +120,39 @@ impl PreparedV2FounderRecoveredAdd {
             return Err(unavailable());
         }
         Ok(())
+    }
+
+    /// Capture the original predecessor's MLS exporter before it retires.
+    /// The owning journal binds this verifier to the exact selected step.
+    pub fn recovered_add_fetch_verifier_data(
+        &self,
+        verifier: &V2GeneralPrefixVerifier,
+        source: &OpenedBootstrapSourceData,
+    ) -> Result<[u8; 32], SyncError> {
+        self.require_original_add_parent(verifier, source)?;
+        Ok(crate::V2MemberAddRequestData::for_selected_group(
+            &self.group,
+            &self.device,
+            verifier.replay_data(),
+        )?
+        .verifier_data())
+    }
+
+    pub fn has_recovered_add_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Refresh a never-entered native stage through the exact same pending
+    /// request after an independently proven old UI batch has retired.
+    pub fn prepare_recovered_add_native_stage(
+        &mut self,
+        stage: V2FounderAddNativeStage,
+        cut: NativeChatPreparedKeyCut,
+    ) -> Result<(), NativeChatPreparedKeyCut> {
+        let Some(pending) = self.pending.as_mut() else {
+            return Err(cut);
+        };
+        pending.prepare_native_stage(stage, cut)
     }
 
     /// Pure admission preflight against the actual recovered graph and live
@@ -214,6 +319,13 @@ impl PreparedV2FounderRecoveredAdd {
         pending.prepare_welcome()
     }
 
+    pub fn recovered_add_header_data(&self) -> Result<&SignedOwnerHeader, SyncError> {
+        self.pending
+            .as_ref()
+            .and_then(|pending| pending.header.as_ref())
+            .ok_or_else(unavailable)
+    }
+
     pub fn recovered_welcome_intent_data(
         &self,
     ) -> Result<(&WelcomeBindingSpecData, &[u8]), SyncError> {
@@ -244,6 +356,74 @@ impl PreparedV2FounderRecoveredAdd {
             pending.header.as_ref().ok_or_else(unavailable)?,
             pending.join_response()?,
         ))
+    }
+
+    /// Derive the Core successor from the same SDK-backed signed Header.
+    pub fn derive_recovered_add_selection_data(
+        &self,
+        verifier: &mut V2GeneralPrefixVerifier,
+        source: &OpenedBootstrapSourceData,
+    ) -> Result<V2GeneralCandidate, SyncError> {
+        self.require_original_add_parent(verifier, source)?;
+        let pending = self.pending.as_ref().ok_or_else(unavailable)?;
+        let outcome = pending.outcome()?;
+        verifier
+            .derive_successor(
+                pending.header.as_ref().ok_or_else(unavailable)?,
+                ReplayBody::Admission(outcome.admission_data()),
+                outcome.unsigned_data().image_data(),
+            )
+            .map_err(|_| unavailable())
+    }
+
+    pub fn prepare_recovered_add_install(
+        &mut self,
+        verifier: &V2GeneralPrefixVerifier,
+        source: &OpenedBootstrapSourceData,
+    ) -> Result<PreparedV2RecoveredAddInstall<'_>, SyncError> {
+        self.require_original_add_parent(verifier, source)?;
+        let live_parent = verifier
+            .observe_live_member(self.founder)
+            .map_err(|_| unavailable())?;
+        let member = self.member.as_ref().ok_or_else(unavailable)?;
+        let pending = self.pending.as_deref_mut().ok_or_else(unavailable)?;
+        if pending.phase != Phase::Materialized
+            || pending.retired_sdk.is_some()
+            || pending.retired_core.is_some()
+        {
+            return Err(unavailable());
+        }
+        pending.join_response()?;
+        let outcome = pending.outcome()?;
+        let header = pending.header.as_ref().ok_or_else(unavailable)?;
+        let after = V2InstalledFounderAddData {
+            epoch: outcome.result_data().after_epoch_data(),
+            authenticator: *outcome.result_data().after_authenticator_data(),
+            header: header.id(),
+            state: header.spec().state,
+        };
+        let mls = PreparedTextCurrentAdd::prepare_install_into(
+            &mut pending.cell,
+            &mut self.device,
+            &mut self.group,
+        )
+        .map_err(|_| unavailable())?;
+        Ok(PreparedV2RecoveredAddInstall {
+            mls,
+            live_parent,
+            founder: self.founder,
+            member,
+            expected: &mut self.expected,
+            after,
+            core_retired: &mut pending.retired_core,
+            sdk_retired: &mut pending.retired_sdk,
+        })
+    }
+
+    pub fn take_retired_recovered_add_install(
+        &mut self,
+    ) -> Result<RetiredV2FounderAddInstall, SyncError> {
+        installation::take_retired_add(&mut self.pending)
     }
 
     /// Release only a proved closed UI generation's cuts. The original

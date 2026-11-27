@@ -1176,18 +1176,62 @@ fn complete_second_governing_welcome<T: catcoms_rt::MeshTransport, R: catcoms_rt
     assert!(restored
         .discard_recovered_add_for_closed_source(&source_close)
         .is_err());
-    owner.source.close();
-    restored
-        .discard_recovered_add_for_closed_source(&source_close)
-        .unwrap();
-    assert!(source_close.is_drained());
-    assert!(restored.recovered_add_outcome_data().is_err());
     assert_eq!(
         node.prepare_member_subscription(verifier, 42).unwrap().0,
         recovered
             .selected_member_topic_data(foreign_prefix, 42)
             .unwrap()
     );
+    let (_source, signal) = tokio::sync::watch::channel(false);
+    let source = catcoms_rt::RequestCancellation::new(signal, None);
+    let old_selection = restored
+        .prepare_member_topic(verifier, 42, source.clone())
+        .unwrap()
+        .1;
+    let mut selected = Some(
+        restored
+            .derive_recovered_add_selection_data(verifier, original)
+            .unwrap(),
+    );
+    let install = restored
+        .prepare_recovered_add_install(verifier, original)
+        .unwrap();
+    assert!(install
+        .check_host_selection_data(
+            foreign_prefix.selected_member_verifier().unwrap(),
+            selected.as_ref().unwrap(),
+        )
+        .is_err());
+    assert!(install.finish_host_selected(verifier, &mut None).is_err());
+    assert_eq!(restored.fingerprint_data(), fingerprint);
+    assert!(old_selection.is_current_cached());
+    let install = restored
+        .prepare_recovered_add_install(verifier, original)
+        .unwrap();
+    install
+        .check_host_selection_data(verifier, selected.as_ref().unwrap())
+        .unwrap();
+    let expected = install.expected_data();
+    install
+        .finish_host_selected(verifier, &mut selected)
+        .unwrap();
+    assert!(selected.is_none());
+    assert_eq!(expected.epoch, fingerprint.epoch + 1);
+    assert_eq!(verifier.replay_data().header().id(), expected.header);
+    assert_eq!(restored.fingerprint_data(), expected);
+    assert!(!old_selection.is_current_cached());
+    drop(restored.take_retired_recovered_add_install().unwrap());
+    assert!(restored
+        .prepare_member_topic(verifier, 42, source)
+        .unwrap()
+        .1
+        .is_current_cached());
+    owner.source.close();
+    restored
+        .discard_recovered_add_for_closed_source(&source_close)
+        .unwrap();
+    assert!(source_close.is_drained());
+    assert!(restored.recovered_add_outcome_data().is_err());
 }
 
 async fn complete_original_welcome(native_joiner: bool) {

@@ -31,7 +31,9 @@ pub use installation::{PreparedV2FounderAddInstall, RetiredV2FounderAddInstall};
 mod invite;
 mod member_transport;
 mod recover;
-pub use recover::{PreparedV2FounderRecoveredAdd, V2RecoveredFounderAddSigning};
+pub use recover::{
+    PreparedV2FounderRecoveredAdd, PreparedV2RecoveredAddInstall, V2RecoveredFounderAddSigning,
+};
 mod removal;
 use removal::PendingRemoval;
 pub use removal::{

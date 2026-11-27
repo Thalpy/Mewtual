@@ -15,7 +15,7 @@ mod add;
 mod invite;
 mod member_signing;
 mod member_transport;
-pub use add::V2RecoveredFounderAddSigning;
+pub use add::{PreparedV2RecoveredAddInstall, V2RecoveredFounderAddSigning};
 
 /// Paid private graph. Source installation, Core replay and publication have
 /// their own Host proofs and cannot be authorized by these recovered labels.
