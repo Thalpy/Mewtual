@@ -243,9 +243,9 @@ pub(in crate::store) fn prepare_founder_dependency_reply<R: CryptoRngCore>(
     })
 }
 
-/// Reserve exact archive debt before the real ledger can admit a mutation.
-/// Creates can project immediately. A missing dependency retries with the
-/// bounded locally saved causal slice supplied by the storage owner.
+/// Reserve exact archive debt before staging in a mounted archive. A
+/// legacy layout can still project directly. Missing dependencies are
+/// retried with the original row's bounded locally saved causal slice.
 pub(in crate::store) fn project_founder_member(
     original: &SelectedV2MemberEnvelope,
     verifier: &V2GeneralPrefixVerifier,
@@ -260,38 +260,45 @@ pub(in crate::store) fn project_founder_member(
     mut require_current: impl FnMut() -> Result<(), Refusal>,
 ) -> Result<V2OrdinaryReceiveStatus, Refusal> {
     require_current()?;
-    with_founder_archive_reservation(
-        original.action_data().id(),
-        original.action_data().spec().body.create(),
-        admit_mutation,
-        |observe| {
-            let mut project = |ledger: &mut ChatLedger| -> Result<_, Refusal> {
-                let status = original
-                    .project_from_ledger(verifier, ledger, view, FOUNDER_RECEIVE_WORK)
-                    .map_err(|_| Refusal::Failed)?;
-                observe(&status);
-                Ok(status)
-            };
-            let mut status = project(&mut *ledger)?;
-            if let V2OrdinaryReceiveStatus::WaitingForDependencies(missing) = &status {
-                if missing.len() > FOUNDER_RECOVERY_BREADTH {
-                    require_current()?;
-                    return Ok(status);
-                }
-                replay_local_member_dependencies(
-                    missing,
-                    (verifier, ledger, view),
-                    FOUNDER_RECEIVE_WORK,
-                    (store, scope),
-                    &mut saved_dependency,
-                    &mut require_current,
-                )?;
-                status = project(&mut *ledger)?;
+    let mounted = store
+        .has_mounted_shared_history()
+        .map_err(|_| Refusal::Busy)?;
+    let action = original.action_data();
+    let target = action
+        .spec()
+        .body
+        .create()
+        .or_else(|| mounted.then_some(action.id()));
+    with_founder_archive_reservation(action.id(), target, admit_mutation, |observe| {
+        let mut project = |ledger: &mut ChatLedger| -> Result<_, Refusal> {
+            let status = if mounted {
+                original.stage_from_ledger(verifier, ledger, view, FOUNDER_RECEIVE_WORK)
+            } else {
+                original.project_from_ledger(verifier, ledger, view, FOUNDER_RECEIVE_WORK)
             }
-            require_current()?;
+            .map_err(|_| Refusal::Failed)?;
+            observe(&status);
             Ok(status)
-        },
-    )
+        };
+        let mut status = project(&mut *ledger)?;
+        if let V2OrdinaryReceiveStatus::WaitingForDependencies(missing) = &status {
+            if missing.len() > FOUNDER_RECOVERY_BREADTH {
+                require_current()?;
+                return Ok(status);
+            }
+            replay_local_member_dependencies(
+                missing,
+                (verifier, ledger, view),
+                FOUNDER_RECEIVE_WORK,
+                (store, scope),
+                &mut saved_dependency,
+                &mut require_current,
+            )?;
+            status = project(&mut *ledger)?;
+        }
+        require_current()?;
+        Ok(status)
+    })
 }
 
 fn with_founder_archive_reservation(
@@ -304,20 +311,20 @@ fn with_founder_archive_reservation(
 ) -> Result<V2OrdinaryReceiveStatus, Refusal> {
     // Even a semantic import can become a dependency. Reserve before
     // making the first ledger change.
-    let mut projected = false;
+    let mut retained_valid = false;
     let newly_reserved = target
         .map(|target| admit.reserve(action, target).ok_or(Refusal::Busy))
         .transpose()?;
     let result = project(&mut |status| {
-        projected |= matches!(
+        retained_valid |= matches!(
             status,
             V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
         );
     });
     if let Some(target) = target {
-        if newly_reserved == Some(true) && !projected {
-            // Pending or invalid originals may be retained without a live
-            // effect. Keep debt if projection preceded a cancellation.
+        if newly_reserved == Some(true) && !retained_valid {
+            // Pending or invalid originals cannot reach the archive writer.
+            // Keep debt for a validated exact original across cancellation.
             admit.release_unstarted(action, target);
         }
     }
@@ -747,6 +754,7 @@ pub(in crate::store) enum FounderReceiveOperation<'a> {
     ArchivePage(SharedHistoryActionQuery),
     ArchiveMessage(ActionId),
     TargetMessage(ActionId),
+    SelectedTarget(ActionId),
     Audit(SharedHistoryActionQuery),
 }
 
@@ -856,6 +864,7 @@ pub(in crate::store) enum FounderReceiveOutcome {
     ),
     ArchivePage(Option<SharedHistoryActionPage>),
     ArchiveMessage(Option<FounderArchivedMessage>),
+    SelectedTarget(Option<ActionId>),
     Audit(NativeTextFounderAudit),
     RecoveredProjection(Option<NativeTextJoinedMemberProjection>),
 }

@@ -19,6 +19,7 @@ const DEPENDENCIES_PER_FRAME: usize = 4;
 const FOUNDER_CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(25);
 const FOUNDER_CAPTURE_ATTEMPTS: usize = 8;
 const FOUNDER_RECEIVE_RETRY_MS: u64 = 2_000;
+const FOUNDER_ARCHIVE_RECONCILE_MS: u64 = 1_000;
 
 type FounderPreparation = NativeTextMemberPreparation<catcoms_net::MeshService, OsCryptoRng>;
 type FounderReceiver = NativeTextFounderMemberReceiver<OsCryptoRng>;
@@ -54,8 +55,19 @@ pub(super) async fn run_founder<R: tauri::Runtime>(
     let mut scope = source.negative();
     let channel = source.channel();
     let mut receiver: Option<FounderReceiver> = None;
+    let mut next_archive_check = SystemClock.monotonic_ms();
+    let mut archive_cursor = 0;
     loop {
         let state = app.state::<AppState>();
+        let now = SystemClock.monotonic_ms();
+        if now >= next_archive_check {
+            next_archive_check = now.saturating_add(FOUNDER_ARCHIVE_RECONCILE_MS);
+            if let Some(target) =
+                reconcile_founder_archive_change(&state, source, &mut archive_cursor).await
+            {
+                source.notify_received(app, &state, Some(target)).await;
+            }
+        }
         let Some(mut original) = receiver.take() else {
             tokio::select! {
                 biased;
@@ -88,12 +100,18 @@ pub(super) async fn run_founder<R: tauri::Runtime>(
         let event = tokio::select! {
             biased;
             _ = scope.cancelled() => return,
+            _ = SystemClock.sleep(Duration::from_millis(
+                next_archive_check.saturating_sub(SystemClock.monotonic_ms()),
+            )) => {
+                receiver = Some(original);
+                continue;
+            }
             event = original.next() => event,
         };
         match event {
             Some(NativeChatMemberGossipEvent::Frame(frame)) => {
                 if let Some((original, action)) =
-                    receive_founder_frame(&state, source, original, frame).await
+                    receive_founder_frame(app, &state, source, original, frame).await
                 {
                     receiver = Some(original);
                     if let Some(action) = action {
@@ -108,6 +126,38 @@ pub(super) async fn run_founder<R: tauri::Runtime>(
             }
         }
     }
+}
+
+async fn reconcile_founder_archive_change(
+    state: &AppState,
+    source: &Source,
+    cursor: &mut usize,
+) -> Option<ActionId> {
+    let local = source.member_work().clone();
+    let pending = local.pending_archive_changes();
+    let index = (0..pending.len())
+        .map(|offset| (*cursor + offset) % pending.len())
+        .find(|index| pending[*index].is_some())?;
+    let permit = local.try_background()?;
+    let preparation = source.capture(state).await?;
+    let change = pending[index]?;
+    *cursor = (index + 1) % pending.len();
+    let channel = source.channel();
+    let caller = source.negative();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        let selected = preparation.selected_founder_archive_target(channel, change.action, &caller);
+        if caller.is_cancelled() {
+            return None;
+        }
+        selected
+            .ok()
+            .and_then(|target| local.reconcile_archive_change(change, target))
+            .or_else(|| local.take_archive_invalidation(change))
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 async fn run_founder_receive<I: Send + 'static>(
@@ -167,7 +217,8 @@ async fn run_founder_receive<I: Send + 'static>(
     }
 }
 
-async fn receive_founder_frame(
+async fn receive_founder_frame<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &AppState,
     source: &Arc<Source>,
     mut receiver: FounderReceiver,
@@ -201,13 +252,15 @@ async fn receive_founder_frame(
 
         let exchange = match next {
             Ok(NativeTextFounderFrameOutcome::Retained(receipt)) => {
-                return Some((receiver, Some(receipt.projection_target)))
+                // The notice invalidates cached text. A fresh read still
+                // requires the exact archive selection for mounted rows.
+                return Some((receiver, Some(receipt.projection_target)));
             }
             Ok(NativeTextFounderFrameOutcome::NeedsDependency(exchange)) => exchange,
             _ => break,
         };
         let (original, recovered) =
-            recover_founder_chain(state, source, receiver, exchange, &mut remaining).await?;
+            recover_founder_chain(app, state, source, receiver, exchange, &mut remaining).await?;
         receiver = original;
         if !recovered {
             break;
@@ -216,7 +269,8 @@ async fn receive_founder_frame(
     Some((receiver, None))
 }
 
-async fn recover_founder_chain(
+async fn recover_founder_chain<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &AppState,
     source: &Arc<Source>,
     mut receiver: FounderReceiver,
@@ -255,7 +309,11 @@ async fn recover_founder_chain(
         .await?;
         receiver = original;
         match result {
-            Ok(NativeTextFounderFrameOutcome::Retained(_)) => {}
+            Ok(NativeTextFounderFrameOutcome::Retained(receipt)) => {
+                source
+                    .notify_received(app, state, Some(receipt.projection_target))
+                    .await;
+            }
             Ok(NativeTextFounderFrameOutcome::NeedsDependency(exchange)) => {
                 waiting.push(response);
                 next = Some(exchange);
@@ -270,7 +328,7 @@ fn note_founder_archive_change(
     local: &server_table::NativeMemberWork,
     receipt: &NativeTextFounderReceived,
 ) {
-    if receipt.action != receipt.projection_target && receipt.archived != Some(false) {
+    if receipt.archived != Some(false) {
         local.settle_archive_change(receipt.action, receipt.projection_target);
     }
 }
@@ -368,7 +426,7 @@ pub(super) async fn run<R: tauri::Runtime>(
                 let action = tokio::select! {
                     biased;
                     _ = scope.cancelled() => break,
-                    action = receive(&state, source, frame) => action,
+                    action = receive(app, &state, source, frame) => action,
                 };
                 if let Some(action) = action {
                     source.notify_received(app, &state, Some(action)).await;
@@ -395,7 +453,8 @@ pub(super) async fn run<R: tauri::Runtime>(
     drop(retired);
 }
 
-async fn receive(
+async fn receive<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &AppState,
     source: &Arc<Source>,
     frame: NativeChatMemberFrame,
@@ -419,17 +478,14 @@ async fn receive(
     };
     let original = Arc::new(original);
     match status {
-        V2OrdinaryReceiveStatus::Retained(ActionState::Valid) => {
-            Some(original.projection_target_data())
-        }
-        V2OrdinaryReceiveStatus::WaitingForDependencies(missing) => {
-            recover_dependencies(state, source, &original, missing).await;
+        JoinedApply::Ordinary(V2OrdinaryReceiveStatus::WaitingForDependencies(missing)) => {
+            recover_dependencies(app, state, source, &original, missing).await;
             let target = original.projection_target_data();
-            (apply_and_archive(state, source, original).await?
-                == V2OrdinaryReceiveStatus::Retained(ActionState::Valid))
-            .then_some(target)
+            apply_and_archive(state, source, original)
+                .await?
+                .invalidation(target)
         }
-        V2OrdinaryReceiveStatus::Retained(_) => None,
+        status => status.invalidation(original.projection_target_data()),
     }
 }
 
@@ -438,7 +494,8 @@ enum DependencyWork {
     Retry(Arc<NativeTextJoinedReceivedOriginal>),
 }
 
-async fn recover_dependencies(
+async fn recover_dependencies<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &AppState,
     source: &Arc<Source>,
     child: &Arc<NativeTextJoinedReceivedOriginal>,
@@ -463,9 +520,15 @@ async fn recover_dependencies(
                 let Some(parent) = recover_dependency(state, source, &child, action).await else {
                     continue;
                 };
-                let Some(V2OrdinaryReceiveStatus::WaitingForDependencies(missing)) =
-                    apply_and_archive(state, source, parent.clone()).await
+                let Some(status) = apply_and_archive(state, source, parent.clone()).await else {
+                    continue;
+                };
+                let JoinedApply::Ordinary(V2OrdinaryReceiveStatus::WaitingForDependencies(missing)) =
+                    status
                 else {
+                    if let Some(target) = status.invalidation(parent.projection_target_data()) {
+                        source.notify_received(app, state, Some(target)).await;
+                    }
                     continue;
                 };
                 let queued = pending
@@ -485,7 +548,13 @@ async fn recover_dependencies(
                 }
             }
             DependencyWork::Retry(parent) => {
-                let _ = apply_and_archive(state, source, parent).await;
+                let target = parent.projection_target_data();
+                if let Some(target) = apply_and_archive(state, source, parent)
+                    .await
+                    .and_then(|status| status.invalidation(target))
+                {
+                    source.notify_received(app, state, Some(target)).await;
+                }
             }
         }
     }
@@ -550,11 +619,29 @@ async fn recover_dependency(
     .map(Arc::new)
 }
 
+enum JoinedApply {
+    Ordinary(V2OrdinaryReceiveStatus),
+    ArchiveUnconfirmed,
+}
+
+impl JoinedApply {
+    fn invalidation(self, target: ActionId) -> Option<ActionId> {
+        // Both outcomes invalidate old text. ArchiveUnconfirmed leaves the
+        // exact reservation in place so targeted reads cannot publish it.
+        matches!(
+            self,
+            Self::Ordinary(V2OrdinaryReceiveStatus::Retained(ActionState::Valid))
+                | Self::ArchiveUnconfirmed
+        )
+        .then_some(target)
+    }
+}
+
 async fn apply_and_archive(
     state: &AppState,
     source: &Arc<Source>,
     original: Arc<NativeTextJoinedReceivedOriginal>,
-) -> Option<V2OrdinaryReceiveStatus> {
+) -> Option<JoinedApply> {
     with_row(state, source, move |selected, _, local, scope| {
         let mut slot = local.received.lock().ok()?;
         let ledger = slot.as_deref_mut()?;
@@ -569,43 +656,32 @@ fn apply_original(
     original: &NativeTextJoinedReceivedOriginal,
     local: &server_table::NativeMemberWork,
     scope: &RequestCancellation,
-) -> Option<V2OrdinaryReceiveStatus> {
+) -> Option<JoinedApply> {
     let action = original.action_id_data();
     let target = original.projection_target_data();
-    let mutation = action != target;
-    let admitted = local.reserve_archive_change(action, target);
-    if admitted.is_none() && mutation {
-        // A live mutation could supersede a saved body. Defer it if we
-        // cannot track the target through the corresponding archive write.
-        return None;
-    }
-    let status = if mutation {
-        selected.stage_received_member(ledger, original, scope)
-    } else {
-        selected.project_received_member(ledger, original, scope)
-    }
-    .ok();
+    let newly_reserved = local.reserve_archive_change(action, target)?;
+    let status = selected.stage_received_member(ledger, original, scope).ok();
     if status != Some(V2OrdinaryReceiveStatus::Retained(ActionState::Valid)) {
-        if admitted == Some(true) {
+        if newly_reserved {
             local.settle_archive_change(action, target);
         }
-        return status;
+        return status.map(JoinedApply::Ordinary);
     }
-    if admitted.is_some() {
-        match selected.archive_received_member(ledger, original, scope, &mut OsCryptoRng) {
-            Ok(None) if mutation => {
-                // Old mounts without the archive keep their existing live
-                // view. Mounted archives alone publish selected mutations.
-                local.settle_archive_change(action, target);
-                return selected
-                    .project_received_member(ledger, original, scope)
-                    .ok();
-            }
-            Ok(_) => local.settle_archive_change(action, target),
-            Err(_) => {}
+    match selected.archive_received_member(ledger, original, scope, &mut OsCryptoRng) {
+        Ok(None) => {
+            // Only a layout with no archive can publish from its live ledger.
+            local.settle_archive_change(action, target);
+            selected
+                .project_received_member(ledger, original, scope)
+                .ok()
+                .map(JoinedApply::Ordinary)
         }
+        Ok(Some(_)) => {
+            local.settle_archive_change(action, target);
+            status.map(JoinedApply::Ordinary)
+        }
+        Err(_) => Some(JoinedApply::ArchiveUnconfirmed),
     }
-    status
 }
 
 async fn with_row<T: Send + 'static>(

@@ -357,7 +357,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     .save(&original, &received.ledger, rng, || {
                         require_current().map_err(|_| refused())
                     })
-                    .map_err(|_| Refusal::Failed)?;
+                    .unwrap_or(Some(false));
                 require_current()?;
                 Ok(FounderReceiveOutcome::Recovered(
                     NativeTextFounderFrameOutcome::Retained(
@@ -388,6 +388,12 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             }
             FounderReceiveOperation::ArchiveMessage(create)
             | FounderReceiveOperation::TargetMessage(create) => {
+                let archived = store
+                    .has_mounted_shared_history()
+                    .map_err(|_| Refusal::Busy)?;
+                if !archived && matches!(operation, FounderReceiveOperation::TargetMessage(_)) {
+                    return lane.read_live_projection(channel, create, pool);
+                }
                 let (_, observation) = self
                     .owner
                     .prepare_governed_member_subscription(store, verifier, channel)
@@ -413,12 +419,36 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                 )?;
                 check_governed_member(&self.owner, governed, &lane.domain, verifier, store)
                     .map_err(|_| Refusal::Stale)?;
-                if result.is_none()
-                    && matches!(operation, FounderReceiveOperation::TargetMessage(_))
-                {
-                    return lane.read_live_projection(channel, create, pool);
-                }
                 Ok(FounderReceiveOutcome::ArchiveMessage(result))
+            }
+            FounderReceiveOperation::SelectedTarget(action) => {
+                let (_, observation) = self
+                    .owner
+                    .prepare_governed_member_subscription(store, verifier, channel)
+                    .map_err(|_| Refusal::Stale)?;
+                let signal = observation.constrain(caller.clone());
+                let history = FounderHistory::new(
+                    store,
+                    verifier,
+                    self.owner
+                        .borrow_current()
+                        .map_err(|_| Refusal::Unavailable)?,
+                    channel,
+                    lane.admission,
+                    lane.outbox_context(),
+                )?;
+                if signal.is_cancelled() {
+                    return Err(Refusal::Cancelled);
+                }
+                let target = store
+                    .selected_shared_history_target(history.scope, action)
+                    .map_err(|_| Refusal::Failed)?;
+                check_governed_member(&self.owner, governed, &lane.domain, verifier, store)
+                    .map_err(|_| Refusal::Stale)?;
+                if signal.is_cancelled() {
+                    return Err(Refusal::Cancelled);
+                }
+                Ok(FounderReceiveOutcome::SelectedTarget(target))
             }
             FounderReceiveOperation::Audit(query) => {
                 let (_, observation) = self

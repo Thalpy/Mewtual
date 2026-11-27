@@ -164,6 +164,27 @@ impl NativeTextColdFounderSource {
         Ok(receipt.map(|value| (value.action, value.ordinal)))
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn selected_archive_target(
+        &mut self,
+        channel: u128,
+        action: ActionId,
+        caller: &RequestCancellation,
+    ) -> Result<Option<ActionId>, AppError> {
+        let (_, observation, _fee) = self.prepare_member_subscription(channel, caller)?;
+        let signal = observation.constrain(caller.clone());
+        let scope = self.history_scope(channel)?;
+        let selected =
+            self.work
+                .with_recovered_founder_store(&self.selection, &self.source, |store| {
+                    if signal.is_cancelled() {
+                        return Err(refused());
+                    }
+                    store.selected_shared_history_target(scope, action)
+                })?;
+        self.require_recovered_checkpoint(&signal)?;
+        Ok(selected)
+    }
+
     pub fn archived_action_page(
         &mut self,
         channel: u128,
@@ -202,6 +223,17 @@ impl NativeTextColdFounderSource {
         caller: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Option<NativeTextJoinedMemberProjection>, AppError> {
+        self.received_archive_lookup(channel, create, caller, rng)
+            .map(|(_, projection)| projection)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn received_archive_lookup(
+        &mut self,
+        channel: u128,
+        create: ActionId,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(bool, Option<NativeTextJoinedMemberProjection>), AppError> {
         self.restore_first_add(caller)?;
         let scope = self.history_scope(channel)?;
         let governed = self.governed.as_ref().ok_or_else(refused)?;
@@ -213,7 +245,7 @@ impl NativeTextColdFounderSource {
             self.work
                 .with_recovered_founder_store(&self.selection, &self.source, |store| {
                     if !store.has_mounted_shared_history()? {
-                        return Ok(None);
+                        return Ok((false, None));
                     }
                     let pool = &store
                         .archive_bootstrap_policy
@@ -251,24 +283,27 @@ impl NativeTextColdFounderSource {
                     })
                     .map_err(|_| refused())?;
                     let Some(selected) = original else {
-                        return Ok(None);
+                        return Ok((true, None));
                     };
                     let projection_fee = pool.try_reserve(2 * MAX_ACTION_BYTES + 32 * 1024)?;
                     let projection = ledger
                         .guarded_projection(create, ARCHIVED_PROJECTION_WORK)
                         .map_err(|_| refused())?;
-                    Ok(Some(NativeTextJoinedMemberProjection::from_archive(
-                        projection,
-                        signal,
-                        projection_fee,
-                        Box::new(SharedHistoryProjectionLease {
-                            selected,
-                            _view: view,
-                            _ledger: ledger,
-                            _invocation: None,
-                            _fee: fee,
-                        }),
-                    )))
+                    Ok((
+                        true,
+                        Some(NativeTextJoinedMemberProjection::from_archive(
+                            projection,
+                            signal,
+                            projection_fee,
+                            Box::new(SharedHistoryProjectionLease {
+                                selected,
+                                _view: view,
+                                _ledger: ledger,
+                                _invocation: None,
+                                _fee: fee,
+                            }),
+                        )),
+                    ))
                 })?;
         self.restore_first_add(caller)?;
         Ok(result)

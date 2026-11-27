@@ -3223,6 +3223,15 @@ async fn native_text_connected_join_retries_original_welcome_after_authenticated
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_connected_join_gated_route_publishes_one_original_joined_row() {
+    native_text_connected_join(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_unconfirmed_delete_invalidates_the_visible_founder_message() {
+    native_text_connected_join(true).await;
+}
+
+async fn native_text_connected_join(block_delete_archive: bool) {
     let root = tempfile::tempdir().unwrap();
     let (founder, founder_window, founder_queue) = app(root.path().join("founder"), None, true);
     let joiner_path = root.path().join("joiner");
@@ -3471,25 +3480,41 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let mut raw = [0; 32];
     hex::decode_to_slice(founder_action, &mut raw).unwrap();
     let action = catcoms_replication::chat::ActionId::from_bytes(raw);
-    {
-        let work = joined_work(&state, id).await;
-        timeout(Duration::from_secs(15), async {
-            loop {
-                let guarded = work.received.try_lock().ok().and_then(|slot| {
-                    slot.as_ref()?.read_message_projection(action).ok().flatten()
-                });
-                if let Some(guarded) = guarded {
-                    assert!(guarded.with_publication(|projection| matches!(
-                        projection, catcoms_replication::chat::GuardedProjection::Visible { text, .. }
-                        if text == founder_text
-                    )).unwrap());
+    timeout(Duration::from_secs(15), async {
+        loop {
+            let result = command_after_busy(
+                &joiner_window,
+                &joiner_queue,
+                "get_message_page",
+                history::BUSY,
+                archive_request(
+                    &original,
+                    serde_json::json!({"receivedAction":founder_action}),
+                ),
+            )
+            .await;
+            if let tauri::ipc::InvokeResponse::Ok(raw) = result {
+                let received: serde_json::Value = raw.deserialize().unwrap();
+                if !received["item"].is_null() {
+                    assert_eq!(received["item"]["text"], founder_text);
                     break;
                 }
-                SystemClock.sleep(Duration::from_millis(20)).await;
             }
-        }).await.expect("the automatic founder worker sent exact saved text to the joined receiver");
-    }
+            SystemClock.sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the automatic founder worker selected exact text on the joined receiver");
 
+    use tauri::Listener;
+    let delete_notices = block_delete_archive.then(|| {
+        let (notices, changes) = tokio::sync::mpsc::unbounded_channel();
+        let listener = founder.listen_any("chat-v2-received", move |event| {
+            let body: serde_json::Value = serde_json::from_str(event.payload()).unwrap();
+            let _ = notices.send(body);
+        });
+        (listener, changes)
+    });
     let member_text = "Joined message on the founder's installed receiver";
     let send = native_send_request(&joiner_window, &original, 20, member_text);
     run(&joiner_queue).await;
@@ -3565,6 +3590,85 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
             serde_json::json!({"auditAction":target,"auditAfter":null,"limit":8}),
         )
     };
+    if let Some((listener, mut changes)) = delete_notices {
+        timeout(Duration::from_secs(12), async {
+            while let Some(notice) = changes.recv().await {
+                if notice["action"] == member_action {
+                    return;
+                }
+            }
+            panic!("the original Create notice did not arrive");
+        })
+        .await
+        .unwrap();
+        while changes.try_recv().is_ok() {}
+        let wal = root
+            .path()
+            .join("founder/chat-v2-received-history/history.wal");
+        assert!(!wal.exists());
+        let obstruction = b"incomplete history write";
+        std::fs::write(&wal, obstruction).unwrap();
+        let deletion = command_value_after_busy(
+            &joiner_window,
+            &joiner_queue,
+            "delete_message",
+            sending::BUSY,
+            archive_request(
+                &original,
+                serde_json::json!({"retryToken":hex::encode([30;32]), "messageId":member_action,
+                    "expectedRevision":member_action}),
+            ),
+        )
+        .await;
+        assert_eq!(deletion["disposition"], "saved-local");
+        let action_id = |hex: &str| {
+            catcoms_replication::chat::ActionId::from_bytes(
+                hex::decode(hex).unwrap().try_into().unwrap(),
+            )
+        };
+        let action = action_id(deletion["message_id"].as_str().unwrap());
+        let target = action_id(member_action);
+        let state = founder.state::<AppState>();
+        let work = joined_work(&state, found["server"].as_u64().unwrap()).await;
+        timeout(Duration::from_secs(18), async {
+            while let Some(notice) = changes.recv().await {
+                if notice["action"] == member_action {
+                    assert_eq!(notice["context"], found["context"]);
+                    assert_eq!(notice["server"], found["server"]);
+                    if work
+                        .unsettled_archive_changes(target)
+                        .unwrap()
+                        .contains(&Some(action))
+                    {
+                        return;
+                    }
+                }
+            }
+            panic!("the invalidation listener closed");
+        })
+        .await
+        .expect("the original founder row invalidates the displayed Create before settlement");
+        let result = command_after_busy(
+            &founder_window,
+            &founder_queue,
+            "get_message_page",
+            history::BUSY,
+            archive_request(&found, serde_json::json!({"receivedAction":member_action})),
+        )
+        .await;
+        refused(result);
+        assert_eq!(std::fs::read(&wal).unwrap(), obstruction);
+        founder.unlisten(listener);
+        std::fs::remove_file(wal).unwrap();
+        for state in [founder.state::<AppState>(), joiner.state::<AppState>()] {
+            let close = register_vault_close(&state).await.unwrap();
+            sources::close_server_rows(&state, &SystemClock)
+                .await
+                .unwrap();
+            drop(close);
+        }
+        return;
+    }
     let warm_audit = command_value_after_busy(
         &founder_window,
         &founder_queue,

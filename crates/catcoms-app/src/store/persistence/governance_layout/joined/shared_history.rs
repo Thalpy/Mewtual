@@ -226,6 +226,30 @@ impl ServerStore {
         })
     }
 
+    /// Reconcile one attempted write in the selected local archive.
+    /// An unavailable namespace or unresolved WAL is distinct from absence.
+    pub(in crate::store) fn selected_shared_history_target(
+        &self,
+        scope: SharedHistoryScope,
+        action: ActionId,
+    ) -> Result<Option<ActionId>, AppError> {
+        if !self.has_mounted_shared_history()? {
+            return Err(denied());
+        }
+        self.read_shared_history_record(scope, action)
+            .map(|record| {
+                record.map(|record| {
+                    record
+                        .original
+                        .action()
+                        .spec()
+                        .body
+                        .create()
+                        .unwrap_or(action)
+                })
+            })
+    }
+
     pub(in crate::store) fn read_shared_history_record(
         &self,
         scope: SharedHistoryScope,

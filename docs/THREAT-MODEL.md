@@ -31,6 +31,11 @@ checks at most 63 paid originals separately. A parked page
 releases its old UI invocation and full wire fee. Fresh effects recheck the
 same original row and approval. Archive-first reads keep already deleted
 bodies from reappearing through delayed live notices.
+Mounted rows render only the selected archive. A notice without text marks
+an affected Create dirty even when the corresponding write is uncertain.
+The original row confirms exact selection or clean absence before
+releasing the associated in-memory debt. An unknown write remains fenced.
+A crash before an authenticated write exists still requires redelivery.
 [Discovery contract](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
 
 A holder's archive page exposes eligible IDs to a reciprocally approved

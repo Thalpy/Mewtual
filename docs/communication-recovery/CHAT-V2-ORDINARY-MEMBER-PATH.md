@@ -177,19 +177,22 @@ then wakes the single worker for that installed row. The worker retries unchange
 interruption, polls for debt after an authenticated reopen and stops when the row retires.
 Foreground reads and saves share the row's local work permit with publication preparation
 and checkpointing. Transport submission runs after that permit is released.
-The main renderer receives an action ID notification and reads the exact live projection
-through a fresh authenticated invocation. Provisional bodies are labelled separately from
-local receipts. **Saved received messages** pages the selected joined archive after
-restart. For each of at most eight Create IDs, a separate native invocation enters the
+The main renderer receives a target invalidation and refreshes through a
+fresh authenticated invocation. A mounted row reads only the selected archive.
+An older unmounted layout can use its live projection. Provisional bodies are
+labelled separately from local receipts. **Saved received messages** pages the
+selected archive after restart. For each of at most eight Create IDs, a separate native invocation enters the
 guarded projection before returning a body. A live update in the active view retires the
 older saved body and cancels a pending archive read. The renderer labels a partial page
 when any individual original cannot be replayed. Recovery beyond the live worker's
 bounded direct dependency window remains open.
 The native row serializes live application, archive selection and body publication.
-A failed archive write for a live mutation holds that target out of archive replies
-for the installed row. The mounted Store can resume the held WAL before replay.
-An exact selected retry clears its entry. A fresh archive projection can also clear
-it when its authenticated target action set contains that exact mutation. This
+A failed archive write holds that target out of archive replies for the
+installed row. The mounted Store can resume the held WAL before replay.
+The current row can invalidate the target while the write is unresolved.
+A background point read retires only the exact attempted selection after
+proof of durable selection or clean absence. A founder projection can also
+clear a selected entry when its authenticated target set includes it. The
 bounded in-session state stays with the row through receiver reattachment.
 Durable protection after unsettled mutations and a process or vault restart
 still needs a selected negative record.

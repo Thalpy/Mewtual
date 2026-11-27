@@ -448,10 +448,15 @@ async fn reconcile_archive_change(
         source,
         (Some(local_turn_deadline()), TURN),
         move |original, row, local, scope| {
-            let selected = original
-                .selected_archive_target_data(&row, channel, change.action, &scope)
-                .ok()?;
-            local.reconcile_archive_change(change, selected)
+            let selected =
+                original.selected_archive_target_data(&row, channel, change.action, &scope);
+            if scope.is_cancelled() {
+                return None;
+            }
+            selected
+                .ok()
+                .and_then(|target| local.reconcile_archive_change(change, target))
+                .or_else(|| local.take_archive_invalidation(change))
         },
     )
     .await
