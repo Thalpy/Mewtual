@@ -841,10 +841,28 @@ impl ServerStore {
         registration: NativeTextJoinedRegistrationData,
         removal: catcoms_sync::SelectedRejoinRemoval,
     ) -> Result<(), AppError> {
+        self.require_removal_with_rejoin_catalog(registration, removal, None)
+    }
+
+    pub(super) fn require_recovered_removal_after_rejoin(
+        &self,
+        registration: NativeTextJoinedRegistrationData,
+        removal: catcoms_sync::SelectedRejoinRemoval,
+        selected: &super::rejoin::SelectedRejoinCatalog<'_>,
+    ) -> Result<(), AppError> {
+        self.require_removal_with_rejoin_catalog(registration, removal, Some(selected))
+    }
+
+    fn require_removal_with_rejoin_catalog(
+        &self,
+        registration: NativeTextJoinedRegistrationData,
+        removal: catcoms_sync::SelectedRejoinRemoval,
+        rejoin_catalog: Option<&super::rejoin::SelectedRejoinCatalog<'_>>,
+    ) -> Result<(), AppError> {
         self.validate_mounted_governance_layout()?;
         let slot = self.joined_pin_index.try_lock().map_err(|_| denied())?;
         let selected = slot.as_ref().ok_or_else(denied)?;
-        selected.require(self)?;
+        selected.require_with_rejoin_catalog(self, rejoin_catalog)?;
         let original = selected.pending.as_ref().ok_or_else(denied)?;
         if original._pending.pending_data().1 != registration.context
             || registration.selected.own_admission != removal.1
@@ -856,7 +874,7 @@ impl ServerStore {
             .as_ref()
             .ok_or_else(denied)?
             .require_recovered_removal(self, registration.context, removal)?;
-        selected.require(self)
+        selected.require_with_rejoin_catalog(self, rejoin_catalog)
     }
 
     /// Exclusive access keeps the original held index and Welcome outside

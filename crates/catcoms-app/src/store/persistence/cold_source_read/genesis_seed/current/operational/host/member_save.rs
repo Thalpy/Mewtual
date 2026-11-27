@@ -800,7 +800,7 @@ impl<T: MeshTransport, R: CryptoRngCore> MemberSavePath<'_, T, R> {
             Some(original) => SavedDependency::Own(original),
             None => SavedDependency::Received(
                 env.store
-                    .read_selected_shared_history_record(archive.ok_or(Refusal::Signing)?, id)
+                    .read_selected_shared_history_ancestor(archive.ok_or(Refusal::Signing)?, id)
                     .map_err(|_| Refusal::Failed)?
                     .ok_or(Refusal::Signing)?,
             ),

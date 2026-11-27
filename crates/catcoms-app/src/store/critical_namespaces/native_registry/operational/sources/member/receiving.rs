@@ -226,9 +226,10 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
         self,
         receiver: &NativeTextFounderMemberReceiver<R>,
         frame: &NativeChatMemberFrame,
+        admit_mutation: &dyn crate::store::FounderArchiveAdmission,
     ) -> Result<Option<NativeTextFounderReceived>, V2MemberSaveRefusal> {
         Ok(self
-            .receive_founder_frame(receiver, frame, false)?
+            .receive_founder_frame(receiver, frame, false, admit_mutation)?
             .retained())
     }
 
@@ -236,8 +237,9 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
         self,
         receiver: &NativeTextFounderMemberReceiver<R>,
         frame: &NativeChatMemberFrame,
+        admit_mutation: &dyn crate::store::FounderArchiveAdmission,
     ) -> Result<NativeTextFounderFrameOutcome, V2MemberSaveRefusal> {
-        self.receive_founder_frame(receiver, frame, true)
+        self.receive_founder_frame(receiver, frame, true, admit_mutation)
     }
 
     fn receive_founder_frame(
@@ -245,6 +247,7 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
         receiver: &NativeTextFounderMemberReceiver<R>,
         frame: &NativeChatMemberFrame,
         recovery: bool,
+        admit_mutation: &dyn crate::store::FounderArchiveAdmission,
     ) -> Result<NativeTextFounderFrameOutcome, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
         if !self.row.same_original(&receiver.row) || !receiver.ingress.owns_frame(frame) {
@@ -261,7 +264,7 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
         };
         match self.finish()?.run_founder_member_receive(
             receiver.channel,
-            FounderReceiveOperation::Frame(frame, &receiver.session, carrier),
+            FounderReceiveOperation::Frame(frame, &receiver.session, carrier, admit_mutation),
             &receiver.session.signal,
         )? {
             FounderReceiveOutcome::Frame(action) => Ok(action),
@@ -273,9 +276,10 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
         self,
         receiver: &NativeTextFounderMemberReceiver<R>,
         response: &NativeTextFounderDependencyResponse,
+        admit_mutation: &dyn crate::store::FounderArchiveAdmission,
     ) -> Result<bool, V2MemberSaveRefusal> {
         Ok(self
-            .recover_founder_dependency_with_followup(receiver, response, false)?
+            .recover_founder_dependency_with_followup(receiver, response, false, admit_mutation)?
             .retained()
             .is_some())
     }
@@ -285,6 +289,7 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
         receiver: &NativeTextFounderMemberReceiver<R>,
         response: &NativeTextFounderDependencyResponse,
         followup: bool,
+        admit_mutation: &dyn crate::store::FounderArchiveAdmission,
     ) -> Result<NativeTextFounderFrameOutcome, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
         if !self.row.same_original(&receiver.row) {
@@ -302,7 +307,7 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
         };
         match self.finish()?.run_founder_member_receive(
             receiver.channel,
-            FounderReceiveOperation::Recover(response, &receiver.session, carrier),
+            FounderReceiveOperation::Recover(response, &receiver.session, carrier, admit_mutation),
             &receiver.session.signal,
         )? {
             FounderReceiveOutcome::Recovered(retained) => Ok(retained),
@@ -467,8 +472,12 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
         let body = inner.loan.body.as_mut().ok_or(Refusal::Unavailable)?;
         let rng = body.rng.as_mut().ok_or(Refusal::Unavailable)?;
         let result = if let Some(founder) = body.recovered_founder.as_mut() {
-            run_recovered_receive(founder, channel, operation, caller, rng)
-                .map_err(|_| Refusal::Failed)
+            run_recovered_receive(founder, channel, operation, caller, rng).map_err(|failure| {
+                match failure {
+                    AppError::ChatV2ArchiveBusy => Refusal::Busy,
+                    _ => Refusal::Failed,
+                }
+            })
         } else {
             body.work.run_founder_member_receive(
                 body.driver.as_mut().ok_or(Refusal::Unavailable)?,
@@ -502,13 +511,23 @@ fn run_recovered_receive(
             let (topic, observation, fee) = founder.prepare_member_subscription(channel, caller)?;
             FounderReceiveOutcome::Subscription(topic, observation, fee)
         }
-        FounderReceiveOperation::Frame(frame, session, carrier) => FounderReceiveOutcome::Frame(
-            founder.receive_selected_member_frame(channel, session, frame, carrier, rng)?,
-        ),
-        FounderReceiveOperation::Recover(response, session, carrier) => {
-            FounderReceiveOutcome::Recovered(
-                founder.recover_selected_dependency(channel, session, response, carrier, rng)?,
-            )
+        FounderReceiveOperation::Frame(frame, session, carrier, admit_mutation) => {
+            FounderReceiveOutcome::Frame(founder.receive_selected_member_frame(
+                channel,
+                session,
+                frame,
+                (carrier, admit_mutation),
+                rng,
+            )?)
+        }
+        FounderReceiveOperation::Recover(response, session, carrier, admit_mutation) => {
+            FounderReceiveOutcome::Recovered(founder.recover_selected_dependency(
+                channel,
+                session,
+                response,
+                (carrier, admit_mutation),
+                rng,
+            )?)
         }
         FounderReceiveOperation::Dependency(incoming) => FounderReceiveOutcome::Dependency(
             founder.prepare_dependency_reply(channel, incoming, caller, rng)?,

@@ -11,14 +11,14 @@ const MAX_LOCAL_ARCHIVE_RETIREMENTS: usize = 64;
 pub struct V2OrdinaryDependency<'a> {
     action: &'a SignedAction,
     admission: &'a V2AuthenticatedAdmission,
-    local_archive_reply: bool,
+    local_archive_ancestor: bool,
 }
 impl<'a> V2OrdinaryDependency<'a> {
     pub fn new(action: &'a SignedAction, admission: &'a V2AuthenticatedAdmission) -> Self {
         Self {
             action,
             admission,
-            local_archive_reply: false,
+            local_archive_ancestor: false,
         }
     }
 }
@@ -72,7 +72,7 @@ enum DependencyEvidence {
     Exact,
     ArchiveDisplay,
     LocallySelectedAncestors,
-    IncomingReply,
+    Incoming,
 }
 
 struct LedgerDependencies<'a> {
@@ -337,7 +337,7 @@ impl V2GeneralPrefixVerifier {
             view,
             action,
             admission,
-            (retired, DependencyEvidence::IncomingReply),
+            (retired, DependencyEvidence::Incoming),
             (work, publish),
         )
     }
@@ -365,7 +365,13 @@ impl V2GeneralPrefixVerifier {
         }
         let dependencies = exact
             .iter()
-            .map(|(original, owner)| V2OrdinaryDependency::new(original, owner))
+            .map(|(original, owner)| V2OrdinaryDependency {
+                action: original,
+                admission: owner,
+                // Incoming checked the exact selected marker and refused
+                // a retired mutation target before borrowing its owner.
+                local_archive_ancestor: evidence == DependencyEvidence::Incoming,
+            })
             .collect::<Vec<_>>();
         let (verified, token) =
             self.provisional_evidence(action, admission, &dependencies, view)?;
@@ -438,29 +444,25 @@ impl V2GeneralPrefixVerifier {
         Ok(V2OrdinaryDependency {
             action: original.action,
             admission: &frozen.admission,
-            local_archive_reply: true,
+            local_archive_ancestor: true,
         })
     }
 
     /// The native signing plan can borrow a retired original only as the
     /// explicit reply target. Previously admitted semantic and LOG evidence
     /// may still make sense of older causal heads without granting a key.
-    pub(super) fn require_signing_dependencies(
+    pub(super) fn require_live_ordinary_dependencies(
         &self,
         spec: &ActionSpec,
         dependencies: &[V2OrdinaryDependency<'_>],
     ) -> Result<(), ChatError> {
-        let reply = match &spec.body {
-            Body::Create { reply_to, .. } => *reply_to,
-            _ => None,
-        };
         for dependency in dependencies {
             let active = self
                 .admissions
                 .iter()
                 .any(|admission| Arc::ptr_eq(&admission.core, &dependency.admission.core));
-            if !active && (!dependency.local_archive_reply || reply != Some(dependency.action.id()))
-            {
+            let retired_target = spec.body.create() == Some(dependency.action.id());
+            if !active && (!dependency.local_archive_ancestor || retired_target) {
                 return Err(ChatError::Dependency);
             }
         }
@@ -741,18 +743,17 @@ impl V2GeneralPrefixVerifier {
             let admission = match self.admission(*owner) {
                 Ok(current) => current,
                 Err(ChatError::Dependency) => {
-                    // A fresh author can refer to a retired Create by
-                    // replying. A new Edit/Delete must still address the
-                    // current incarnation, even when the signer is reused.
-                    if evidence == DependencyEvidence::IncomingReply
-                        && !matches!(action.spec().body, Body::Create { reply_to: Some(reply), .. } if reply == id)
+                    // A retired predecessor can supply causal knowledge.
+                    // A mutation's target must still name the current
+                    // incarnation, even when the same signer rejoined.
+                    if evidence == DependencyEvidence::Incoming
+                        && action.spec().body.create() == Some(id)
                     {
                         return Err(ChatError::Permission);
                     }
                     if matches!(
                         evidence,
-                        DependencyEvidence::IncomingReply
-                            | DependencyEvidence::LocallySelectedAncestors
+                        DependencyEvidence::Incoming | DependencyEvidence::LocallySelectedAncestors
                     ) && !self.matches_local_ancestor(entry, *owner)
                     {
                         missing.push(id);
@@ -810,6 +811,7 @@ impl V2GeneralPrefixVerifier {
         if view.life.local_archive {
             return Err(ChatError::Scope);
         }
+        self.require_live_ordinary_dependencies(action.spec(), dependencies)?;
         let verified = self.verify_action_semantics(action, admission, dependencies)?;
         self.require_view(action, view)?;
         if !self

@@ -919,7 +919,7 @@ async fn resume_entry(
         }
         let result = match original.select_discovered_archive(replay, &scope, &mut OsCryptoRng) {
             Ok(Some(_)) => {
-                local.note_archive_change(action, target, true);
+                local.settle_archive_change(action, target);
                 ReplayOutcome::Selected(target)
             }
             other => {

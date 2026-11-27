@@ -178,26 +178,64 @@ impl SharedHistoryDisk {
         session: &VaultSessionGuard,
         payment: CatalogReadReservation,
     ) -> Result<Option<SavedSharedOriginal>, AppError> {
+        self.read_inner(key, action, session, payment, false)
+    }
+
+    /// Exact original for local ancestry. It cannot finish a pending write
+    /// or expose a message's projection while a revision is outstanding.
+    pub(in crate::store::persistence) fn read_ancestor(
+        &self,
+        key: &[u8; 32],
+        action: ActionId,
+        session: &VaultSessionGuard,
+        payment: CatalogReadReservation,
+    ) -> Result<Option<SavedSharedOriginal>, AppError> {
+        self.read_inner(key, action, session, payment, true)
+    }
+
+    fn read_inner(
+        &self,
+        key: &[u8; 32],
+        action: ActionId,
+        session: &VaultSessionGuard,
+        payment: CatalogReadReservation,
+        local_ancestor: bool,
+    ) -> Result<Option<SavedSharedOriginal>, AppError> {
         payment.validate(&self.pool, DISK_FEE)?;
         self.require_key(key)?;
         let _lease = session.retain_for_physical_work();
         let _gate = self.gate.try_lock().map_err(|_| refused())?;
         self.directory.require()?;
-        if observe(&self.directory.child(WAL_NAME))? == Presence::Present {
+        let path = self.directory.child(WAL_NAME);
+        let mut pending = if observe(&path)? == Presence::Present {
+            if !local_ancestor {
+                return Err(refused());
+            }
+            let (file, identity, bytes) = read_bounded_held(&path, WAL_BYTES, false)?;
+            let (selected, _, _) = self.authenticate_wal(key, &bytes)?;
+            if selected.action == action {
+                return Err(refused());
+            }
+            Some(((file, identity), bytes))
+        } else {
+            None
+        };
+        let selected = self.read_selected(key, action)?;
+        if let Some((original, bytes)) = pending.as_mut() {
+            require_exact_held(&path, original, bytes)?;
+        } else if observe(&path)? != Presence::Absent {
             return Err(refused());
         }
-        let Some((_selected, admission, original)) = self.read_selected(key, action)? else {
-            self.directory.require()?;
-            return Ok(None);
-        };
         self.directory.require()?;
-        Ok(Some(SavedSharedOriginal {
-            #[cfg(test)]
-            selected: _selected,
-            admission,
-            original,
-            _payment: payment,
-        }))
+        Ok(
+            selected.map(|(_selected, admission, original)| SavedSharedOriginal {
+                #[cfg(test)]
+                selected: _selected,
+                admission,
+                original,
+                _payment: payment,
+            }),
+        )
     }
 
     pub(in crate::store::persistence) fn require_scope(
@@ -361,17 +399,7 @@ impl SharedHistoryDisk {
         wal: &[u8],
         original: &mut (File, SessionId),
     ) -> Result<SelectedHistoryRecord, AppError> {
-        let (selector, bundle) = decode_wal(wal)?;
-        let selected = self.open_selector(key, selector)?;
-        let (_, action) = open_shared_history_bundle(
-            &self.scope,
-            key,
-            (selected.record.action, selected.record.manifest),
-            bundle,
-        )?;
-        selected.require_target(action.action())?;
-        drop(action);
-        let selected = selected.record;
+        let (selected, selector, bundle) = self.authenticate_wal(key, wal)?;
         self.directory.require()?;
         let wal_path = self.directory.child(WAL_NAME);
         require_exact_held(&wal_path, original, wal)?;
@@ -402,6 +430,23 @@ impl SharedHistoryDisk {
         }
         self.directory.sync()?;
         Ok(selected)
+    }
+
+    fn authenticate_wal<'a>(
+        &self,
+        key: &[u8; 32],
+        wal: &'a [u8],
+    ) -> Result<(SelectedHistoryRecord, &'a [u8], &'a [u8]), AppError> {
+        let (selector, bundle) = decode_wal(wal)?;
+        let selected = self.open_selector(key, selector)?;
+        let (_, action) = open_shared_history_bundle(
+            &self.scope,
+            key,
+            (selected.record.action, selected.record.manifest),
+            bundle,
+        )?;
+        selected.require_target(action.action())?;
+        Ok((selected.record, selector, bundle))
     }
 
     fn bind_key(scope: &SharedHistoryScope, key: &[u8; 32]) -> [u8; 32] {
@@ -672,6 +717,10 @@ pub(in crate::store::persistence) struct PreparedSharedHistorySave {
 }
 
 impl PreparedSharedHistorySave {
+    pub(in crate::store::persistence) fn action(&self) -> ActionId {
+        self.expected.action
+    }
+
     pub(in crate::store::persistence) fn has_wal(&self) -> bool {
         self.attempt.is_some()
     }

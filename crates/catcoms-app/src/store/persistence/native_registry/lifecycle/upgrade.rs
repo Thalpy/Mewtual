@@ -211,6 +211,35 @@ impl UpgradeInventory {
         self.index.is_some() || self.marker.is_some()
     }
     pub(in crate::store) fn require(&self, store: &ServerStore) -> Result<(), AppError> {
+        self.require_with_rejoin_catalog(store, None)
+    }
+
+    pub(in crate::store) fn require_after_rejoin(
+        &self,
+        store: &ServerStore,
+        selected: &crate::store::persistence::governance_layout::joined::rejoin::SelectedRejoinCatalog<'_>,
+    ) -> Result<(), AppError> {
+        self.require_with_rejoin_catalog(store, Some(selected))
+    }
+
+    pub(in crate::store) fn sync_rejoin_catalog_parent(
+        &self,
+        store: &ServerStore,
+    ) -> Result<(), AppError> {
+        self.base.require_directories(store)?;
+        self.base.vault.file.sync_all().map_err(io)?;
+        self.base.require_directories(store)
+    }
+
+    fn require_with_rejoin_catalog(
+        &self,
+        store: &ServerStore,
+        selected: Option<
+            &crate::store::persistence::governance_layout::joined::rejoin::SelectedRejoinCatalog<
+                '_,
+            >,
+        >,
+    ) -> Result<(), AppError> {
         self.expected_current.require(store)?;
         store.require_original_physical_mount(&self.mount)?;
         require_no_old_upgrade(store)?;
@@ -233,11 +262,6 @@ impl UpgradeInventory {
             ),
             (true, UPGRADE_INDEX_NAME, self.index.as_ref()),
             (true, UPGRADE_MARKER_NAME, self.marker.as_ref()),
-            (
-                false,
-                critical::Slot::Current.name(),
-                Some(&self.base.catalog),
-            ),
             (true, native::INDEX_NAME, Some(&self.base.index)),
             (true, native::MARKER_NAME, Some(&self.base.marker)),
             (true, native::INDEX_STAGE_NAME, self.base.stage.as_ref()),
@@ -247,6 +271,17 @@ impl UpgradeInventory {
                 Some(file) => file.require(&name)?,
                 None => absent(&name)?,
             }
+        }
+        if let Some(selected) = selected {
+            selected.require_replaced_current(
+                store,
+                self.base.catalog.identity(),
+                self.catalog(),
+            )?;
+        } else {
+            self.base
+                .catalog
+                .require(&path(store, false, critical::Slot::Current.name())?)?;
         }
         self.base.require_directories(store)?;
         store.require_original_physical_mount(&self.mount)?;

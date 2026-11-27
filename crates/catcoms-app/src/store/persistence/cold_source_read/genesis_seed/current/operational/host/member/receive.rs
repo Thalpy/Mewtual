@@ -143,7 +143,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     .map_err(|_| Refusal::Stale)?;
                 Ok(FounderReceiveOutcome::Dependency(reply))
             }
-            FounderReceiveOperation::Frame(frame, session, carrier) => {
+            FounderReceiveOperation::Frame(frame, session, carrier, admit_mutation) => {
                 if session.signal.is_cancelled() {
                     return Err(Refusal::Cancelled);
                 }
@@ -222,7 +222,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     (verifier, &lane.retired_history),
                     &mut received.ledger,
                     &received.view,
-                    (store, history.scope),
+                    (store, history.scope, admit_mutation),
                     |id| {
                         let mount = store
                             .member_outbox_mount()
@@ -261,7 +261,9 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     ));
                 }
                 let archived = history
-                    .save(&original, rng, || require_current().map_err(|_| refused()))
+                    .save(&original, &received.ledger, rng, || {
+                        require_current().map_err(|_| refused())
+                    })
                     .unwrap_or(Some(false));
                 require_current()?;
                 Ok(FounderReceiveOutcome::Frame(
@@ -270,7 +272,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     ),
                 ))
             }
-            FounderReceiveOperation::Recover(response, session, carrier) => {
+            FounderReceiveOperation::Recover(response, session, carrier, admit_mutation) => {
                 response.require_current(session)?;
                 let _fee = pool
                     .try_reserve(FOUNDER_TRANSPORT_FEE)
@@ -313,7 +315,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     (verifier, &lane.retired_history),
                     &mut received.ledger,
                     &received.view,
-                    (store, history.scope),
+                    (store, history.scope, admit_mutation),
                     |id| {
                         let mount = store
                             .member_outbox_mount()
@@ -352,7 +354,9 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     ));
                 }
                 let archived = history
-                    .save(&original, rng, || require_current().map_err(|_| refused()))
+                    .save(&original, &received.ledger, rng, || {
+                        require_current().map_err(|_| refused())
+                    })
                     .map_err(|_| Refusal::Failed)?;
                 require_current()?;
                 Ok(FounderReceiveOutcome::Recovered(

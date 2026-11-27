@@ -872,6 +872,15 @@ fn current_signer_can_only_reply_to_an_exact_selected_retired_create() {
     let draft = ActionDraft::new(reply.spec().clone(), *reply.signer()).unwrap();
     assert!(f
         .verifier
+        .provisional_action(
+            &reply,
+            &replacement,
+            &[V2OrdinaryDependency::new(&parent, &first)],
+            &view,
+        )
+        .is_err());
+    assert!(f
+        .verifier
         .prepare_ordinary_signing_plan(
             &draft,
             &replacement,
@@ -911,6 +920,15 @@ fn current_signer_can_only_reply_to_an_exact_selected_retired_create() {
         },
         vec![parent.id()],
     );
+    assert!(f
+        .verifier
+        .provisional_action(
+            &edit,
+            &replacement,
+            &[V2OrdinaryDependency::new(&parent, &first)],
+            &view,
+        )
+        .is_err());
     let draft = ActionDraft::new(edit.spec().clone(), *edit.signer()).unwrap();
     let old = f
         .verifier
@@ -1014,6 +1032,32 @@ fn incoming_reply_requires_a_selected_archive_receipt_even_for_a_hot_valid_paren
     );
     assert!(ledger.guarded_projection(reply.id(), 128).unwrap().with_publication(
         |projection| matches!(projection, GuardedProjection::Visible { text, .. } if text == "reply after removal"),
+    ).unwrap());
+    let edited = action(
+        &current_key,
+        &current,
+        4,
+        Body::Edit {
+            create: reply.id(),
+            text: "edit of my reply".into(),
+        },
+        vec![reply.id()],
+    );
+    assert_eq!(
+        f.verifier
+            .apply_with_locally_selected_ancestors(
+                &mut ledger,
+                &view,
+                &edited,
+                &current,
+                &retired,
+                (128, true),
+            )
+            .unwrap(),
+        V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+    );
+    assert!(ledger.guarded_projection(reply.id(), 128).unwrap().with_publication(
+        |projection| matches!(projection, GuardedProjection::Visible { text, .. } if text == "edit of my reply"),
     ).unwrap());
 }
 
@@ -1262,10 +1306,40 @@ fn actual_removed_provisional_heads_remain_historical_knowledge_without_hiding_o
     );
     let dependencies = ordered_dependencies(vec![(&live, &current), (&old_join, &removed)]);
     retain(&f, &mut ledger, &edit, &current, &dependencies);
-    install(&f, &mut ledger, &view, &edit, &current, &dependencies);
+    assert!(f
+        .verifier
+        .provisional_action(&edit, &current, &dependencies, &view)
+        .is_err());
+    let frozen = retirement.take_frozen_data().unwrap();
+    let old_bytes = old_join.encode();
+    let receipt = V2LocalArchiveOriginal::from_trusted_local_selection(
+        &old_join,
+        removed.admission_data().admission_id(),
+        &old_bytes,
+    )
+    .unwrap();
+    assert_eq!(
+        f.verifier
+            .replay_locally_selected_ancestor(&mut ledger, &view, receipt, &[&frozen], 128)
+            .unwrap(),
+        V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+    );
+    assert_eq!(
+        f.verifier
+            .apply_with_locally_selected_ancestors(
+                &mut ledger,
+                &view,
+                &edit,
+                &current,
+                &[&frozen],
+                (128, true)
+            )
+            .unwrap(),
+        V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+    );
     assert!(ledger.guarded_projection(live.id(),128).unwrap().with_publication(|p|matches!(p,GuardedProjection::Visible {selected,text,..} if *selected==edit.id() && text=="current member still writes")).unwrap());
-    // A fresh current Join/reply may acknowledge a held Create as causal history, but its
-    // token cannot open that Create. The reply is its own independently admitted message.
+    // A Join may remain as historical knowledge. A current reply can be
+    // visible with an exact local ancestor receipt without opening its parent.
     let join = action(
         &current_key,
         &current,
@@ -1275,7 +1349,10 @@ fn actual_removed_provisional_heads_remain_historical_knowledge_without_hiding_o
     );
     let deps = [V2OrdinaryDependency::new(&held, &removed)];
     retain(&f, &mut ledger, &join, &current, &deps);
-    install(&f, &mut ledger, &view, &join, &current, &deps);
+    assert!(f
+        .verifier
+        .provisional_action(&join, &current, &deps, &view)
+        .is_err());
     assert!(ledger
         .projectable_causal_heads(held.id(), 128)
         .unwrap()
@@ -1292,7 +1369,19 @@ fn actual_removed_provisional_heads_remain_historical_knowledge_without_hiding_o
         vec![held.id()],
     );
     retain(&f, &mut ledger, &reply, &current, &deps);
-    install(&f, &mut ledger, &view, &reply, &current, &deps);
+    let held_bytes = held.encode();
+    let receipt = V2LocalArchiveOriginal::from_trusted_local_selection(
+        &held,
+        removed.admission_data().admission_id(),
+        &held_bytes,
+    )
+    .unwrap();
+    let retired = [frozen];
+    let loan = f
+        .verifier
+        .local_archive_reply_parent(receipt, &retired)
+        .unwrap();
+    install(&f, &mut ledger, &view, &reply, &current, &[loan]);
     assert!(ledger
         .guarded_projection(reply.id(), 128)
         .unwrap()
