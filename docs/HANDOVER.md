@@ -17,11 +17,14 @@ admitted under the old active source. The record becomes eligible here
 only after that selection. These rules establish local selection and
 provide no authority for a peer missing that evidence.
 
-The 102 Core projection tests and four focused App tests passed on
-Windows, including exact WAL fault cases and a five-record dependency
-walk. The earlier native fixture verified that both the warm and reopened
-founder saved a reply with the original removed member's ActionId.
-Three-peer incoming acceptance and wider archive retention remain open.
+The 102 Core projection tests and six focused App tests passed on Windows.
+The App checks cover WAL custody, a five-record chain, five independent
+roots, and a dense 24-record ancestry that resolves in 47 reads. Direct
+ingress and resumable discovery use the same bounded stack and keep one
+queued visit per original. The native fixture verified that both the warm
+and reopened founder saved a reply with the original removed member's
+ActionId. Three-peer incoming acceptance and wider archive retention
+remain open.
 
 ## Render a dense set of saved revisions
 
