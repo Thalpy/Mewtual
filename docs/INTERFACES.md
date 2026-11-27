@@ -9683,3 +9683,9 @@ Its `(preimage hash, expiry)` return is DATA, not an invite or Saved receipt.
 Sync's separate `JoinInvite` key tail requires Root covering/current admission
 and is not called by this production preparation. The actual journal and
 publication remain unfinished. [Contract](communication-recovery/CHAT-V2-INVITE-ISSUER.md).
+
+The subsequent native save path also supports a founder restored at a covered
+Add or Remove. The restored path uses the actual original Source and MLS
+key, the original policy and TCP reservation, and the same selected-Head
+journal. It returns the same covered packet on a cold retry. A fresh Join
+still needs a cold Add writer. [Current contract](communication-recovery/CHAT-V2-INVITE-ISSUER.md).

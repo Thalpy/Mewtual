@@ -154,6 +154,16 @@ impl NativeFounderKeys {
         &mut self.invite
     }
 
+    pub(in crate::store) fn invite_entry(
+        &mut self,
+    ) -> (
+        &NativeChatSourceObservation,
+        &mut NativeChatPreparedKeyCut,
+        &mut NativeChatKeyEnds,
+    ) {
+        (&self.original, &mut self.invite, &mut self.ends)
+    }
+
     /// Separate from fresh SDK creation. The concrete warm caller additionally
     /// supplies its real completed handoff/read evidence to the Store decoder.
     pub(in crate::store) fn warm_sdk_entry(

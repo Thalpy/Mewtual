@@ -9,7 +9,9 @@ use catcoms_wire::Encoder;
 mod archive;
 #[cfg(all(test, any(windows, target_os = "linux")))]
 pub(in crate::store) use archive::recovery::HeldGovernedArchiveRead;
-pub(in crate::store) use archive::recovery::{HeldColdFounderAdd, HeldColdFounderGenesis};
+pub(in crate::store) use archive::recovery::{
+    ColdInviteParent, HeldColdFounderAdd, HeldColdFounderGenesis,
+};
 mod governing_record;
 mod header_signing;
 pub(in crate::store::persistence::v2_text) mod held;

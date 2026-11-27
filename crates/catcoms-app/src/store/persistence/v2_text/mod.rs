@@ -13,6 +13,7 @@ mod context;
 mod control;
 mod head;
 mod index;
+mod invite_context;
 mod io;
 mod ordinary_data;
 mod private_index;
@@ -53,8 +54,11 @@ pub(in crate::store) use control::governed_add::held::{
 };
 #[cfg(all(test, any(windows, target_os = "linux")))]
 pub(in crate::store) use control::governed_add::HeldGovernedArchiveRead;
-pub(in crate::store) use control::governed_add::{HeldColdFounderAdd, HeldColdFounderGenesis};
+pub(in crate::store) use control::governed_add::{
+    ColdInviteParent, HeldColdFounderAdd, HeldColdFounderGenesis,
+};
 pub(in crate::store) use head::{TextPendingData, TextRootData};
+pub(in crate::store) use invite_context::invite_base_context;
 #[cfg(all(test, windows))]
 pub(in crate::store) use ordinary_data::{
     encode_unsigned_intent_data, TextUnsignedIntentBindingsData, TextUnsignedIntentFrameData,

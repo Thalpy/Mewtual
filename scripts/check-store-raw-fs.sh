@@ -413,13 +413,15 @@ declare -A allowed=(
   # flush; create_new once, append only its own exact prefix, never replace or
   # delete. Independent quotas bound the one 8KiB intent and two 512-byte signing
   # files. The attempt/raw paths never adopt an existing file.
-  ['crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite/journal.rs|lookup|let file = OpenOptions::new()']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite/journal.rs|lookup_bound|let file = OpenOptions::new()']=1
   ['crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite/journal.rs|write_same|let file = OpenOptions::new()']=1
   ['crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite/journal.rs|write_same|.create_new(true)']=1
   ['crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite/journal.rs|sync|.sync_all()']=1
   # Read-only Windows journal probe. OPEN_REPARSE_POINT inspects the actual
   # name without following a link. Linux uses RDONLY/NOFOLLOW/NONBLOCK.
-  ['crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite/journal/recovery.rs|open_readonly|OpenOptions::new()']=1
+  # Cold publication syncs only the three authenticated held journal files.
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite/journal/recovery.rs|cover_current_cold|.sync_all()']=1
+  ['crates/catcoms-app/src/store/persistence/cold_source_read/genesis_seed/current/operational/host/invite/journal/recovery.rs|open_held|OpenOptions::new()']=1
   ['crates/catcoms-app/src/store/persistence/cold_source_read/v2_genesis_activation/settlement.rs|settle|files.directory.1.sync_all().map_err(io)?;']=1
 )
 

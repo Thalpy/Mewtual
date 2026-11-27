@@ -1293,6 +1293,19 @@ async fn command_value_after_busy(
     busy: &str,
     input: serde_json::Value,
 ) -> serde_json::Value {
+    match command_response_after_busy(window, queue, command, busy, input).await {
+        tauri::ipc::InvokeResponse::Ok(body) => body.deserialize().unwrap(),
+        tauri::ipc::InvokeResponse::Err(error) => panic!("{command} refused: {error:?}"),
+    }
+}
+
+async fn command_response_after_busy(
+    window: &tauri::WebviewWindow<MockRuntime>,
+    queue: &Queue,
+    command: &str,
+    busy: &str,
+    input: serde_json::Value,
+) -> tauri::ipc::InvokeResponse {
     // A transient admission refusal can precede scheduling or come from the
     // worker. Every retry uses the same original request data.
     let retry_until = SystemClock.monotonic_ms().saturating_add(5_000);
@@ -1303,13 +1316,12 @@ async fn command_value_after_busy(
             work.await;
         }
         match reply.await.unwrap() {
-            tauri::ipc::InvokeResponse::Ok(body) => return body.deserialize().unwrap(),
-            tauri::ipc::InvokeResponse::Err(error)
+            tauri::ipc::InvokeResponse::Err(ref error)
                 if error.0.as_str() == Some(busy) && SystemClock.monotonic_ms() < retry_until =>
             {
                 SystemClock.sleep(Duration::from_millis(25)).await;
             }
-            tauri::ipc::InvokeResponse::Err(error) => panic!("{command} refused: {error:?}"),
+            response => return response,
         }
     }
 }
@@ -1492,10 +1504,12 @@ async fn native_text_founder_frame_capture_survives_transient_row_contention() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_membership_selected_eviction_notifies_the_original_joined_row() {
+    use catcoms_app::store::NativeTextInvitePacketData;
     use tauri::Listener;
 
     let root = tempfile::tempdir().unwrap();
-    let (founder, main, founder_queue) = app(root.path().join("founder"), None, true);
+    let founder_path = root.path().join("founder");
+    let (founder, main, founder_queue) = app(founder_path.clone(), None, true);
     let (member, window, member_queue) = app(root.path().join("member"), None, true);
     unlock_current(&founder, &main, &founder_queue).await;
     unlock_current(&member, &window, &member_queue).await;
@@ -1582,6 +1596,126 @@ async fn native_text_membership_selected_eviction_notifies_the_original_joined_r
         work.await;
     }
     refused(send.await.unwrap());
+
+    // The selected Remove is already on disk. A different application
+    // instance must use the original founder identity to mint its next invite.
+    let founder_state = founder.state::<AppState>();
+    let close = register_vault_close(&founder_state).await.unwrap();
+    sources::close_server_rows(&founder_state, &SystemClock)
+        .await
+        .unwrap();
+    drop((close, founder_state));
+    drop((main, founder));
+
+    let mint_args =
+        serde_json::json!({"server": found["server"], "expectedContext": found["context"]});
+    let (reopened, main, queue) = app(founder_path.clone(), None, true);
+    unlock_current(&reopened, &main, &queue).await;
+    async fn mint(
+        window: &tauri::WebviewWindow<MockRuntime>,
+        queue: &Queue,
+        args: &serde_json::Value,
+    ) -> serde_json::Value {
+        command_value_after_busy(
+            window,
+            queue,
+            "mint_invite_fresh",
+            invite_mint::BUSY,
+            args.clone(),
+        )
+        .await
+    }
+    let cold = mint(&main, &queue, &mint_args).await;
+    let warm_bytes = hex::decode(invite.as_str().unwrap()).unwrap();
+    let cold_bytes = hex::decode(cold.as_str().unwrap()).unwrap();
+    let warm = NativeTextInvitePacketData::decode(&warm_bytes).unwrap();
+    let next = NativeTextInvitePacketData::decode(&cold_bytes).unwrap();
+    let warm_binding = warm.binding().spec_data();
+    let next_binding = next.binding().spec_data();
+    assert!(next_binding.anchor == warm_binding.anchor);
+    assert_eq!(next_binding.inviter, warm_binding.inviter);
+    assert_ne!(next_binding.nonce, warm_binding.nonce);
+    assert_eq!(next.policy_bytes(), warm.policy_bytes());
+    assert_eq!(next.reservation_bytes(), warm.reservation_bytes());
+    assert_eq!(
+        mint(&main, &queue, &mint_args).await,
+        cold,
+        "same selected parent and token"
+    );
+    let state = reopened.state::<AppState>();
+    let close = register_vault_close(&state).await.unwrap();
+    sources::close_server_rows(&state, &SystemClock)
+        .await
+        .unwrap();
+    drop((close, state));
+    drop((main, reopened));
+
+    let (reopened, main, queue) = app(founder_path.clone(), None, true);
+    unlock_current(&reopened, &main, &queue).await;
+    assert_eq!(
+        mint(&main, &queue, &mint_args).await,
+        cold,
+        "cold replay returns the exact original packet"
+    );
+    let state = reopened.state::<AppState>();
+    let close = register_vault_close(&state).await.unwrap();
+    sources::close_server_rows(&state, &SystemClock)
+        .await
+        .unwrap();
+    drop((close, state));
+    drop((main, reopened));
+
+    fn find_selected_invite_raw(dir: &std::path::Path, depth: u8) -> Option<std::path::PathBuf> {
+        assert!(depth < 12, "bounded isolated fixture tree");
+        std::fs::read_dir(dir).unwrap().find_map(|entry| {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                find_selected_invite_raw(&entry.path(), depth + 1)
+            } else if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("invite.raw.v2.")
+            {
+                Some(entry.path())
+            } else {
+                None
+            }
+        })
+    }
+    let raw = find_selected_invite_raw(&founder_path, 0).unwrap();
+    let name = raw.file_name().unwrap().to_str().unwrap();
+    let attempt = raw.with_file_name(name.replacen(".raw.", ".attempt.", 1));
+    let intent = raw.with_file_name(name.replacen(".raw.", ".intent.", 1));
+    let snapshot = [
+        std::fs::read(&intent).unwrap(),
+        std::fs::read(&attempt).unwrap(),
+    ];
+    let original = std::fs::read(&raw).unwrap();
+    let torn = &original[..original.len() - 1];
+    std::fs::write(&raw, torn).unwrap();
+
+    let (reopened, main, queue) = app(founder_path, None, true);
+    unlock_current(&reopened, &main, &queue).await;
+    let invalid = command_response_after_busy(
+        &main,
+        &queue,
+        "mint_invite_fresh",
+        invite_mint::BUSY,
+        mint_args,
+    )
+    .await;
+    let tauri::ipc::InvokeResponse::Err(error) = invalid else {
+        panic!("a new process published through a torn raw signature");
+    };
+    assert_eq!(error.0, serde_json::json!(invite_mint::FAILED));
+    assert_eq!(std::fs::read(&raw).unwrap(), torn);
+    assert_eq!(
+        [
+            std::fs::read(intent).unwrap(),
+            std::fs::read(attempt).unwrap()
+        ],
+        snapshot
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2072,7 +2206,8 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
         "forget_native_chat_contacts",
         membership::BUSY,
         serde_json::json!({"server": new_row["server"], "expectedContext": new_row["context"]}),
-    ).await;
+    )
+    .await;
     assert!(forgotten.is_null());
     parked_live.release.notify_one();
     for state in [&member_state, &new_state] {

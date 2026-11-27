@@ -98,6 +98,7 @@ struct ColdFounderOrigin {
     pin: OpenedTextControl,
     seed: OpenedTextControl,
     original: OriginalBootstrapReadObservation,
+    invite_context: [u8; 32],
 }
 
 struct OpenedColdFounderOrigin {
@@ -300,6 +301,12 @@ impl OpenedColdFounderOrigin {
         if promotion.context != context {
             return Err(refused());
         }
+        let invite_context = crate::store::persistence::v2_text::invite_base_context(
+            &expected.context,
+            promotion.original_head,
+            expected.context.spec_data().scope_nonce,
+            &pin.frame,
+        )?;
         Ok(Self {
             retained: ColdFounderOrigin {
                 group,
@@ -308,6 +315,7 @@ impl OpenedColdFounderOrigin {
                 pin,
                 seed,
                 original: source.observe_original(),
+                invite_context,
             },
             key,
             plain,
@@ -322,7 +330,55 @@ struct ColdFounderCore {
     _fee: CatalogReadReservation,
 }
 
+/// Scoped journal labels from the selected cold files. The constructor is
+/// private to the verifier that revalidates the original before and after use.
+pub(in crate::store) struct ColdInviteParent<'a> {
+    store: &'a ServerStore,
+    target: &'a Path,
+    parent: TextHeadIdData,
+    context: [u8; 32],
+}
+
+impl<'a> ColdInviteParent<'a> {
+    pub(in crate::store) fn store(&self) -> &'a ServerStore {
+        self.store
+    }
+
+    pub(in crate::store) fn target(&self) -> &'a Path {
+        self.target
+    }
+
+    pub(in crate::store) fn context_data(&self) -> (TextHeadIdData, [u8; 32]) {
+        (self.parent, self.context)
+    }
+}
+
 impl HeldColdFounderAdd {
+    /// Use the existing cold-selected proof without borrowing a warm Current
+    /// writer. The native owning loan stays outside these physical checks.
+    pub(in crate::store) fn with_checked_invite_parent<T>(
+        &mut self,
+        store: &ServerStore,
+        source: &RetainedBootstrapSourceData,
+        perform: impl FnOnce(
+            &ColdInviteParent<'_>,
+            &V2GeneralPrefixVerifier,
+            &mut dyn FnMut() -> Result<(), AppError>,
+        ) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        let binding = ColdInviteParent {
+            store,
+            target: source.original_target_data().0,
+            parent: TextHeadIdData::of_data(&self.files.head.frame),
+            context: self.files.origin.invite_context,
+        };
+        self.with_checked_member_parts(store, source, |verifier, _, require| {
+            let result = perform(&binding, verifier, require)?;
+            require()?;
+            Ok(result)
+        })
+    }
+
     /// Check the authenticated archive against the earlier warm writer's
     /// exact selected receipt before it can become a successor's parent.
     pub(in crate::store::persistence::v2_text) fn require_installed_parent(

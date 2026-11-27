@@ -3,8 +3,8 @@ use super::*;
 use catcoms_app::store::NativeUiInvocationMetadata;
 use tauri::ipc::InvokeResponseBody;
 
-const BUSY: &str = "Invitations are busy. Retry the same request.";
-const FAILED: &str = "Could not prepare this Chat V2 invitation.";
+pub(super) const BUSY: &str = "Invitations are busy. Retry the same request.";
+pub(super) const FAILED: &str = "Could not prepare this Chat V2 invitation.";
 const INVITE_LIFETIME_MS: u64 = 3_600_000;
 const CREDITS: usize = 8;
 

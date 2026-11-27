@@ -42,4 +42,13 @@ impl OpenedBootstrapSourceData {
     pub fn genesis_public_data(&self) -> BootstrapGenesisPublicData<'_> {
         BootstrapGenesisPublicData { source: self }
     }
+
+    /// Reuse this authenticated source's closed S0 policy when issuing an
+    /// invitation after restart. No policy or contact comes from the caller.
+    pub(in super::super) fn recovered_invite_policy_data(&self) -> Result<Vec<u8>, SyncError> {
+        let original = self.view_data();
+        let fields = super::super::s0::fields(original.snapshot, original.context.spec_data())?;
+        let policy = crate::group_policy::decode_pin(fields.policy)?.ok_or_else(bad)?;
+        Ok(policy.encode())
+    }
 }
