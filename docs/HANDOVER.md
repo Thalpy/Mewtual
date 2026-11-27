@@ -44,6 +44,24 @@ Header. A change of governing state requires fresh contact consent.
 This does not cover governed rejoin or physical network acceptance.
 Chat V2 remains disabled.
 
+## 27 November 2026 — Keep paid history replay moving
+
+The joined worker advances a paid original in short local slices before
+starting unrelated inventory work. Each slice releases the row permit.
+Local admission contention leaves the wire attempt budget intact and the
+original deadline still applies.
+
+A clean own outbox can prove that the author already has an archive-offered
+Create or reply. This skips one inventory fetch. Received audit data and
+notifications are unchanged. The shortcut does not apply to edits, deletes,
+or a targeted replay that needs the peer's exact signed bytes.
+
+The focused mounted Windows App test passed over actual TCP, including the
+own Create hit, Edit and Delete exclusions, and the separate received
+archive. Prior native combined runs selected the offline Edit and Delete
+but did not select the deepest reply within the test's deadline. Native
+execution of the revised worker and wider acceptance remain open.
+
 ## 26 November 2026 — Fetch exact missing parents before the next archive page
 
 A verified archive-stage miss can steer the desktop to a specific missing
