@@ -54,15 +54,17 @@ use crate::store::persistence::v2_member_outbox::{
     MemberSignedOriginal,
 };
 use crate::store::persistence::v2_member_transport::{FounderDebtOperation, FounderDebtOutcome};
+use crate::store::persistence::v2_shared_history::disk::SavedSharedOriginal;
 use crate::store::persistence::v2_text::{PreparedV2TextParentCapture, V2TextFounderAnchorData};
 use crate::store::{NativeTextJoinedRowSelection, ServerStore};
 use catcoms_replication::chat::owner_facts::OwnerFactId;
 use catcoms_replication::chat::owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE;
 use catcoms_replication::chat::{
-    ActionDraft, ActionId, ActionSpec, Body, ChatLedger, LedgerLimits,
+    ActionDraft, ActionId, ActionSpec, Body, ChatError, ChatLedger, LedgerLimits,
     OriginalV2OrdinarySigningPlanObservation, ProjectionView, Realm, SignedAction,
-    V2AuthenticatedAdmission, V2GeneralPrefixVerifier, V2OrdinaryDependency, V2OrdinarySigningPlan,
-    MAX_ACTION_BYTES, MAX_GROUP_ID_BYTES, MAX_PARENTS, MAX_TEXT_BYTES,
+    V2AuthenticatedAdmission, V2FrozenAdmission, V2GeneralPrefixVerifier, V2LocalArchiveOriginal,
+    V2OrdinaryDependency, V2OrdinarySigningPlan, MAX_ACTION_BYTES, MAX_GROUP_ID_BYTES, MAX_PARENTS,
+    MAX_TEXT_BYTES,
 };
 use catcoms_rt::{
     CryptoRngCore, MeshTransport, NativeChatKeyEnds, NativeChatPreparedKeyCut,
@@ -517,6 +519,7 @@ impl PendingMemberRequest {
         verifier: &V2GeneralPrefixVerifier,
         own: &V2AuthenticatedAdmission,
         dependencies: &[V2MemberDependency<'_>],
+        (selected_reply, retired): (Option<&SavedSharedOriginal>, &[V2FrozenAdmission]),
         view: &ProjectionView,
     ) -> Result<(), AppError> {
         let draft = self.draft.as_ref().ok_or_else(refused)?;
@@ -524,18 +527,39 @@ impl PendingMemberRequest {
         // checks the real signature, delegation and exact minimal set.
         let mut resolved = Vec::with_capacity(dependencies.len());
         for dependency in dependencies {
-            resolved.push((
-                dependency.action,
-                verifier
-                    .admission(dependency.admission)
-                    .map_err(|_| refused())?,
-            ));
+            let admission = match verifier.admission(dependency.admission) {
+                Ok(current) => Some(current),
+                Err(ChatError::Dependency)
+                    if selected_reply.is_some_and(|selected| {
+                        selected.admission == dependency.admission
+                            && std::ptr::eq(selected.original.action(), dependency.action)
+                    }) =>
+                {
+                    None
+                }
+                Err(_) => return Err(refused()),
+            };
+            resolved.push((dependency.action, admission));
         }
         resolved.sort_by_cached_key(|(action, _)| action.id());
-        let dependencies: Vec<_> = resolved
+        let dependencies = resolved
             .iter()
-            .map(|(action, admission)| V2OrdinaryDependency::new(action, admission))
-            .collect();
+            .map(|(action, admission)| {
+                if let Some(admission) = admission {
+                    return Ok(V2OrdinaryDependency::new(action, admission));
+                }
+                let selected = selected_reply.ok_or_else(refused)?;
+                let proven = V2LocalArchiveOriginal::from_trusted_local_selection(
+                    action,
+                    selected.admission,
+                    selected.original.original_bytes(),
+                )
+                .map_err(|_| refused())?;
+                verifier
+                    .local_archive_reply_parent(proven, retired)
+                    .map_err(|_| refused())
+            })
+            .collect::<Result<Vec<_>, AppError>>()?;
         let plan = verifier
             .prepare_ordinary_signing_plan(draft, own, &dependencies, view)
             .map_err(|_| refused())?;
@@ -723,7 +747,7 @@ impl JoinedMemberLane {
     pub(super) fn retry_request<T: MeshTransport, R: CryptoRngCore>(
         &mut self,
         store: &ServerStore,
-        request: &V2MemberSignRequest<'_>,
+        (request, selected_reply): (&V2MemberSignRequest<'_>, Option<&SavedSharedOriginal>),
         source: &mut JoinedMemberSource<'_, T, R>,
     ) -> Result<(), AppError> {
         let pool = &store
@@ -763,7 +787,13 @@ impl JoinedMemberLane {
         if pending.plan.is_none() {
             let view =
                 member_channel_view(&mut self.channels, group, pending.channel, source.view)?;
-            pending.prepare_plan(verifier, &own, request.dependencies, view)?;
+            pending.prepare_plan(
+                verifier,
+                &own,
+                request.dependencies,
+                (selected_reply, source.prefix.retired_history_data()),
+                view,
+            )?;
         }
         pending.sign_and_complete(|inputs, draft, plan| {
             source
@@ -1129,7 +1159,7 @@ impl V2MemberLane {
         store: &ServerStore,
         owner: &mut V2TextOwnedCurrent<T, R>,
         governed_add: Option<&mut super::governed_add::PendingGovernedAdd>,
-        request: &V2MemberSignRequest<'_>,
+        (request, selected_reply): (&V2MemberSignRequest<'_>, Option<&SavedSharedOriginal>),
         mut access: FounderAccess<'_>,
     ) -> Result<(), AppError> {
         if self.requests.retry_completed(request)? {
@@ -1157,6 +1187,7 @@ impl V2MemberLane {
             domain,
             group,
             admission,
+            retired_history,
             ..
         } = self;
         let pending = requests.request.as_deref_mut().ok_or_else(refused)?;
@@ -1182,6 +1213,7 @@ impl V2MemberLane {
                 verifier,
                 &own,
                 request.dependencies,
+                (selected_reply, retired_history),
                 &channels[channel_index].view,
             )?;
         }
@@ -1473,12 +1505,12 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
         layout: &V2CurrentLayoutStore,
         request: V2MemberSignRequest<'_>,
     ) -> Result<(), AppError> {
-        self.retry_sign_member_request_with_access(layout, request, FounderAccess::Library)
+        self.retry_sign_member_request_with_access(layout, (request, None), FounderAccess::Library)
     }
     pub(in crate::store) fn retry_sign_member_request_with_access(
         &mut self,
         layout: &V2CurrentLayoutStore,
-        request: V2MemberSignRequest<'_>,
+        (request, selected_reply): (V2MemberSignRequest<'_>, Option<&SavedSharedOriginal>),
         access: FounderAccess<'_>,
     ) -> Result<(), AppError> {
         access.require(&self.origin)?;
@@ -1504,7 +1536,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                 store,
                 &mut self.owner,
                 self.governed_add.as_deref_mut(),
-                &request,
+                (&request, selected_reply),
                 access,
             );
         }
@@ -1518,7 +1550,13 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
             let observer = self.observer.as_ref().ok_or_else(refused)?;
             V2MemberLane::prepare(store, &owner, observer)?
         };
-        let result = lane.retry_request(store, &mut self.owner, None, &request, access);
+        let result = lane.retry_request(
+            store,
+            &mut self.owner,
+            None,
+            (&request, selected_reply),
+            access,
+        );
         if lane.verifier.is_some() {
             self.member = Some(Box::new(lane));
         }

@@ -219,7 +219,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                 };
                 let status = project_founder_member(
                     &original,
-                    verifier,
+                    (verifier, &lane.retired_history),
                     &mut received.ledger,
                     &received.view,
                     (store, history.scope, admit_mutation),
@@ -312,7 +312,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                 };
                 let status = project_founder_member(
                     &original,
-                    verifier,
+                    (verifier, &lane.retired_history),
                     &mut received.ledger,
                     &received.view,
                     (store, history.scope, admit_mutation),

@@ -14,7 +14,7 @@ use catcoms_mls::{MlsDevice, ServerGroup};
 use catcoms_replication::chat::{
     owner_facts::OwnerFactId, owner_header::OwnerHeaderId, ActionState, ChatError, ChatLedger,
     ProjectionAdmissionToken, ProjectionView, SignedAction, V2AuthenticatedAdmission,
-    V2GeneralPrefixVerifier, V2LiveMemberObservation, V2OrdinaryDependency,
+    V2FrozenAdmission, V2GeneralPrefixVerifier, V2LiveMemberObservation, V2OrdinaryDependency,
     V2OrdinaryReceiveStatus, MAX_ACTION_BYTES,
 };
 use catcoms_rt::{
@@ -322,6 +322,26 @@ impl SelectedV2MemberEnvelope {
     ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
         let admission = self.original_admission(verifier)?;
         verifier.stage_provisional_from_ledger(ledger, view, self.action_data(), &admission, work)
+    }
+
+    /// Apply a current envelope using this vault's already selected ancestry.
+    /// An ancestor receipt cannot authenticate the envelope's own author.
+    pub fn apply_with_local_ancestry(
+        &self,
+        (verifier, retired): (&V2GeneralPrefixVerifier, &[&V2FrozenAdmission]),
+        (ledger, view): (&mut ChatLedger, &ProjectionView),
+        work: usize,
+        publish: bool,
+    ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
+        let admission = self.original_admission(verifier)?;
+        verifier.apply_with_locally_selected_ancestors(
+            ledger,
+            view,
+            self.action_data(),
+            &admission,
+            retired,
+            (work, publish),
+        )
     }
 
     fn original_admission(

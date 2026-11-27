@@ -141,6 +141,25 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     std::fs::write(disk.bundle_path(selected.manifest), &bundle[..17]).unwrap();
     std::fs::write(disk.selector_path(&KEY, selected.action), &selector[..15]).unwrap();
     assert!(disk.read(&KEY, selected.action, &session, pay()).is_err());
+    assert!(disk.read(&KEY, first.id(), &session, pay()).is_err());
+    assert!(disk
+        .read_ancestor(&KEY, selected.action, &session, pay())
+        .is_err());
+    let earlier = disk
+        .read_ancestor(&KEY, first.id(), &session, pay())
+        .unwrap()
+        .unwrap();
+    assert_eq!(earlier.original.original_bytes(), first.encode());
+    drop(earlier);
+
+    // Neither a partial WAL nor the record it might still select supplies
+    // evidence. Restore only the original bytes before the cold control.
+    std::fs::write(&wal_name, &wal[..80]).unwrap();
+    assert!(disk
+        .read_ancestor(&KEY, first.id(), &session, pay())
+        .is_err());
+    assert_eq!(std::fs::read(&wal_name).unwrap(), &wal[..80]);
+    std::fs::write(&wal_name, &wal[..]).unwrap();
     assert!(disk
         .action_page(&KEY, creates(None, 3), &session, pay())
         .is_err());
@@ -168,6 +187,16 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     assert_eq!(std::fs::read(&wal_name).unwrap(), &wal[..]);
     drop(disk);
     let disk = owner();
+    let earlier = disk
+        .read_ancestor(&KEY, first.id(), &session, pay())
+        .unwrap()
+        .unwrap();
+    assert_eq!(earlier.original.original_bytes(), first.encode());
+    assert!(disk
+        .read_ancestor(&KEY, selected.action, &session, pay())
+        .is_err());
+    assert_eq!(std::fs::read(&wal_name).unwrap(), &wal[..]);
+    drop(earlier);
     assert_eq!(disk.recover(&KEY, &session, pay()).unwrap(), Some(selected));
     assert_eq!(disk.recover(&KEY, &session, pay()).unwrap(), None);
     let saved = disk

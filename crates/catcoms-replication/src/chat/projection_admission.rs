@@ -532,6 +532,15 @@ impl ProjectionLease {
     }
 }
 
+/// A local selected-history receipt can qualify one exact stored original
+/// as an ordinary dependency after its Admission closes. This does not
+/// grant a projection or extend the issuing verifier's lifetime.
+pub(super) struct V2LocalAncestry {
+    verifier: std::sync::Weak<()>,
+    admission: crate::chat::owner_facts::OwnerFactId,
+    signature: [u8; 64],
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ActionBinding {
     realm: RealmId,

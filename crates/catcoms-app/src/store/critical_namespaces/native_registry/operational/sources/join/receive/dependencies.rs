@@ -551,9 +551,19 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     .metadata
                     .reserve_join_node(HISTORY_REPLAY_FEE)
                     .map_err(|_| Refusal::Busy)?;
+                let retired = source
+                    .prefix
+                    .retired_history_data()
+                    .iter()
+                    .collect::<Vec<_>>();
                 let status = original
                     .opened
-                    .stage_from_ledger(verifier, ledger, view, RECEIVE_WORK)
+                    .apply_with_local_ancestry(
+                        (verifier, &retired),
+                        (ledger, view),
+                        RECEIVE_WORK,
+                        false,
+                    )
                     .map_err(|_| Refusal::Failed)?;
                 let dependencies = match status {
                     V2OrdinaryReceiveStatus::WaitingForDependencies(missing) => {
@@ -629,8 +639,13 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 .selected_member_verifier()
                 .map_err(|_| Refusal::Unavailable)?;
             let channel = ledger.ledger.realm().channel();
+            let retired = source
+                .prefix
+                .retired_history_data()
+                .iter()
+                .collect::<Vec<_>>();
             if !ancestors.advance(
-                (verifier, &mut ledger.ledger, &ledger.view),
+                (verifier, &retired, &mut ledger.ledger, &ledger.view),
                 RECEIVE_WORK,
                 (source.store, source.history_scope(channel)),
                 |id| source.read_dependency(channel, id, rng),
@@ -640,7 +655,12 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             }
             let status = original
                 .opened
-                .stage_from_ledger(verifier, &mut ledger.ledger, &ledger.view, RECEIVE_WORK)
+                .apply_with_local_ancestry(
+                    (verifier, &retired),
+                    (&mut ledger.ledger, &ledger.view),
+                    RECEIVE_WORK,
+                    false,
+                )
                 .map_err(|_| Refusal::Failed)?;
             if status != V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
                 return Err(Refusal::Unavailable);

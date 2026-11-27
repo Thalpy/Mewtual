@@ -267,8 +267,21 @@ impl ServerStore {
         scope: SharedHistoryScope,
         action: ActionId,
     ) -> Result<Option<SavedSharedOriginal>, AppError> {
-        self.with_selected_shared_history(scope, |disk, _, key, pool| {
+        self.with_selected_shared_history(scope, None, |disk, _, key, pool| {
             disk.read(key, action, &self._session, pool.try_reserve(DISK_FEE)?)
+        })
+    }
+
+    /// Read already selected bytes for a private local dependency check.
+    /// A complete authenticated WAL for a different record cannot replace
+    /// this original. The ordinary display and peer paths stay strict.
+    pub(in crate::store) fn read_selected_shared_history_ancestor(
+        &self,
+        scope: SharedHistoryScope,
+        action: ActionId,
+    ) -> Result<Option<SavedSharedOriginal>, AppError> {
+        self.with_selected_shared_history(scope, Some(action), |disk, _, key, pool| {
+            disk.read_ancestor(key, action, &self._session, pool.try_reserve(DISK_FEE)?)
         })
     }
 
@@ -303,7 +316,7 @@ impl ServerStore {
         scope: SharedHistoryScope,
         mut inspect: impl FnMut(ArchiveRelayEntry),
     ) -> Result<bool, AppError> {
-        self.with_selected_shared_history(scope, |disk, relay, _, _| {
+        self.with_selected_shared_history(scope, None, |disk, relay, _, _| {
             disk.require_clean_relay()?;
             let Some(entries) = relay.and_then(SharedHistoryRelayIndex::entries) else {
                 return Ok(false);
@@ -322,7 +335,7 @@ impl ServerStore {
         require_current: impl Fn() -> Result<(), AppError>,
         visit: impl FnMut(ArchiveRelayEntry, &SignedAction) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
-        self.with_selected_shared_history(scope, |disk, _, key, pool| {
+        self.with_selected_shared_history(scope, None, |disk, _, key, pool| {
             disk.visit_relay_page(
                 key,
                 &self._session,
@@ -337,6 +350,7 @@ impl ServerStore {
     fn with_selected_shared_history<T>(
         &self,
         scope: SharedHistoryScope,
+        local_ancestor: Option<ActionId>,
         perform: impl FnOnce(
             &SharedHistoryDisk,
             Option<&SharedHistoryRelayIndex>,
@@ -351,7 +365,11 @@ impl ServerStore {
         let slot = self.shared_history_mount.try_lock().map_err(|_| denied())?;
         let mounted = slot.as_ref().ok_or_else(denied)?;
         mounted.require(self)?;
-        if mounted.pending.is_some() {
+        if mounted
+            .pending
+            .as_ref()
+            .is_some_and(|pending| local_ancestor.is_none_or(|action| action == pending.action()))
+        {
             return Err(denied());
         }
         let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
@@ -397,7 +415,7 @@ impl ServerStore {
         if !self.has_mounted_shared_history()? {
             return Ok(None);
         }
-        self.with_selected_shared_history(scope, |disk, _, key, _| {
+        self.with_selected_shared_history(scope, None, |disk, _, key, _| {
             disk.selected_audit_page(key, query, &self._session, caller)
                 .map(Some)
         })

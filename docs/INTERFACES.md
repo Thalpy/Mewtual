@@ -7,9 +7,12 @@ Pages expose at most eight IDs and keep a fixed provider-local end per sweep.
 The existing `chat-v2-received` notice invalidates that target after recovery.
 The joined `receivedAction` read keeps its schema and uses a guarded archive
 projection before falling back to the live ledger.
-Joined archive selection requires the exact signed ancestry to be durable.
-It looks in the selected shared archive before using the own outbox for
-eligible ancestors. A missing original defers the selection.
+Joined and founder archive selection require the exact signed ancestry
+to be durable. They look in the selected shared archive before using the
+own outbox for eligible current-member ancestors. A retired ancestor
+requires its exact local selected original and the same verifier's
+frozen Admission. A missing original defers the selection. An ancestry
+read never settles an unfinished archive write.
 Local archive display also rechecks originals against the exact Admission
 from a selected Remove. It keeps the existing visibility and provisional
 certainty across removal. The same check applies after reopening the vault.

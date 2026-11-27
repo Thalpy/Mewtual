@@ -84,7 +84,7 @@ impl<'a> FounderHistory<'a> {
         archive_founder_member(
             (self.store, self.scope),
             original,
-            ledger,
+            (ledger, self.verifier),
             rng,
             |dependency, rng| {
                 let mount = self

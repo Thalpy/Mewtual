@@ -1588,6 +1588,42 @@ async fn check_retained_removal_history(
     assert_eq!(audit["items"], expected.deleted_audit);
 }
 
+async fn check_reply_to_removed_author(
+    window: &tauri::WebviewWindow<MockRuntime>,
+    queue: &Queue,
+    row: &serde_json::Value,
+    target: &serde_json::Value,
+    token: u8,
+) {
+    let text = format!("reply from the current member {token}");
+    let reply = command_value_after_busy(
+        window,
+        queue,
+        "send_message",
+        sending::BUSY,
+        removal_history_args(
+            row,
+            serde_json::json!({
+                "retryToken": hex::encode([token; 32]), "text": text, "replyTo": target,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(reply["disposition"], "saved-local");
+
+    let saved = native_history_request(window, row, "0", None, 8);
+    run(queue).await;
+    let saved = found_value(saved.await.unwrap());
+    let original = saved["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|record| record["action"] == reply["message_id"])
+        .expect("the current signer saved the reply's exact original");
+    assert_eq!(original["body"]["reply_to"], *target);
+    assert_eq!(original["body"]["text"], text);
+}
+
 async fn archive_originals_before_removal(
     (founder_window, founder_queue, founder): (
         &tauri::WebviewWindow<MockRuntime>,
@@ -1825,6 +1861,7 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
     refused(send.await.unwrap());
     if let Some(history) = &retained_history {
         check_retained_removal_history(&main, &founder_queue, &found, history).await;
+        check_reply_to_removed_author(&main, &founder_queue, &found, &history.visible, 91).await;
     }
 
     // Only the authenticated selected A1 Remove explains why this row
@@ -2137,6 +2174,7 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
     unlock_current(&reopened, &main, &queue).await;
     if let Some(history) = &retained_history {
         check_retained_removal_history(&main, &queue, &found, history).await;
+        check_reply_to_removed_author(&main, &queue, &found, &history.visible, 92).await;
     }
     async fn mint(
         window: &tauri::WebviewWindow<MockRuntime>,

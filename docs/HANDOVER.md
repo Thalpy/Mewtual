@@ -18,6 +18,32 @@ The current hot receive budget and archive retention still need capacity
 work. An interruption before a recoverable write still depends on signed
 redelivery. This checkpoint leaves Text Chat V2 disabled by default.
 
+## Reply to an original saved before membership changes
+
+A current member can reply to an exact original it verified and saved
+under the prior membership. The receiver rechecks its own selected bytes
+and the original retired Admission. A live message cannot use the retired
+Admission as its author or as the target of a new mutation. An exact
+retired original can still explain the earlier causal history of a
+current target. The receiver does not expose the ancestor's text.
+
+The local dependency read leaves the history WAL intact. It can read an
+earlier exact selector while a complete, authenticated WAL names a
+different original. A failed authentication or a WAL for the same record
+still defers. Separate local recovery can complete a write already
+admitted under the old active source. The record becomes eligible here
+only after that selection. These rules establish local selection and
+provide no authority for a peer missing that evidence.
+
+The 102 Core projection tests and six focused App tests passed on Windows.
+The App checks cover WAL custody, a five-record chain, five independent
+roots, and a dense 24-record ancestry that resolves in 47 reads. Direct
+ingress and resumable discovery use the same bounded stack and keep one
+queued visit per original. The native fixture verified that both the warm
+and reopened founder saved a reply with the original removed member's
+ActionId. Three-peer incoming acceptance and wider archive retention
+remain open.
+
 ## Render a dense set of saved revisions
 
 The selected message readers for joined members and warm and reopened

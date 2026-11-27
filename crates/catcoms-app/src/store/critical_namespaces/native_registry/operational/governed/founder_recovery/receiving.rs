@@ -245,7 +245,9 @@ impl NativeTextColdFounderSource {
         }
         self.restore_first_add(&session.signal)?;
         let scope = self.history_scope(channel)?;
-        let (verifier, group) = self.governed.as_ref().ok_or_else(refused)?.member_parts()?;
+        let governing = self.governed.as_ref().ok_or_else(refused)?;
+        let (verifier, group) = governing.member_parts()?;
+        let retired = governing.retired_member_history()?;
         let sdk = self.sdk.as_ref().ok_or_else(refused)?;
         let (mount, _payment) = self.work.recovered_founder_resources(FRAME_FEE)?;
         let (topic, _, wire) = frame.current_data().ok_or_else(refused)?;
@@ -303,7 +305,7 @@ impl NativeTextColdFounderSource {
         let status = work.with_recovered_founder_store(selection, source, |store| {
             project_founder_member(
                 &original,
-                verifier,
+                (verifier, retired),
                 &mut ledger.ledger,
                 &ledger.view,
                 (store, scope, admit_mutation),
@@ -351,28 +353,34 @@ impl NativeTextColdFounderSource {
         let archived = self
             .work
             .with_recovered_founder_store(&self.selection, &self.source, |store| {
-                archive_founder_member(
-                    (store, scope),
-                    &original,
-                    &ledger.ledger,
-                    rng,
-                    |dependency, rng| {
-                        let context = history::outbox_context(&self.selection, &self.source);
-                        history::saved_dependency(
-                            store,
-                            context,
-                            &self.source,
-                            scope,
-                            dependency,
+                governed.with_checked_member_parts(
+                    store,
+                    &self.source,
+                    |verifier, _, _, require| {
+                        archive_founder_member(
+                            (store, scope),
+                            &original,
+                            (&ledger.ledger, verifier),
                             rng,
+                            |dependency, rng| {
+                                let context =
+                                    history::outbox_context(&self.selection, &self.source);
+                                history::saved_dependency(
+                                    store,
+                                    context,
+                                    &self.source,
+                                    scope,
+                                    dependency,
+                                    rng,
+                                )
+                            },
+                            || {
+                                if session.signal.is_cancelled() || frame.current_data().is_none() {
+                                    return Err(refused());
+                                }
+                                require()
+                            },
                         )
-                    },
-                    || {
-                        if session.signal.is_cancelled() || frame.current_data().is_none() {
-                            return Err(refused());
-                        }
-                        governed.require_current(store, &self.source)?;
-                        Ok(())
                     },
                 )
             })
@@ -408,6 +416,11 @@ impl NativeTextColdFounderSource {
         let Some(original) = response.open(access, session).map_err(|_| refused())? else {
             return Ok(NativeTextFounderFrameOutcome::Unresolved);
         };
+        let retired = self
+            .governed
+            .as_ref()
+            .ok_or_else(refused)?
+            .retired_member_history()?;
         let ledger = self
             .received
             .as_mut()
@@ -422,7 +435,7 @@ impl NativeTextColdFounderSource {
         let status = work.with_recovered_founder_store(selection, source, |store| {
             project_founder_member(
                 &original,
-                verifier,
+                (verifier, retired),
                 &mut ledger.ledger,
                 &ledger.view,
                 (store, scope, admit_mutation),
@@ -472,26 +485,32 @@ impl NativeTextColdFounderSource {
         let archived = self
             .work
             .with_recovered_founder_store(&self.selection, &self.source, |store| {
-                archive_founder_member(
-                    (store, scope),
-                    &original,
-                    &ledger.ledger,
-                    rng,
-                    |dependency, rng| {
-                        let context = history::outbox_context(&self.selection, &self.source);
-                        history::saved_dependency(
-                            store,
-                            context,
-                            &self.source,
-                            scope,
-                            dependency,
+                governed.with_checked_member_parts(
+                    store,
+                    &self.source,
+                    |verifier, _, _, require| {
+                        archive_founder_member(
+                            (store, scope),
+                            &original,
+                            (&ledger.ledger, verifier),
                             rng,
+                            |dependency, rng| {
+                                let context =
+                                    history::outbox_context(&self.selection, &self.source);
+                                history::saved_dependency(
+                                    store,
+                                    context,
+                                    &self.source,
+                                    scope,
+                                    dependency,
+                                    rng,
+                                )
+                            },
+                            || {
+                                require_response()?;
+                                require()
+                            },
                         )
-                    },
-                    || {
-                        require_response()?;
-                        governed.require_current(store, &self.source)?;
-                        Ok(())
                     },
                 )
             })

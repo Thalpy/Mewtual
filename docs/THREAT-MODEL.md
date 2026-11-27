@@ -38,6 +38,16 @@ releasing the associated in-memory debt. An unknown write remains fenced.
 A crash before an authenticated write exists still requires redelivery.
 [Discovery contract](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
 
+A current author can reference a verified and locally selected retired
+original as a reply parent. Incoming current originals can use the same
+locally selected evidence for older causal dependencies. Native and Core
+bind that evidence to the exact signed bytes and frozen original
+Admission. It grants no current author or mutation-target authority.
+An unrelated complete, authenticated WAL can permit an exact local
+ancestor read while peer and audit reads still refuse. An ambiguous or
+same-original WAL defers the local read. Local verification cannot make
+an unproven late post from a removed member eligible for delivery.
+
 A holder's archive page exposes eligible IDs to a reciprocally approved
 peer on the original authenticated connection. Its continuation gives no
 raw offset, author ID or unoffered ActionId. The cursor is replayable on
