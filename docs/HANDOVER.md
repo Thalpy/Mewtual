@@ -55,8 +55,19 @@ native lock generation. It retains the original physical owner until
 close drains its readers. The renderer opens a recovery screen without
 loading or saving the ordinary chat screen state.
 
-The renderer rejoin command and replacement transition still need to
-use this restricted session. Chat V2 remains disabled.
+## Read all selected revisions of a saved message
+
+A message read takes one complete target snapshot and opens the exact
+selected originals. It can replay beyond the 64-entry hot receive limit.
+The worker charges each original before retaining it and keeps the
+archive observation through final publication. A later selected Delete
+makes an earlier view unusable. History and audit pages keep their
+existing limits.
+
+The real Windows TCP fixture selects 65 sibling edits and then deletes
+the original. It checks the selected text and rejects the earlier
+publication after the delete. Total on-disk retention, deep per-action
+writer ancestry and worst-case replay latency remain open.
 
 ## Continue receiving when a paid history cache fills
 

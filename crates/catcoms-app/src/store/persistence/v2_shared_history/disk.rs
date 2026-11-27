@@ -257,13 +257,58 @@ impl SharedHistoryDisk {
         session: &VaultSessionGuard,
         payment: CatalogReadReservation,
     ) -> Result<SharedHistoryActionPage, AppError> {
-        payment.validate(&self.pool, DISK_FEE)?;
-        self.require_key(key)?;
         if !(1..=MAX_ACTIONS_PER_PAGE).contains(&query.limit) {
             return Err(refused());
         }
+        let (actions, observation) = self.scan_actions(key, query.target, session, &payment)?;
+        let start = query.after.map_or(0, |cursor| {
+            actions.partition_point(|action| *action <= cursor)
+        });
+        let remaining = &actions[start..];
+        Ok(SharedHistoryActionPage {
+            actions: remaining.iter().take(query.limit).copied().collect(),
+            more: remaining.len() > query.limit,
+            observation,
+            _payment: payment,
+        })
+    }
+
+    /// Select every revision for one target in a single authenticated scan.
+    /// The working reader must still open each exact original. No change to
+    /// the cursor grammar or page-size limit for IPC or network consumers.
+    pub(in crate::store::persistence) fn target_snapshot(
+        &self,
+        key: &[u8; 32],
+        create: ActionId,
+        session: &VaultSessionGuard,
+        payment: CatalogReadReservation,
+    ) -> Result<SharedHistoryTargetSnapshot, AppError> {
+        let retained = self
+            .pool
+            .try_reserve(self.quota.records * std::mem::size_of::<ActionId>() + 4096)
+            .map_err(|_| AppError::ChatV2ArchiveBusy)?;
+        let (actions, observation) = self.scan_actions(key, Some(create), session, &payment)?;
+        Ok(SharedHistoryTargetSnapshot {
+            actions,
+            observation,
+            _fee: retained,
+        })
+    }
+
+    fn scan_actions(
+        &self,
+        key: &[u8; 32],
+        target: Option<ActionId>,
+        session: &VaultSessionGuard,
+        payment: &CatalogReadReservation,
+    ) -> Result<(Vec<ActionId>, SharedHistoryObservation), AppError> {
+        payment.validate(&self.pool, DISK_FEE)?;
+        self.require_key(key)?;
         let _lease = session.retain_for_physical_work();
-        let gate = self.gate.try_lock().map_err(|_| refused())?;
+        let gate = self.gate.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => AppError::ChatV2ArchiveBusy,
+            std::sync::TryLockError::Poisoned(_) => refused(),
+        })?;
         let maximum = 2 * self.quota.records;
         let names = bounded_entries(&self.directory, maximum)?;
         if names.len() > maximum {
@@ -291,7 +336,7 @@ impl SharedHistoryDisk {
                     if path != self.selector_path(key, record.action) {
                         return Err(refused());
                     }
-                    let target = match selected.target {
+                    let selected_target = match selected.target {
                         Some(target) => target,
                         None => {
                             let (_, original) = self.open_selected_bundle(key, &selected)?;
@@ -299,7 +344,7 @@ impl SharedHistoryDisk {
                         }
                     };
                     require_exact_held(&path, &mut (file, identity), &raw)?;
-                    if target == query.target.unwrap_or(record.action) {
+                    if selected_target == target.unwrap_or(record.action) {
                         actions.push(record.action);
                     }
                     selected_bundles.push(record.manifest);
@@ -315,19 +360,13 @@ impl SharedHistoryDisk {
         }
         self.directory.require()?;
         actions.sort_unstable();
-        let start = query.after.map_or(0, |cursor| {
-            actions.partition_point(|action| *action <= cursor)
-        });
-        let remaining = &actions[start..];
-        Ok(SharedHistoryActionPage {
-            actions: remaining.iter().take(query.limit).copied().collect(),
-            more: remaining.len() > query.limit,
-            observation: SharedHistoryObservation {
+        Ok((
+            actions,
+            SharedHistoryObservation {
                 gate: Arc::downgrade(&self.gate),
                 revision: *gate,
             },
-            _payment: payment,
-        })
+        ))
     }
 
     /// Open the exact originals in one selected page. No WAL recovery and
@@ -662,6 +701,12 @@ pub(in crate::store) struct SharedHistoryActionPage {
     pub(in crate::store) more: bool,
     pub(in crate::store) observation: SharedHistoryObservation,
     _payment: CatalogReadReservation,
+}
+
+pub(in crate::store) struct SharedHistoryTargetSnapshot {
+    pub(in crate::store) actions: Vec<ActionId>,
+    pub(in crate::store) observation: SharedHistoryObservation,
+    _fee: CatalogReadReservation,
 }
 
 /// Owned, paid data from one selected archive snapshot. The continuation is

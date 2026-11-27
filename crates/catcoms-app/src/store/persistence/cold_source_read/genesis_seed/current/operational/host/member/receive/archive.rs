@@ -6,7 +6,8 @@ use crate::store::persistence::v2_member_transport::{
     archive_founder_member, FounderArchivedMessage,
 };
 use crate::store::persistence::v2_shared_history::{
-    SharedHistoryActionPage, SharedHistoryProjectionLease, SharedHistoryReplay, SharedHistoryScope,
+    SharedHistoryActionPage, SharedHistoryProjectionLease, SharedHistoryReplay,
+    SharedHistoryReplayCredit, SharedHistoryScope, ARCHIVED_LEDGER_LIMITS,
     ARCHIVED_PROJECTION_WORK,
 };
 use catcoms_sync::owner_v2::SelectedV2MemberEnvelope;
@@ -119,14 +120,9 @@ impl<'a> FounderHistory<'a> {
         let fee = pool.try_reserve(LEDGER_FEE).map_err(|_| Refusal::Busy)?;
         let realm =
             Realm::new(&self.scope.group, self.scope.channel).map_err(|_| Refusal::Failed)?;
-        let mut ledger = ChatLedger::new(
-            realm,
-            LedgerLimits {
-                max_actions: ACTION_LIMIT,
-                max_action_bytes: ACTION_BYTES,
-            },
-        )
-        .map_err(|_| Refusal::Failed)?;
+        let mut replay = SharedHistoryReplayCredit::default();
+        let mut ledger =
+            ChatLedger::new(realm, ARCHIVED_LEDGER_LIMITS).map_err(|_| Refusal::Failed)?;
         let mut view = domain
             .begin_archive_channel_view(&mut ledger)
             .map_err(|_| Refusal::Unavailable)?;
@@ -144,7 +140,7 @@ impl<'a> FounderHistory<'a> {
             verifier: self.verifier,
             caller: &signal,
         }
-        .replay_message(&mut ledger, &view, create, retired, |action| {
+        .replay_message(&mut ledger, &view, create, retired, &mut replay, |action| {
             self.saved(&mount, &key, action, rng)
         })?;
         let Some(selected) = selected else {
@@ -165,6 +161,7 @@ impl<'a> FounderHistory<'a> {
                 _ledger: ledger,
                 _invocation: None,
                 _fee: fee,
+                _replay: replay,
             }),
             fee: projection_fee,
         }))

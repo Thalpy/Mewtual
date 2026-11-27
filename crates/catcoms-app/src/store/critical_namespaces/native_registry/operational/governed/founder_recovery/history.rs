@@ -4,19 +4,17 @@ use crate::store::persistence::v2_member_outbox::{
     member_outbox_key, MemberHistoryPage, MemberHistoryRead, MemberOutboxContextData,
     MemberOutboxContextSpec, MemberRequestData, MemberRequestToken, MemberSavedOriginal,
 };
-use crate::store::persistence::v2_member_transport::{
-    FOUNDER_RECEIVE_ACTIONS as ACTION_LIMIT, FOUNDER_RECEIVE_BYTES as ACTION_BYTES,
-    FOUNDER_RECEIVE_LEDGER_FEE as LEDGER_FEE,
-};
+use crate::store::persistence::v2_member_transport::FOUNDER_RECEIVE_LEDGER_FEE as LEDGER_FEE;
 use crate::store::persistence::v2_shared_history::{
     SharedHistoryActionQuery, SharedHistoryProjectionLease, SharedHistoryReplay,
-    SharedHistoryScope, ARCHIVED_PROJECTION_WORK,
+    SharedHistoryReplayCredit, SharedHistoryScope, ARCHIVED_LEDGER_LIMITS,
+    ARCHIVED_PROJECTION_WORK,
 };
 use crate::store::{
     NativeTextFounderAudit, NativeTextJoinedArchivedActions, NativeTextJoinedMemberProjection,
     ServerStore, V2MemberSaveRefusal, V2MemberSignRequest,
 };
-use catcoms_replication::chat::{ActionId, ChatLedger, LedgerLimits, Realm, MAX_ACTION_BYTES};
+use catcoms_replication::chat::{ActionId, ChatLedger, Realm, MAX_ACTION_BYTES};
 
 impl NativeTextColdFounderSource {
     pub(in crate::store::critical_namespaces::native_registry) fn selected_history_audit(
@@ -257,19 +255,16 @@ impl NativeTextColdFounderSource {
                         .ok_or_else(refused)?
                         .pending
                         .pool;
-                    let fee = pool.try_reserve(LEDGER_FEE)?;
+                    let fee = pool
+                        .try_reserve(LEDGER_FEE)
+                        .map_err(|_| AppError::ChatV2ArchiveBusy)?;
                     let (_, observation) =
                         sdk.prepare_member_topic(verifier, channel, store.chat_mount.observer())?;
                     let signal = observation.constrain(caller.clone());
                     let realm = Realm::new(&scope.group, channel).map_err(|_| refused())?;
-                    let mut ledger = ChatLedger::new(
-                        realm,
-                        LedgerLimits {
-                            max_actions: ACTION_LIMIT,
-                            max_action_bytes: ACTION_BYTES,
-                        },
-                    )
-                    .map_err(|_| refused())?;
+                    let mut replay = SharedHistoryReplayCredit::default();
+                    let mut ledger =
+                        ChatLedger::new(realm, ARCHIVED_LEDGER_LIMITS).map_err(|_| refused())?;
                     let mut view = ledger
                         .begin_local_archive_projection_view_in(group_view)
                         .map_err(|_| refused())?;
@@ -282,14 +277,19 @@ impl NativeTextColdFounderSource {
                         verifier,
                         caller: &signal,
                     }
-                    .replay_message(&mut ledger, &view, create, retired, |id| {
+                    .replay_message(&mut ledger, &view, create, retired, &mut replay, |id| {
                         saved_dependency(store, self.outbox_context(), original, scope, id, rng)
                     })
-                    .map_err(|_| refused())?;
+                    .map_err(|error| match error {
+                        V2MemberSaveRefusal::Busy => AppError::ChatV2ArchiveBusy,
+                        _ => refused(),
+                    })?;
                     let Some(selected) = original else {
                         return Ok((true, None));
                     };
-                    let projection_fee = pool.try_reserve(2 * MAX_ACTION_BYTES + 32 * 1024)?;
+                    let projection_fee = pool
+                        .try_reserve(2 * MAX_ACTION_BYTES + 32 * 1024)
+                        .map_err(|_| AppError::ChatV2ArchiveBusy)?;
                     let projection = ledger
                         .guarded_projection(create, ARCHIVED_PROJECTION_WORK)
                         .map_err(|_| refused())?;
@@ -305,6 +305,7 @@ impl NativeTextColdFounderSource {
                                 _ledger: ledger,
                                 _invocation: None,
                                 _fee: fee,
+                                _replay: replay,
                             }),
                         )),
                     ))

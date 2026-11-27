@@ -568,7 +568,7 @@ pub(in crate::store) fn replay_local_member_dependencies(
 
 /// A depth-first stack holds at most one visit or retry per ActionId. Move a
 /// queued visit ahead of the child that needs it without duplicating dense DAGs.
-pub(super) struct LocalDependencyStack(pub(super) Vec<(ActionId, bool)>);
+pub(super) struct LocalDependencyStack(pub(super) Vec<(ActionId, bool)>, usize);
 
 impl LocalDependencyStack {
     pub(super) fn new(roots: &[ActionId]) -> Self {
@@ -578,7 +578,16 @@ impl LocalDependencyStack {
                 pending.push((root, false));
             }
         }
-        Self(pending)
+        Self(pending, HISTORY_PENDING_IDS)
+    }
+
+    pub(super) fn exact_sorted(roots: &[ActionId], limit: usize) -> Result<Self, Refusal> {
+        if roots.len() > limit || roots.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(Refusal::Failed);
+        }
+        let mut pending = Vec::with_capacity(limit);
+        pending.extend(roots.iter().rev().map(|&id| (id, false)));
+        Ok(Self(pending, limit))
     }
 
     pub(super) fn descend(
@@ -601,7 +610,7 @@ impl LocalDependencyStack {
                     && !self.0.iter().any(|(id, _)| id == parent)
             })
             .count();
-        if self.0.len() + 1 + new_visits > HISTORY_PENDING_IDS {
+        if self.0.len() + 1 + new_visits > self.1 {
             return Err(Refusal::Unavailable);
         }
         self.0.push((child, true));
