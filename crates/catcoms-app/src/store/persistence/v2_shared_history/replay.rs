@@ -3,6 +3,7 @@ use super::disk::SharedHistoryObservation;
 use super::{SharedHistoryActionQuery, SharedHistoryScope};
 use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
 use crate::store::persistence::v2_member_outbox::MemberSavedOriginal;
+use crate::store::persistence::v2_member_transport::LocalDependencyStack;
 use crate::store::{ServerStore, V2MemberSaveRefusal};
 use crate::AppError;
 use catcoms_replication::chat::{
@@ -10,7 +11,6 @@ use catcoms_replication::chat::{
     V2LocalArchiveOriginal, V2OrdinaryReceiveStatus, MAX_PARENTS,
 };
 use catcoms_rt::RequestCancellation;
-use std::collections::BTreeSet;
 
 const ACTION_LIMIT: usize = 64;
 const LEDGER_WORK: usize = 4 * ACTION_LIMIT + MAX_PARENTS;
@@ -94,17 +94,18 @@ impl SharedHistoryReplay<'_> {
         let retired = retired.iter().collect::<Vec<_>>();
         drop(page);
 
-        let mut pending: Vec<_> = roots.iter().rev().copied().collect();
-        let mut waiting = BTreeSet::new();
-        let mut work = 2 * ACTION_LIMIT;
-        while let Some(action) = pending.pop() {
+        let mut pending = LocalDependencyStack::new(&roots);
+        let mut reads = 2 * ACTION_LIMIT;
+        while let Some((action, retry)) = pending.0.pop() {
             if self.caller.is_cancelled() {
                 return Err(Refusal::Cancelled);
             }
-            work = work.checked_sub(1).ok_or(Refusal::Failed)?;
             if ledger.state(action) == Some(ActionState::Valid) {
                 continue;
             }
+            // One charged read per visit or retry. A duplicate queued parent
+            // must not spend the work needed to verify a selected revision.
+            reads = reads.checked_sub(1).ok_or(Refusal::Unavailable)?;
             let archived = self
                 .store
                 .read_selected_shared_history_record(self.scope, action)
@@ -147,11 +148,12 @@ impl SharedHistoryReplay<'_> {
                 V2OrdinaryReceiveStatus::Retained(ActionState::Valid) => {}
                 V2OrdinaryReceiveStatus::Retained(_) => return Err(Refusal::Failed),
                 V2OrdinaryReceiveStatus::WaitingForDependencies(missing) => {
-                    if !waiting.insert(action) || pending.len() + missing.len() + 1 > work {
-                        return Err(Refusal::Failed);
+                    if retry {
+                        return Err(Refusal::Unavailable);
                     }
-                    pending.push(action);
-                    pending.extend(missing.into_iter().rev());
+                    pending.descend(action, &missing, |parent| {
+                        ledger.state(parent) == Some(ActionState::Valid)
+                    })?;
                 }
             }
         }

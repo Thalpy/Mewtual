@@ -108,6 +108,11 @@ fn mounted_history_discovers_disconnected_originals_and_covers_their_archive() {
 }
 
 #[test]
+fn mounted_archive_renders_dense_selected_revisions_and_invalidates_on_delete() {
+    run_mounted_successor(MountedSuccessor::DenseArchive);
+}
+
+#[test]
 fn mounted_native_remove_retires_the_exact_joined_row_and_preserves_the_survivor() {
     run_mounted_successor(MountedSuccessor::Remove);
 }
@@ -134,6 +139,7 @@ enum MountedSuccessor {
     OfflineDelivery,
     MissedHistory,
     Remove,
+    DenseArchive,
 }
 
 #[test]
@@ -425,6 +431,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         (false, Some(MountedSuccessor::OfflineDelivery)) => 0xe780,
         (false, Some(MountedSuccessor::Remove)) => 0xe790,
         (false, Some(MountedSuccessor::MissedHistory)) => 0xe7a0,
+        (false, Some(MountedSuccessor::DenseArchive)) => 0xe7c0,
     };
     let founder_dir = tempfile::tempdir().unwrap();
     let (founder, founder_budget) = selected_joined(founder_dir.path());
@@ -1118,6 +1125,139 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 .unwrap(),
             1
         );
+        if successor == Some(MountedSuccessor::DenseArchive) {
+            use catcoms_replication::chat::GuardedProjection;
+            // Keep one stable MLS epoch and select every signed revision on
+            // the remote founder's archive. Each edit names all earlier heads.
+            let mut parents = vec![reply_id];
+            let first = inspect()
+                .read_member_dependency(&view, channel, reply_id, &fresh, &mut rng)
+                .unwrap()
+                .unwrap();
+            let mut signed = vec![(first.action().clone(), first.receipt().admission)];
+            drop(first);
+            let mut previous = None;
+            for count in 1..=24_u8 {
+                let body = if count == 24 {
+                    Body::Delete { create: reply_id }
+                } else {
+                    Body::Edit {
+                        create: reply_id,
+                        text: format!("dense revision {count}"),
+                    }
+                };
+                let dependencies: Vec<_> = signed
+                    .iter()
+                    .map(|(action, admission)| crate::store::V2MemberDependency {
+                        action,
+                        admission: *admission,
+                    })
+                    .collect();
+                let mut token = [0x80; 32];
+                token[0] = count;
+                let draft = V2MemberSignRequest {
+                    token,
+                    channel,
+                    body: &body,
+                    parents: &parents,
+                    dependencies: &dependencies,
+                };
+                assert_eq!(
+                    inspect()
+                        .prepare_member_save(
+                            &view,
+                            V2MemberSignRequest { ..draft },
+                            &fresh,
+                            &mut rng
+                        )
+                        .unwrap_or_else(|error| panic!(
+                            "signed revision {count} was refused: {error:?}"
+                        )),
+                    V2MemberSaveOutcome::Ready
+                );
+                let mut prepared = Some(
+                    inspect()
+                        .finish_member_admission(view.clone(), draft.token, &fresh)
+                        .unwrap(),
+                );
+                let job = NativeTextJoinedMemberFinalPreparation::try_admit_member_save(
+                    &mut prepared,
+                    &fresh,
+                    MemberSaveNativeAdmission::new((), fresh.clone()),
+                )
+                .unwrap();
+                assert_eq!(job.run(), MemberSaveJobReport::SavedLocal);
+                let (action, ordinal) = inspect()
+                    .lookup_saved_member(&view, &draft, &fresh, &mut rng)
+                    .unwrap()
+                    .unwrap();
+                let publication = inspect()
+                    .prepare_member_publication(&view, fresh.clone(), &mut rng)
+                    .unwrap()
+                    .unwrap();
+                let completed = publication.submit().await.unwrap().unwrap();
+                tokio::time::timeout(Duration::from_secs(12), async {
+                    while let Some(event) = founder_receiver.next().await {
+                        let NativeChatMemberGossipEvent::Frame(frame) = event else {
+                            continue;
+                        };
+                        let received = founder_capture()
+                            .receive_founder_member(
+                                &founder_receiver,
+                                &frame,
+                                &TestArchiveAdmission,
+                            )
+                            .unwrap()
+                            .unwrap();
+                        if received.action == action {
+                            assert_eq!(received.projection_target, reply_id);
+                            assert_eq!(received.archived, Some(true));
+                            return;
+                        }
+                    }
+                    panic!("the dense revision did not reach the current founder");
+                })
+                .await
+                .unwrap();
+                assert_eq!(
+                    inspect()
+                        .checkpoint_member_publication(completed, &fresh, &mut rng)
+                        .unwrap(),
+                    ordinal + 1,
+                );
+                if count >= 23 {
+                    let next = founder_capture()
+                        .archived_founder_message_projection(channel, reply_id, &fresh)
+                        .expect("the complete selected archive fits the existing bounds")
+                        .unwrap();
+                    if count == 23 {
+                        assert!(next
+                            .with_publication(|view| matches!(
+                                view, GuardedProjection::Visible { selected, text, .. }
+                                    if *selected == action && text == "dense revision 23"
+                            ))
+                            .unwrap());
+                        previous = Some(next);
+                    } else {
+                        assert!(previous.take().unwrap().with_publication(|_| ()).is_err());
+                        assert!(next
+                            .with_publication(|view| matches!(
+                                view, GuardedProjection::Deleted { create, delete, .. }
+                                    if *create == reply_id && *delete == action
+                            ))
+                            .unwrap());
+                    }
+                }
+                let saved = inspect()
+                    .read_member_dependency(&view, channel, action, &fresh, &mut rng)
+                    .unwrap()
+                    .unwrap();
+                signed.push((saved.action().clone(), saved.receipt().admission));
+                parents.push(action);
+                parents.sort_unstable();
+            }
+            return;
+        }
         drop((founder_receiver, projected, parent_projection));
         assert!(founder_capture()
             .read_founder_member_projection(channel, reply_id, &fresh)
