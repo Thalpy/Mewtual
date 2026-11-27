@@ -14,12 +14,13 @@ use catcoms_wire::{Decoder, Encoder};
 
 mod received;
 pub use received::{
-    NativeTextRejoinOutcomeReceipt, NativeTextRejoinPrefixReceipt, NativeTextRejoinReceivedReceipt,
-    NativeTextRejoinWelcomeStatus,
+    NativeTextRejoinIndexReceipt, NativeTextRejoinOutcomeReceipt, NativeTextRejoinPrefixReceipt,
+    NativeTextRejoinReceivedReceipt, NativeTextRejoinWelcomeStatus,
 };
 pub(in crate::store) use received::{
-    RejoinPrefixInputs, RejoinPrefixOwner, RejoinReceivedInput, RejoinReceivedOwner,
-    RejoinWelcomeKeyEntry, RejoinWelcomeOwner, RejoinWelcomeOwners,
+    RejoinIndexInputs, RejoinIndexOwner, RejoinIndexRecovery, RejoinPrefixInputs,
+    RejoinPrefixOwner, RejoinReceivedInput, RejoinReceivedOwner, RejoinWelcomeKeyEntry,
+    RejoinWelcomeOwner, RejoinWelcomeOwners,
 };
 
 const ATTEMPT: &str = "chat-critical-namespaces.rejoin-attempt.bin";
@@ -176,10 +177,29 @@ fn open_pending(
     limits: DirectJoinLimits,
     frame: &[u8],
 ) -> Result<OpenedPending, AppError> {
+    let (recovered, sealed, transport) =
+        open_pending_contents(binding.context, invite, key, limits, frame)?;
+    validate_opened_pending(binding, invite, recovered, sealed, transport)
+}
+
+fn open_pending_contents(
+    context: V2PendingJoinContextData,
+    invite: &NativeTextInvitePacketData<'_>,
+    key: &[u8; 32],
+    limits: DirectJoinLimits,
+    frame: &[u8],
+) -> Result<
+    (
+        RecoveredV2PendingJoinSource,
+        SealedV2PendingJoinSource,
+        JoinedTransportReservation,
+    ),
+    AppError,
+> {
     let plain = open_frame(key, PENDING_PURPOSE, frame)?;
     let mut decoded = Decoder::new(&plain);
     let malformed = |_| denied();
-    if decoded.get_bytes().map_err(malformed)? != binding.context.original_pending {
+    if decoded.get_bytes().map_err(malformed)? != context.original_pending {
         return Err(denied());
     }
     let seed = decoded
@@ -199,15 +219,24 @@ fn open_pending(
     }
     decoded.finish().map_err(malformed)?;
     let transport = JoinedTransportReservation::new(Zeroizing::new(seed), port)?;
-    if transport.identity_data()?.0 == binding.previous.transport.0 {
-        return Err(denied());
-    }
     let sealed =
         SealedV2PendingJoinSource::from_encrypted_parts(nonce, ciphertext).map_err(|_| denied())?;
     let recovered =
-        RecoveredV2PendingJoinSource::open(&sealed, key, binding.context, invite.binding(), limits)
+        RecoveredV2PendingJoinSource::open(&sealed, key, context, invite.binding(), limits)
             .map_err(|_| denied())?;
-    if recovered.rejoin_remove_data() != Some(binding.removal) {
+    Ok((recovered, sealed, transport))
+}
+
+fn validate_opened_pending(
+    binding: &Binding,
+    invite: &NativeTextInvitePacketData<'_>,
+    recovered: RecoveredV2PendingJoinSource,
+    sealed: SealedV2PendingJoinSource,
+    transport: JoinedTransportReservation,
+) -> Result<OpenedPending, AppError> {
+    if transport.identity_data()?.0 == binding.previous.transport.0
+        || recovered.rejoin_remove_data() != Some(binding.removal)
+    {
         return Err(denied());
     }
     Ok(OpenedPending {
@@ -365,7 +394,106 @@ fn require_held_rejoin_files(
     Ok(())
 }
 
+// The encrypted attempt is only a locator. Recover the invocation
+// from the exact signed Pending, then recompute the binding under the
+// selected A1 and ID9 before exposing any recovered input to the writer.
+fn decode_saved_attempt(
+    attempt: &[u8],
+) -> Result<([u8; 32], NativeTextInvitePacketData<'_>), AppError> {
+    let mut encoded = Decoder::new(attempt);
+    let fingerprint = encoded
+        .get_bytes()
+        .map_err(|_| denied())?
+        .try_into()
+        .map_err(|_| denied())?;
+    let invite = NativeTextInvitePacketData::decode(encoded.get_bytes().map_err(|_| denied())?)
+        .map_err(|_| denied())?;
+    encoded.finish().map_err(|_| denied())?;
+    Ok((fingerprint, invite))
+}
+
 impl ServerStore {
+    fn recover_saved_rejoin_intent(
+        &self,
+        inventory: &UpgradeInventory,
+        (registration, removal): (NativeTextJoinedRegistrationData, SelectedRejoinRemoval),
+        slot: &mut Option<RejoinPendingOwner>,
+    ) -> Result<(Zeroizing<Vec<u8>>, [u8; 32]), AppError> {
+        let catalog = self.cover_selected_rejoin_catalog(registration, removal, inventory)?;
+        let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        let pool = &policy.current.archive.pending.pool;
+        let key = Zeroizing::new(self.keys.db_key()?);
+        let attempt_path = fixed(self, false, ATTEMPT)?;
+        let pending_path = fixed(self, false, PENDING)?;
+        let paths = [attempt_path.as_path(), pending_path.as_path()];
+        let limits = pending_limits()?;
+        if let Some(owner) = slot.as_ref() {
+            owner.invoice().validate(pool, WORK_BYTES)?;
+            let binding = match owner {
+                RejoinPendingOwner::Warm(warm) => warm.binding,
+                RejoinPendingOwner::Cold(cold) => cold.binding,
+            };
+            let files = owner.files(&binding)?;
+            require_held_rejoin_files(paths, files)?;
+            let attempt = open_frame(&key, ATTEMPT_PURPOSE, files[0].1)?;
+            let (_, invite) = decode_saved_attempt(&attempt)?;
+            if Binding::new(catalog, registration, removal, &invite, binding.token)? != binding {
+                return Err(denied());
+            }
+            self.open_covered_rejoin_files(
+                inventory,
+                &binding,
+                (&key, &invite, limits),
+                paths,
+                files,
+            )?;
+            return Ok((attempt, binding.token));
+        }
+
+        let fee = pool.try_reserve(WORK_BYTES)?;
+        let (attempt, pending) = existing_rejoin_files(paths[0], paths[1])?.ok_or_else(denied)?;
+        let files = [
+            (&attempt.0, attempt.1.as_slice()),
+            (&pending.0, pending.1.as_slice()),
+        ];
+        require_held_rejoin_files(paths, files)?;
+        let plain = open_frame(&key, ATTEMPT_PURPOSE, files[0].1)?;
+        let (original_pending, invite) = decode_saved_attempt(&plain)?;
+        let context = V2PendingJoinContextData {
+            original_pending,
+            ..registration.context
+        };
+        let (source, sealed, transport) =
+            open_pending_contents(context, &invite, &key, limits, files[1].1)?;
+        let signed =
+            V2JoinRequestPacketData::decode(source.request_bytes_data()).map_err(|_| denied())?;
+        let token = signed.founder_add_data().request.spec_data().request_token;
+        let binding = Binding::new(catalog, registration, removal, &invite, token)?;
+        if binding.context != context || plain != attempt_plain(&binding, &invite)? {
+            return Err(denied());
+        }
+        drop(validate_opened_pending(
+            &binding, &invite, source, sealed, transport,
+        )?);
+        for (path, (file, frame)) in paths.into_iter().zip(files) {
+            cover_existing(path, file, frame)?;
+        }
+        inventory.sync_rejoin_catalog_parent(self)?;
+        require_held_rejoin_files(paths, files)?;
+        self.require_recovered_joined_removal(registration, removal)?;
+        absent(&fixed(self, false, REJOIN_STAGE)?)?;
+        inventory.require(self)?;
+        *slot = Some(RejoinPendingOwner::Cold(Box::new(ColdRejoinPending {
+            cookie: std::sync::Arc::new(()),
+            binding,
+            attempt,
+            pending,
+            _lease: self._session.retain_for_physical_work(),
+            fee,
+        })));
+        Ok((plain, token))
+    }
+
     fn open_covered_rejoin_files(
         &self,
         inventory: &UpgradeInventory,

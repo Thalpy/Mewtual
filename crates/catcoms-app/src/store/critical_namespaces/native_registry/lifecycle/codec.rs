@@ -9,7 +9,6 @@ use catcoms_wire::{Decoder, Encoder};
 use zeroize::Zeroizing;
 
 const TAG: &[u8] = b"catcoms/private-native-backend-index/v3\0";
-#[cfg(test)]
 const REJOIN_INDEX_FORMAT: u16 = 4;
 const MAX_FOUNDER_BINDING: usize = 6 * 36 + 4 + 256;
 const MAX_JOINED_BINDING: usize = 10 * 36 + 4 + 256 + 8;
@@ -184,7 +183,6 @@ impl Index {
         self.lengths_validated_data().map(|(_, reserved)| reserved)
     }
 
-    #[cfg(test)]
     pub(super) fn rejoin_encoded_length(&self) -> Result<usize, AppError> {
         self.validate_data_in(true)?;
         self.lengths_validated_data().map(|(encoded, _)| encoded)
@@ -284,9 +282,8 @@ impl Index {
         self.encode_validated(self.encoded_length()?, INDEX_FORMAT)
     }
 
-    /// Test the new physical discriminator before a mounted ID9 owner is
-    /// implemented. The ordinary Index3 path still has exactly one grammar.
-    #[cfg(test)]
+    /// Used only by the checked ID9 rejoin owner. The ordinary Index3
+    /// opener continues to reject this version.
     pub(super) fn encode_rejoin_data(&self) -> Result<Zeroizing<Vec<u8>>, AppError> {
         self.encode_validated(self.rejoin_encoded_length()?, REJOIN_INDEX_FORMAT)
     }
@@ -398,7 +395,6 @@ impl Index {
         Self::decode_for_reader(raw, expected, INDEX_FORMAT, Self::encoded_length)
     }
 
-    #[cfg(test)]
     pub(super) fn decode_rejoin_data(raw: &[u8], expected: Capability) -> Result<Self, AppError> {
         Self::decode_for_reader(
             raw,

@@ -529,6 +529,44 @@ impl Physical {
         })
     }
 
+    pub(super) fn cover_rejoin_index(
+        &self,
+        original: (
+            crate::store::NativeTextJoinedRegistrationData,
+            catcoms_sync::SelectedRejoinRemoval,
+        ),
+        sources: RejoinIndexInputs<'_>,
+        invite: (&crate::store::NativeTextInvitePacketData<'_>, [u8; 32]),
+        rng: &mut impl CryptoRngCore,
+        require_current: impl Fn() -> Result<(), AppError>,
+    ) -> Result<crate::store::NativeTextRejoinIndexReceipt, AppError> {
+        if !self.rejoin_catalog_selected()? {
+            return Err(refused());
+        }
+        self.with_registered_native_join_inventory(original.0, |store, inventory| {
+            store.cover_rejoin_index(inventory, original, sources, invite, rng, require_current)
+        })
+    }
+
+    pub(super) fn recover_rejoin_index(
+        &self,
+        original: (
+            crate::store::NativeTextJoinedRegistrationData,
+            catcoms_sync::SelectedRejoinRemoval,
+        ),
+        sources: RejoinIndexRecovery<'_>,
+        caller: &catcoms_rt::RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+        require_current: impl Fn() -> Result<(), AppError>,
+    ) -> Result<crate::store::NativeTextRejoinIndexReceipt, AppError> {
+        if !self.rejoin_catalog_selected()? {
+            return Err(refused());
+        }
+        self.with_registered_native_join_inventory(original.0, |store, inventory| {
+            store.recover_rejoin_index(inventory, original, sources, caller, rng, require_current)
+        })
+    }
+
     fn with_registered_native_join<T>(
         &self,
         data: crate::store::NativeTextJoinedRegistrationData,

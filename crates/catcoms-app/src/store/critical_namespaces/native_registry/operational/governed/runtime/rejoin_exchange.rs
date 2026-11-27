@@ -6,8 +6,8 @@ use crate::store::persistence::governance_layout::joined::rejoin::{
     PreparedRejoinTransport, RejoinReceivedInput, RejoinWelcomeKeyEntry,
 };
 use crate::store::{
-    NativeTextInvitePacketData, NativeTextRejoinPendingReceipt, NativeTextRejoinPrefixReceipt,
-    NativeTextRejoinReceivedReceipt, NativeTextRejoinWelcomeStatus,
+    NativeTextInvitePacketData, NativeTextRejoinIndexReceipt, NativeTextRejoinPendingReceipt,
+    NativeTextRejoinPrefixReceipt, NativeTextRejoinReceivedReceipt, NativeTextRejoinWelcomeStatus,
 };
 use catcoms_rt::{Clock, PeerId, RequestAuthority, SystemClock};
 
@@ -251,6 +251,80 @@ impl NativeTextRemovedJoinedVault {
                 (self.registration, self.removal),
                 (pending, received, welcome, &mut self.rejoin_prefix),
                 invite,
+                rng,
+                require,
+            )
+            .map(Some)
+    }
+
+    /// Cover one replacement registry selection. The former member stays
+    /// retired, and the receipt alone cannot start an operational source.
+    pub fn cover_rejoin_index(
+        &mut self,
+        ui: &UiCapture,
+        invite: (&NativeTextInvitePacketData<'_>, [u8; 32]),
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<NativeTextRejoinIndexReceipt>, AppError> {
+        if !self.tcp_drain.is_drained() {
+            return Ok(None);
+        }
+        self.ui.require_capture(ui)?;
+        let authority = &self.ui;
+        let require = || {
+            if caller.is_cancelled() || !authority.is_current_cached(ui) {
+                return Err(refused());
+            }
+            Ok(())
+        };
+        let pending = self.rejoin_pending.as_ref().ok_or_else(refused)?;
+        let received = self.rejoin_received.as_ref().ok_or_else(refused)?;
+        let welcome = self.rejoin_welcome.as_deref_mut().ok_or_else(refused)?;
+        self.index
+            .cover_rejoin_index(
+                (self.registration, self.removal),
+                (
+                    (pending, received, welcome, &mut self.rejoin_prefix),
+                    &mut self.rejoin_index,
+                ),
+                invite,
+                rng,
+                require,
+            )
+            .map(Some)
+    }
+
+    /// Recover the original covered registry successor using the saved
+    /// invitation and signed request. No caller-supplied invitation, device
+    /// generation, native key entry or network connection is needed.
+    pub fn recover_rejoin_index(
+        &mut self,
+        ui: &UiCapture,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<NativeTextRejoinIndexReceipt>, AppError> {
+        if !self.tcp_drain.is_drained() {
+            return Ok(None);
+        }
+        self.ui.require_capture(ui)?;
+        let authority = &self.ui;
+        let require = || {
+            if caller.is_cancelled() || !authority.is_current_cached(ui) {
+                return Err(refused());
+            }
+            Ok(())
+        };
+        self.index
+            .recover_rejoin_index(
+                (self.registration, self.removal),
+                (
+                    &mut self.rejoin_pending,
+                    &mut self.rejoin_received,
+                    &mut self.rejoin_welcome,
+                    &mut self.rejoin_prefix,
+                    &mut self.rejoin_index,
+                ),
+                caller,
                 rng,
                 require,
             )

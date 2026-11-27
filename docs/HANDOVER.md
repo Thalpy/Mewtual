@@ -1,5 +1,25 @@
 # Mewtual; Handover
 
+## Cover and recover the replacement membership's native index
+
+The original retired vault can cover an Index4 successor under the
+checked native registry cell. It retains the original Index3 and
+matches the exact selected Remove, replacement Add and covered signed
+history. The successor records the original row as retired and gives
+the replacement a new row ID. A cold recovery obtains the invite and
+token from the original authenticated Attempt and signed Pending.
+It preserves partial records and refuses a missing parent.
+
+The Windows native fixture completed the first Join, Remove and A2 reply
+over TCP, covered Index4, and recovered it without caller credentials or
+randomness. It refused a same-byte replacement of the held Index, a torn
+Index and an orphaned Index with its original Prefix parked. Two App
+codec tests preserved prior rows and rejected invalid successors.
+
+This checkpoint prepares selection data. Live source attachment,
+renderer rejoin, further same-device successors and final acceptance
+remain open. Chat V2 remains disabled.
+
 ## Cover the signed initial history for a replacement membership
 
 The retired vault matches the exact closed Welcome with the selected
