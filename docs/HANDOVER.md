@@ -1,5 +1,20 @@
 # Mewtual; Handover
 
+## Authenticate the retired rejoin catalog writer
+
+Retired-vault authentication binds the same physical mount and
+passphrase, independently of the closed row. A new rejoin catalog
+requires a fresh signed invite that matches the original donor's
+anchor and policy. The writer separately admits the Stage and Current
+rename. Once the rename may have run, the next authenticated mount
+must confirm the result.
+
+The Windows rejoin scenario checked a wrong secret, the old invite,
+expiry, cancellation between Stage and rename, a newer generation
+and an exact retry without new entropy. It also checked that an
+authentication proof cannot authorize a different reopen. The renderer
+has no command for this writer yet. Chat V2 remains disabled.
+
 ## Continue receiving when a paid history cache fills
 
 The native receiver can replace one full hot ledger and retry the same

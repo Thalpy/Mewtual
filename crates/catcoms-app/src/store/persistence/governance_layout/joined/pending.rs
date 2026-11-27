@@ -898,6 +898,40 @@ impl ServerStore {
         perform(layout, &original.original.1)
     }
 
+    /// Check a fresh candidate without creating a catalog stage, entering
+    /// a device key, taking signer custody or using entropy. After Pending
+    /// exists the exact saved-request recovery path handles invite expiry.
+    pub(in crate::store) fn require_fresh_rejoin_invite(
+        &self,
+        registration: NativeTextJoinedRegistrationData,
+        removal: catcoms_sync::SelectedRejoinRemoval,
+        invite: &SignedInviteBindingData,
+        now_ms: u64,
+    ) -> Result<(), AppError> {
+        if invite.expired_at_data(now_ms) {
+            return Err(denied());
+        }
+        self.require_recovered_joined_removal(registration, removal)?;
+        let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        let _fee = policy
+            .current
+            .archive
+            .pending
+            .pool
+            .try_reserve(SOURCE_FEE)?;
+        let key = Zeroizing::new(self.keys.db_key()?);
+        self.with_rejoin_donor(registration, |layout, raw| {
+            RecoveredPinnedPending::require_rejoin_invite(
+                &key,
+                layout,
+                raw,
+                registration.context,
+                invite,
+            )
+        })?;
+        self.require_recovered_joined_removal(registration, removal)
+    }
+
     pub(in crate::store) fn require_recovered_joined_removal(
         &self,
         registration: NativeTextJoinedRegistrationData,

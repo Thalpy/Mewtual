@@ -104,6 +104,10 @@ impl SelectedRejoinCatalog<'_> {
 }
 
 impl RejoinCatalogPreparation {
+    pub(in crate::store) fn selection_started_cached(&self) -> bool {
+        self.selection_started
+    }
+
     fn require_catalog_base(&self, store: &ServerStore) -> Result<(), AppError> {
         if !std::sync::Arc::ptr_eq(&self.mount, &store.registry_mount()) {
             return Err(denied());
@@ -144,9 +148,14 @@ impl RejoinCatalogPreparation {
     /// Sync the private, non-selecting rejoin Stage. Continued writes keep
     /// the original create_new handle. A cold retry has already checked a
     /// complete authenticated Stage before opening it for this role.
-    pub(in crate::store) fn stage_catalog(&mut self, store: &ServerStore) -> Result<(), AppError> {
+    pub(in crate::store) fn stage_catalog(
+        &mut self,
+        store: &ServerStore,
+        admit: &impl Fn() -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
         self.require_original(store)?;
         let stage_path = fixed(store, false, REJOIN_STAGE)?;
+        admit()?;
         ensure_native_claim(&stage_path, &mut self.stage)?;
         sync_directory(&store.dir).map_err(io)?;
         ensure(
@@ -195,21 +204,28 @@ impl RejoinCatalogPreparation {
     /// The only writer for the fully authenticated candidate. After a
     /// rename the retired A1 cache stays closed. A retry covers the same
     /// held file and original parent directory before returning success.
-    pub(in crate::store) fn select_catalog(&mut self, store: &ServerStore) -> Result<(), AppError> {
+    pub(in crate::store) fn select_catalog(
+        &mut self,
+        store: &ServerStore,
+        admit: &impl Fn() -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        // A cold open can reauthenticate complete bytes from a Stage
+        // which was never flushed. Cover that exact file before rename.
         if !self.selection_started {
-            self.stage_catalog(store)?;
+            self.stage_catalog(store, admit)?;
         }
         match self.require_original(store) {
             Ok(()) => {
                 let stage = fixed(store, false, REJOIN_STAGE)?;
                 let current = fixed(store, false, critical_namespaces::Slot::Current.name())?;
+                admit()?;
                 // Record the possible handoff before the syscall. A refused
                 // or ambiguous return keeps both exact original file loans.
                 self.selection_started = true;
                 install_catalog_stage(&stage, &current).map_err(io)?;
             }
             Err(error) if !self.selection_started => return Err(error),
-            Err(_) => {}
+            Err(_) => admit()?,
         }
         self.require_selected(store)?;
         sync_selected_catalog(&self.stage.as_ref().ok_or_else(denied)?.file).map_err(io)?;

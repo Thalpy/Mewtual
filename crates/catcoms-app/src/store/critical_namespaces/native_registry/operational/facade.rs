@@ -53,6 +53,20 @@ pub struct NativeTextVaultAuthenticationCheck {
     _credit: NativeUiInvocationMetadata,
 }
 impl NativeTextVaultAuthentication {
+    pub(super) fn capture(
+        ui: &UiAdmissionOwner,
+        index: Option<&super::upgrade_source::owning::Store>,
+        credit: NativeUiInvocationMetadata,
+    ) -> Self {
+        Self {
+            work: index.and_then(super::upgrade_source::owning::Store::capture_metadata_work),
+            can_retry_capture: index.is_some(),
+            host: ui.observe_mount(),
+            expected: ui.invocation_budget(),
+            credit,
+        }
+    }
+
     /// The canonical metadata reader is occupied. This reports only a
     /// transient capture refusal and never checks or accepts a secret.
     pub fn is_capture_busy_cached(&self) -> bool {
@@ -262,17 +276,11 @@ impl NativeTextVault {
         &self,
         credit: NativeUiInvocationMetadata,
     ) -> NativeTextVaultAuthentication {
-        let (work, can_retry_capture) = match &self.index {
-            IndexOwner::Version3(index) => (index.capture_metadata_work(), true),
-            IndexOwner::Version2(_) => (None, false),
+        let index = match &self.index {
+            IndexOwner::Version3(index) => Some(index),
+            IndexOwner::Version2(_) => None,
         };
-        NativeTextVaultAuthentication {
-            work,
-            can_retry_capture,
-            host: self.ui.observe_mount(),
-            expected: self.ui.invocation_budget(),
-            credit,
-        }
+        NativeTextVaultAuthentication::capture(&self.ui, index, credit)
     }
 
     pub(super) fn observe_ui_mount(&self) -> catcoms_rt::NativeChatUiMountObservation {
