@@ -554,7 +554,7 @@ impl HeldColdFounderAdd {
         ) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
         let binding = self.invite_parent_coordinates(store, source)?;
-        self.with_checked_member_parts(store, source, |verifier, _, require| {
+        self.with_checked_member_parts(store, source, |verifier, _, _, require| {
             let result = perform(&binding, verifier, require)?;
             require()?;
             Ok(result)
@@ -702,6 +702,7 @@ impl HeldColdFounderAdd {
         perform: impl FnOnce(
             &V2GeneralPrefixVerifier,
             &ProjectionGroupView,
+            &[V2FrozenAdmission],
             &mut dyn FnMut() -> Result<(), AppError>,
         ) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
@@ -711,7 +712,12 @@ impl HeldColdFounderAdd {
             self.files.require_current(store, source).map(drop)
         };
         require()?;
-        perform(&core.verifier, &core._view, &mut require)
+        perform(
+            &core.verifier,
+            &core._view,
+            &core.retired_history,
+            &mut require,
+        )
     }
 
     /// Return the exact original delivery, or checked absence for an unused

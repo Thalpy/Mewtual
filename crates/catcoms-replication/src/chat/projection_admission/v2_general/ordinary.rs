@@ -11,10 +11,15 @@ const MAX_LOCAL_ARCHIVE_RETIREMENTS: usize = 64;
 pub struct V2OrdinaryDependency<'a> {
     action: &'a SignedAction,
     admission: &'a V2AuthenticatedAdmission,
+    local_archive_ancestor: bool,
 }
 impl<'a> V2OrdinaryDependency<'a> {
     pub fn new(action: &'a SignedAction, admission: &'a V2AuthenticatedAdmission) -> Self {
-        Self { action, admission }
+        Self {
+            action,
+            admission,
+            local_archive_ancestor: false,
+        }
     }
 }
 
@@ -33,8 +38,8 @@ pub enum V2OrdinaryReceiveStatus {
 }
 
 /// One exact original selected by the trusted host's local archive. This
-/// is an input to a detached display view. It cannot open an admission or
-/// supply any part of a peer's accepted-history proof.
+/// can restore detached display or an exact local reply ancestor. It
+/// cannot open an Admission or prove another peer selected the action.
 pub struct V2LocalArchiveOriginal<'a> {
     action: &'a SignedAction,
     admission: OwnerFactId,
@@ -60,6 +65,14 @@ impl<'a> V2LocalArchiveOriginal<'a> {
             digest: *blake3::hash(original).as_bytes(),
         })
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DependencyEvidence {
+    Exact,
+    ArchiveDisplay,
+    LocallySelectedAncestors,
+    Incoming,
 }
 
 struct LedgerDependencies<'a> {
@@ -275,7 +288,14 @@ impl V2GeneralPrefixVerifier {
         admission: &V2AuthenticatedAdmission,
         work: usize,
     ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
-        self.apply_open_original(ledger, view, action, admission, work, true)
+        self.apply_open_original(
+            ledger,
+            view,
+            action,
+            admission,
+            (&[], DependencyEvidence::Exact),
+            (work, true),
+        )
     }
 
     /// Retain the same verified causal original without changing the live
@@ -288,7 +308,38 @@ impl V2GeneralPrefixVerifier {
         admission: &V2AuthenticatedAdmission,
         work: usize,
     ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
-        self.apply_open_original(ledger, view, action, admission, work, false)
+        self.apply_open_original(
+            ledger,
+            view,
+            action,
+            admission,
+            (&[], DependencyEvidence::Exact),
+            (work, false),
+        )
+    }
+
+    /// Apply a current author's original. A retired ancestor needs this
+    /// ledger's exact local receipt marker or it is reported as missing.
+    pub fn apply_with_locally_selected_ancestors(
+        &self,
+        ledger: &mut ChatLedger,
+        view: &ProjectionView,
+        action: &SignedAction,
+        admission: &V2AuthenticatedAdmission,
+        retired: &[&V2FrozenAdmission],
+        (work, publish): (usize, bool),
+    ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
+        if retired.len() > MAX_LOCAL_ARCHIVE_RETIREMENTS {
+            return Err(ChatError::Bound);
+        }
+        self.apply_open_original(
+            ledger,
+            view,
+            action,
+            admission,
+            (retired, DependencyEvidence::Incoming),
+            (work, publish),
+        )
     }
 
     fn apply_open_original(
@@ -297,15 +348,15 @@ impl V2GeneralPrefixVerifier {
         view: &ProjectionView,
         action: &SignedAction,
         admission: &V2AuthenticatedAdmission,
-        work: usize,
-        publish: bool,
+        (retired, evidence): (&[&V2FrozenAdmission], DependencyEvidence),
+        (work, publish): (usize, bool),
     ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
         if view.life.local_archive {
             return Err(ChatError::Scope);
         }
         self.require_receiver_ledger(ledger, view, action)?;
         let LedgerDependencies { missing, exact } =
-            self.ledger_dependencies(ledger, action, &[], false)?;
+            self.ledger_dependencies(ledger, action, retired, evidence)?;
         if !missing.is_empty() {
             self.require_admission(admission)?;
             admission.core.body.matches_action_delegation(action)?;
@@ -314,7 +365,13 @@ impl V2GeneralPrefixVerifier {
         }
         let dependencies = exact
             .iter()
-            .map(|(original, owner)| V2OrdinaryDependency::new(original, owner))
+            .map(|(original, owner)| V2OrdinaryDependency {
+                action: original,
+                admission: owner,
+                // Incoming checked the exact selected marker and refused
+                // a retired mutation target before borrowing its owner.
+                local_archive_ancestor: evidence == DependencyEvidence::Incoming,
+            })
             .collect::<Vec<_>>();
         let (verified, token) =
             self.provisional_evidence(action, admission, &dependencies, view)?;
@@ -339,8 +396,12 @@ impl V2GeneralPrefixVerifier {
         work: usize,
     ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
         self.require_receiver_ledger(ledger, view, action)?;
-        let LedgerDependencies { missing, exact } =
-            self.ledger_dependencies(ledger, action, frozen_dependencies, false)?;
+        let LedgerDependencies { missing, exact } = self.ledger_dependencies(
+            ledger,
+            action,
+            frozen_dependencies,
+            DependencyEvidence::Exact,
+        )?;
         if !missing.is_empty() {
             self.require_admission(admission)?;
             admission.core.body.matches_action_delegation(action)?;
@@ -353,6 +414,59 @@ impl V2GeneralPrefixVerifier {
             .collect::<Vec<_>>();
         let verified = self.verify_action_semantics(action, admission, &dependencies)?;
         Self::apply_verified(ledger, action, work, verified).map(V2OrdinaryReceiveStatus::Retained)
+    }
+
+    /// Borrow the exact locally selected Create as the target of a new
+    /// reply. Its selected Remove supplies the original Admission, and the
+    /// original bytes and signature must still match that Admission. This
+    /// loan supplies only the parent and cannot issue a live author token.
+    pub fn local_archive_reply_parent<'a>(
+        &self,
+        original: V2LocalArchiveOriginal<'a>,
+        retired: &'a [V2FrozenAdmission],
+    ) -> Result<V2OrdinaryDependency<'a>, ChatError> {
+        if !matches!(original.action.spec().body, Body::Create { .. })
+            || retired.len() > MAX_LOCAL_ARCHIVE_RETIREMENTS
+        {
+            return Err(ChatError::Dependency);
+        }
+        let frozen = retired
+            .iter()
+            .find(|entry| entry.admission.core.body.admission_id() == original.admission)
+            .ok_or(ChatError::Dependency)?;
+        self.require_admission(&frozen.admission)?;
+        frozen
+            .admission
+            .core
+            .body
+            .matches_action_delegation(original.action)?;
+        self.live()?;
+        Ok(V2OrdinaryDependency {
+            action: original.action,
+            admission: &frozen.admission,
+            local_archive_ancestor: true,
+        })
+    }
+
+    /// The native signing plan can borrow a retired original only as the
+    /// explicit reply target. Previously admitted semantic and LOG evidence
+    /// may still make sense of older causal heads without granting a key.
+    pub(super) fn require_live_ordinary_dependencies(
+        &self,
+        spec: &ActionSpec,
+        dependencies: &[V2OrdinaryDependency<'_>],
+    ) -> Result<(), ChatError> {
+        for dependency in dependencies {
+            let active = self
+                .admissions
+                .iter()
+                .any(|admission| Arc::ptr_eq(&admission.core, &dependency.admission.core));
+            let retired_target = spec.body.create() == Some(dependency.action.id());
+            if !active && (!dependency.local_archive_ancestor || retired_target) {
+                return Err(ChatError::Dependency);
+            }
+        }
+        Ok(())
     }
 
     /// Replay a previously selected original for this device's archive
@@ -377,7 +491,7 @@ impl V2GeneralPrefixVerifier {
             (action, admission),
             retired,
             work,
-            Some(digest),
+            (DependencyEvidence::ArchiveDisplay, Some(digest)),
         )
     }
 
@@ -392,7 +506,126 @@ impl V2GeneralPrefixVerifier {
         retired: &[&V2FrozenAdmission],
         work: usize,
     ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
-        self.apply_local_archive_original(ledger, view, (action, admission), retired, work, None)
+        self.apply_local_archive_original(
+            ledger,
+            view,
+            (action, admission),
+            retired,
+            work,
+            (DependencyEvidence::ArchiveDisplay, None),
+        )
+    }
+
+    /// Verify an exact selected record as historical semantic ancestry in
+    /// an ordinary ledger. This never makes the ancestor visible.
+    pub fn replay_locally_selected_ancestor(
+        &self,
+        ledger: &mut ChatLedger,
+        view: &ProjectionView,
+        original: V2LocalArchiveOriginal<'_>,
+        retired: &[&V2FrozenAdmission],
+        work: usize,
+    ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
+        let V2LocalArchiveOriginal {
+            action, admission, ..
+        } = original;
+        let status = self.apply_local_archive_original(
+            ledger,
+            view,
+            (action, admission),
+            retired,
+            work,
+            (DependencyEvidence::LocallySelectedAncestors, None),
+        )?;
+        if status == V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
+            if !ledger.matches_valid_ordinary_original(action, admission) {
+                return Err(ChatError::AuthorityConflict);
+            }
+            let entry = ledger
+                .entries
+                .get_mut(&action.id())
+                .ok_or(ChatError::Unknown)?;
+            entry.local_ancestry = Some(V2LocalAncestry {
+                verifier: Arc::downgrade(&self.identity),
+                admission,
+                signature: *action.signature(),
+            });
+        }
+        Ok(status)
+    }
+
+    /// True for a current verified dependency or this same verifier's
+    /// selected local receipt on its exact retired signature. A hot Valid
+    /// entry alone cannot skip the archive read after removal.
+    pub fn locally_usable_ordinary_dependency(
+        &self,
+        ledger: &ChatLedger,
+        action: ActionId,
+    ) -> bool {
+        let Some(entry) = ledger
+            .entries
+            .get(&action)
+            .filter(|entry| entry.state == ActionState::Valid)
+        else {
+            return false;
+        };
+        let Some(verified) = &entry.authority else {
+            return false;
+        };
+        let (profile, admission, tenure) = match &verified.constraint {
+            SemanticConstraint::V2OrdinaryAction {
+                profile,
+                admission,
+                tenure,
+                ..
+            }
+            | SemanticConstraint::V2FounderCreate {
+                profile,
+                admission,
+                tenure,
+                ..
+            } => (profile, admission, tenure),
+            SemanticConstraint::LegacyReusable => return false,
+        };
+        let expected = self.math.profile();
+        *profile == expected.id()
+            && *tenure == expected.tenure()
+            && (self.admission(*admission).is_ok()
+                || self.matches_local_ancestor(entry, *admission))
+    }
+
+    /// Recover own outbox ancestry as verified semantics. Its author must
+    /// still have the exact current Admission, and the saved bytes give no
+    /// receipt marker for the author after removal.
+    pub fn replay_current_outbox_ancestor(
+        &self,
+        ledger: &mut ChatLedger,
+        view: &ProjectionView,
+        (action, admission): (&SignedAction, OwnerFactId),
+        retired: &[&V2FrozenAdmission],
+        work: usize,
+    ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
+        self.admission(admission)?;
+        self.apply_local_archive_original(
+            ledger,
+            view,
+            (action, admission),
+            retired,
+            work,
+            (DependencyEvidence::LocallySelectedAncestors, None),
+        )
+    }
+
+    fn matches_local_ancestor(
+        &self,
+        entry: &crate::chat::ledger::Entry,
+        admission: OwnerFactId,
+    ) -> bool {
+        entry.local_ancestry.as_ref().is_some_and(|selected| {
+            selected.verifier.as_ptr() == Arc::as_ptr(&self.identity)
+                && selected.admission == admission
+                && &selected.signature == entry.action.signature()
+        })
     }
 
     fn apply_local_archive_original(
@@ -402,10 +635,12 @@ impl V2GeneralPrefixVerifier {
         (action, admission): (&SignedAction, OwnerFactId),
         retired: &[&V2FrozenAdmission],
         work: usize,
-        selected_digest: Option<[u8; 32]>,
+        (evidence, selected_digest): (DependencyEvidence, Option<[u8; 32]>),
     ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
         self.require_receiver_ledger(ledger, view, action)?;
-        if !view.life.local_archive || retired.len() > MAX_LOCAL_ARCHIVE_RETIREMENTS {
+        if view.life.local_archive != (evidence == DependencyEvidence::ArchiveDisplay)
+            || retired.len() > MAX_LOCAL_ARCHIVE_RETIREMENTS
+        {
             return Err(ChatError::Scope);
         }
         let author = match self.admission(admission) {
@@ -419,7 +654,7 @@ impl V2GeneralPrefixVerifier {
             Err(error) => return Err(error),
         };
         let LedgerDependencies { missing, exact } =
-            self.ledger_dependencies(ledger, action, retired, true)?;
+            self.ledger_dependencies(ledger, action, retired, evidence)?;
         if !missing.is_empty() {
             self.require_admission(&author)?;
             author.core.body.matches_action_delegation(action)?;
@@ -458,11 +693,11 @@ impl V2GeneralPrefixVerifier {
         ledger: &'a ChatLedger,
         action: &SignedAction,
         frozen_dependencies: &[&V2FrozenAdmission],
-        local_archive: bool,
+        evidence: DependencyEvidence,
     ) -> Result<LedgerDependencies<'a>, ChatError> {
         let profile = self.math.profile();
         let required = action.dependencies();
-        if !local_archive && frozen_dependencies.len() > required.len() {
+        if evidence == DependencyEvidence::Exact && frozen_dependencies.len() > required.len() {
             return Err(ChatError::Dependency);
         }
         let mut missing = Vec::new();
@@ -508,6 +743,22 @@ impl V2GeneralPrefixVerifier {
             let admission = match self.admission(*owner) {
                 Ok(current) => current,
                 Err(ChatError::Dependency) => {
+                    // A retired predecessor can supply causal knowledge.
+                    // A mutation's target must still name the current
+                    // incarnation, even when the same signer rejoined.
+                    if evidence == DependencyEvidence::Incoming
+                        && action.spec().body.create() == Some(id)
+                    {
+                        return Err(ChatError::Permission);
+                    }
+                    if matches!(
+                        evidence,
+                        DependencyEvidence::Incoming | DependencyEvidence::LocallySelectedAncestors
+                    ) && !self.matches_local_ancestor(entry, *owner)
+                    {
+                        missing.push(id);
+                        continue;
+                    }
                     let (index, historical) = frozen_dependencies
                         .iter()
                         .enumerate()
@@ -521,7 +772,7 @@ impl V2GeneralPrefixVerifier {
             };
             owners.push((&entry.action, admission));
         }
-        if !local_archive
+        if evidence == DependencyEvidence::Exact
             && missing.is_empty()
             && used_frozen.count_ones() as usize != frozen_dependencies.len()
         {
@@ -560,6 +811,7 @@ impl V2GeneralPrefixVerifier {
         if view.life.local_archive {
             return Err(ChatError::Scope);
         }
+        self.require_live_ordinary_dependencies(action.spec(), dependencies)?;
         let verified = self.verify_action_semantics(action, admission, dependencies)?;
         self.require_view(action, view)?;
         if !self

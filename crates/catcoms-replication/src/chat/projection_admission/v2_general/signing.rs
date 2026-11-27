@@ -124,6 +124,7 @@ impl V2GeneralPrefixVerifier {
         if view.life.local_archive {
             return Err(ChatError::Scope);
         }
+        self.require_live_ordinary_dependencies(draft.spec_data(), dependencies)?;
         self.verify_unsigned_authority(
             draft.spec_data(),
             draft.signer_data(),

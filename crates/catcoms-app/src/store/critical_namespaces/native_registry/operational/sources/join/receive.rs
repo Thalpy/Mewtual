@@ -692,13 +692,20 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             {
                 return Err(Refusal::Stale);
             }
-            let opened = &original.opened;
-            if publish {
-                opened.project_from_ledger(verifier, &mut ledger.ledger, &ledger.view, RECEIVE_WORK)
-            } else {
-                opened.stage_from_ledger(verifier, &mut ledger.ledger, &ledger.view, RECEIVE_WORK)
-            }
-            .map_err(|_| Refusal::Failed)
+            let retired = source
+                .prefix
+                .retired_history_data()
+                .iter()
+                .collect::<Vec<_>>();
+            original
+                .opened
+                .apply_with_local_ancestry(
+                    (verifier, &retired),
+                    (&mut ledger.ledger, &ledger.view),
+                    RECEIVE_WORK,
+                    publish,
+                )
+                .map_err(|_| Refusal::Failed)
         })
     }
 
@@ -722,9 +729,14 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 .map_err(|_| Refusal::Unavailable)?;
             let channel = ledger.ledger.realm().channel();
             let subscription = &ledger.signal;
+            let retired = source
+                .prefix
+                .retired_history_data()
+                .iter()
+                .collect::<Vec<_>>();
             replay_local_member_dependencies(
                 std::slice::from_ref(&action),
-                (verifier, &mut ledger.ledger, &ledger.view),
+                (verifier, &retired, &mut ledger.ledger, &ledger.view),
                 RECEIVE_WORK,
                 (source.store, source.history_scope(channel)),
                 |id| source.read_dependency(channel, id, rng),
@@ -1093,8 +1105,12 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
             .metadata
             .reserve_join_node(archive_ancestry_fee(MAX_RECEIVED_ACTIONS))
             .map_err(|_| Refusal::Busy)?;
+        let verifier = self
+            .prefix
+            .selected_member_verifier()
+            .map_err(|_| Refusal::Unavailable)?;
         require_durable_archive_dependencies(
-            &ledger.ledger,
+            (&ledger.ledger, verifier),
             original.opened.action_data(),
             (self.store, scope),
             MAX_RECEIVED_ACTIONS,
