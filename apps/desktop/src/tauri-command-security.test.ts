@@ -92,9 +92,12 @@ function manualCommands(sources: Map<string, string>): string[] {
     "the reviewed manual router must wrap the actual normal handler");
   assert.match(sources.get("native_text.rs") ?? "", /if enabled && membership::handles\(invoke\.message\.command\(\)\) \{\s*return membership::route\(invoke, &spawn\);/,
     "the native membership inventory must dispatch through the production router");
+  assert.match(sources.get("native_text.rs") ?? "", /if enabled && rejoin::handles\(invoke\.message\.command\(\)\) \{\s*return rejoin::route\(invoke, &spawn\);/,
+    "the retired rejoin inventory must dispatch through the production router");
   return [
     ...inventory("admin_chat_ledger/mod.rs", ["get_admin_chat_ledger", "get_admin_chat_ledger_detail"]),
     ...inventory("native_text/membership.rs", ["get_native_chat_members", "remove_native_chat_member", "share_native_chat_contact", "connect_native_chat_contact", "forget_native_chat_contacts"]),
+    ...inventory("native_text/rejoin.rs", ["rejoin_server"]),
   ];
 }
 

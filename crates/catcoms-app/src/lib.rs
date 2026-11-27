@@ -186,6 +186,13 @@ pub enum AppError {
     /// Admission. This terminal result grants no new runtime or join authority.
     #[error("This device was removed from this Chat V2 server.")]
     ChatV2MembershipRemoved,
+    /// Current may have moved. Only the original vault's cold proof can
+    /// confirm the result or acquire the selected rejoin catalog.
+    #[error("Reopen the vault to confirm the saved rejoin.")]
+    ChatV2RejoinCatalogReopen,
+    /// The retired mount has no covered request for this expired invitation.
+    #[error("This invite expired. Ask for a new invite.")]
+    ChatV2RejoinNeedsFreshInvite,
     /// The join did not finalize before the wall-clock deadline; e.g. an Option-C admin invite
     /// whose owner never came online to serialize the Add. The user can retry.
     #[error("the join timed out before it finalized; try again")]

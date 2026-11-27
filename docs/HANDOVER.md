@@ -1,5 +1,74 @@
 # Mewtual; Handover
 
+## Rejoin from the retired native session
+
+The rejoin form passes a signed invite and the numeric IP that the user
+approves to the native retired session. The command covers the rejoin
+catalog and asks for a process reopen. Entering the same invite after
+that reopen can complete the replacement through its exact TCP and
+sealed local phases. The last reopen installs the selected membership.
+The command never retains a passphrase across network I/O.
+
+Lock waits for any previously admitted exact file loan and cancels
+the original network scope without joining it. Close drains the real
+replacement TCP listener. The Windows TCP fixtures prove both rejoin
+checkpoints, reauthentication before an old verified response returns,
+A2 chat in both directions, and refusal of a pre-ID9 catalog with a
+surviving Pending. The exact request recovers after its matching catalog
+is restored. Later same-device successors, automatic restart, and final
+acceptance remain open. Chat V2 stays disabled.
+
+## Finish or retire an interrupted rejoin key operation
+
+The warm retired writer can retire its own exact Attempt when
+cancelled before irreversible device or Welcome entry. It rechecks
+the held name and bytes, absence of all later roles, and directory
+sync. A cold ambiguous Attempt still holds the original files.
+
+The same successful key operation may save its exact Pending or
+Outcome after cancellation. It sends no stale receipt and advances
+no later phase. Native TCP fixtures covered cancellation on both
+sides of both key entries and a genuinely ambiguous cold Welcome.
+Chat V2 remains disabled.
+
+## Authenticate the retired rejoin catalog writer
+
+Retired-vault authentication binds the same physical mount and
+passphrase, independently of the closed row. A new rejoin catalog
+requires a fresh signed invite that matches the original donor's
+anchor and policy. The writer separately admits the Stage and Current
+rename. Once the rename may have run, the next authenticated mount
+must confirm the result.
+
+The Windows rejoin scenario checked a wrong secret, the old invite,
+expiry, cancellation between Stage and rename, a newer generation
+and an exact retry without new entropy. It also checked that an
+authentication proof cannot authorize a different reopen. The renderer
+has no command for this writer yet. Chat V2 remains disabled.
+
+## Retain the authenticated retired vault at native unlock
+
+Native unlock and resume can return a recovery session for a proved
+terminal A1. Its native row table is empty, and ordinary IPC stays
+locked. The retired mount has a separate permit bound to the same
+native lock generation. It retains the original physical owner until
+close drains its readers. The renderer opens a recovery screen without
+loading or saving the ordinary chat screen state.
+
+## Read all selected revisions of a saved message
+
+A message read takes one complete target snapshot and opens the exact
+selected originals. It can replay beyond the 64-entry hot receive limit.
+The worker charges each original before retaining it and keeps the
+archive observation through final publication. A later selected Delete
+makes an earlier view unusable. History and audit pages keep their
+existing limits.
+
+The real Windows TCP fixture selects 65 sibling edits and then deletes
+the original. It checks the selected text and rejects the earlier
+publication after the delete. Total on-disk retention, deep per-action
+writer ancestry and worst-case replay latency remain open.
+
 ## Verify late posts before holding them for review
 
 The Core proof binds an exact signed Create or reply to its original
@@ -125,6 +194,27 @@ final reservation policy test. The live ledger and per-target archive
 replay bounds remain open. So do the 2,048-record and 256 MiB archive
 ceilings and independent founder replay of an unsaved received original.
 Chat V2 stays disabled.
+
+## Reopen the replacement membership through native startup
+
+An authenticated startup with the covered replacement index replays the
+first membership's terminal Remove without opening its old TCP port.
+The replacement uses its own reserved transport, registered row, closed
+Welcome and later governing journal. The per-vault outbox and received
+history remain available under their existing scope.
+
+Before a replacement is selected, verified terminal A1 also replays in
+isolation. A bounded journal check routes the one saved Welcome graph
+to isolated replay or to the continuing A1 transport. Native unlock
+still reports the terminal result. It has no renderer rejoin action.
+
+The Windows native fixture reopens with the old port occupied, verifies
+that only the replacement row is present, exchanges real messages with
+the founder and observes a later selected Remove. It also refuses the
+earlier catalog and membership files when the replacement index survives
+a partial rollback. Starting a same-vault rejoin from the renderer,
+further same-device successors and final acceptance remain open.
+Chat V2 remains disabled.
 
 ## Cover and recover the replacement membership's native index
 

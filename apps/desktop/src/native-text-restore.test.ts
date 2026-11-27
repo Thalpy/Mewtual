@@ -17,7 +17,7 @@ test("actual restore sequences first native read before retry and preserves empt
  for(const rows of [[row],[]]){
   const gate=deferred();const calls:string[]=[];
   const f=new Function("decodeRestoredChatSession","createStudioExit","gate","calls",`
-    let locked=true,windowCloseInFlight=false,servers=[],chatBackend=null,uiStateLoadGeneration=0,startTab="join",uiSessionRetired=false;
+    let locked=true,windowCloseInFlight=false,servers=[],chatBackend=null,uiStateLoadGeneration=0,startTab="join",uiSessionRetired=false,nativeRejoinRequired=false;
     let studioNavigation=0,view="chat",studioHasWork=null,studioClaimNavigation=null,studioSave=null;
     ${actualExit}
     const callMappingSession={claimController(){calls.push("legacy-call");}},toast=()=>{},sessionStorage={removeItem(){}};
@@ -34,6 +34,42 @@ test("actual restore sequences first native read before retry and preserves empt
   assert.equal(f.state().chatBackend,"text-v2");assert.equal(f.state().startTab,"found");gate.resolve();await settle();
   assert.deepEqual(calls,rows.length?["read-start","read-end","retry"]:["retry"]);
  }
+});
+
+test("actual removed-vault restore makes no chat or continuity request", () => {
+  const inspect = new Function("decodeRestoredChatSession", `
+    let locked=true,windowCloseInFlight=false,servers=[],chatBackend=null,uiStateLoadGeneration=0,startTab="join",uiSessionRetired=false,nativeRejoinRequired=false,uiStateReady=false;
+    const sessionStorage={removeItem(){}};
+    ${production("restoreReloaded")}
+    const restored=restoreReloaded({backend:"text-v2",servers:[],recovery:"removed"});
+    return {restored,locked,uiStateReady,nativeRejoinRequired,servers,generation:uiStateLoadGeneration};
+  `)(decodeRestoredChatSession);
+  assert.deepEqual(inspect, {
+    restored: true, locked: false, uiStateReady: false, nativeRejoinRequired: true, servers: [], generation: 1,
+  });
+});
+
+test("the actual rejoin form scopes the approved host and discards a late checkpoint after lock", async () => {
+  const gate = deferred();
+  const calls: unknown[] = [];
+  const fixture = new Function("gate", "calls", `
+    let locked=false,nativeRejoinRequired=true,windowCloseInFlight=false,uiStateLoadGeneration=1;
+    let rejoinInvite="  aabb  ",rejoinHost=" 127.0.0.1 ",rejoinBusy=false,rejoinRestart=false,rejoinNotice="";
+    const invoke=(command,payload)=>{calls.push([command,payload]);return gate.promise;};
+    ${production("submitNativeRejoin")}
+    ${production("resetNativeRejoin")}
+    return {submit:submitNativeRejoin,lock(){locked=true;uiStateLoadGeneration++;resetNativeRejoin();},
+      state:()=>({rejoinInvite,rejoinHost,rejoinBusy,rejoinRestart,rejoinNotice})};
+  `)(gate, calls);
+  const active = fixture.submit();
+  await fixture.submit();
+  assert.deepEqual(calls, [["rejoin_server", { inviteHex: "aabb", approvedHost: "127.0.0.1" }]]);
+  fixture.lock();
+  gate.resolve({ step: "restart-to-activate" });
+  await active;
+  assert.deepEqual(fixture.state(), {
+    rejoinInvite: "", rejoinHost: "", rejoinBusy: false, rejoinRestart: false, rejoinNotice: "",
+  });
 });
 
 test("actual Native startup actions and keyboard navigation cannot enter Legacy joining or DMs",async()=>{

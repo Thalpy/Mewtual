@@ -1,14 +1,18 @@
 //! Closed native mounted-vault composition. This is a runtime owner, never a
 //! serialized backend tag or permission to restore a V2 row as a legacy actor.
-use super::{NativeTextVault, ServerStore};
+use super::{
+    NativeTextRemovedJoinedVault, NativeTextVault, NativeTextVaultAuthenticationCheck, ServerStore,
+};
 use tokio::sync::{OwnedMappedMutexGuard, OwnedMutexGuard};
 
 /// The ONE mounted vault owned by native AppState. The Legacy arm is explicit;
-/// TextV2 exposes only its owning facade, with no raw Store/Current escape.
+/// Active TextV2 and retired TextV2 have separate affine owners. Neither
+/// provides raw Store/Current access.
 /// Neither this sum nor its native owner is Clone, Deref or serializable.
 pub enum MountedVault {
     Legacy(Box<ServerStore>),
     TextV2(NativeTextVault),
+    TextV2Retired(Box<NativeTextRemovedJoinedVault>),
 }
 impl MountedVault {
     /// Legacy-only access under the original native mutex guard. None means
@@ -17,7 +21,7 @@ impl MountedVault {
     pub fn as_legacy(&self) -> Option<&ServerStore> {
         match self {
             Self::Legacy(store) => Some(store),
-            Self::TextV2(_) => None,
+            Self::TextV2(_) | Self::TextV2Retired(_) => None,
         }
     }
 
@@ -27,7 +31,20 @@ impl MountedVault {
     pub fn as_text_v2(&self) -> Option<&NativeTextVault> {
         match self {
             Self::TextV2(vault) => Some(vault),
-            Self::Legacy(_) => None,
+            Self::Legacy(_) | Self::TextV2Retired(_) => None,
+        }
+    }
+
+    /// Compare the authenticated association without lending ordinary
+    /// access to the retired physical owner.
+    pub fn matches_text_v2_authentication(
+        &self,
+        target: &NativeTextVaultAuthenticationCheck,
+    ) -> bool {
+        match self {
+            Self::TextV2(vault) => target.is_for_original_vault(vault),
+            Self::TextV2Retired(vault) => vault.matches_native_authentication_cached(target),
+            Self::Legacy(_) => false,
         }
     }
 }
@@ -43,6 +60,7 @@ impl std::fmt::Debug for MountedVault {
         f.write_str(match self {
             Self::Legacy(_) => "MountedVault::Legacy { .. }",
             Self::TextV2(_) => "MountedVault::TextV2 { .. }",
+            Self::TextV2Retired(_) => "MountedVault::TextV2Retired { .. }",
         })
     }
 }

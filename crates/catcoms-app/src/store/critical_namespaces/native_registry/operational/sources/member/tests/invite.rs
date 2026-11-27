@@ -128,6 +128,11 @@ fn mounted_archive_renders_dense_selected_revisions_and_invalidates_on_delete() 
 }
 
 #[test]
+fn mounted_archive_renders_more_than_sixty_four_selected_revisions() {
+    run_mounted_successor(MountedSuccessor::LargeArchive);
+}
+
+#[test]
 fn mounted_native_remove_retires_the_exact_joined_row_and_preserves_the_survivor() {
     run_mounted_successor(MountedSuccessor::Remove);
 }
@@ -158,6 +163,7 @@ enum MountedSuccessor {
     ReceiveCapacity,
     JoinedLedgerReplay,
     DenseArchive,
+    LargeArchive,
 }
 
 #[test]
@@ -453,6 +459,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         (false, Some(MountedSuccessor::ReceiveCapacity)) => 0xe7d0,
         (false, Some(MountedSuccessor::JoinedLedgerReplay)) => 0xe7e0,
         (false, Some(MountedSuccessor::DenseArchive)) => 0xe7c0,
+        (false, Some(MountedSuccessor::LargeArchive)) => 0xe7f0,
     };
     let founder_dir = tempfile::tempdir().unwrap();
     let (founder, founder_budget) = selected_joined(founder_dir.path());
@@ -1415,10 +1422,22 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             assert_eq!(rotations, 1);
             return;
         }
-        if successor == Some(MountedSuccessor::DenseArchive) {
+        if matches!(
+            successor,
+            Some(MountedSuccessor::DenseArchive | MountedSuccessor::LargeArchive)
+        ) {
             use catcoms_replication::chat::GuardedProjection;
-            // Keep one stable MLS epoch and select every signed revision on
-            // the remote founder's archive. Each edit names all earlier heads.
+            // All revisions are actually signed, sent over TCP and selected.
+            // Dense edits name all earlier heads. Siblings retain just the
+            // original Create to exercise many revisions independently of
+            // the per-action ancestry limit.
+            let dense = successor == Some(MountedSuccessor::DenseArchive);
+            let (last, label) = if dense {
+                (24_u8, "dense")
+            } else {
+                (66_u8, "sibling")
+            };
+            let mut edits = Vec::new();
             let mut parents = vec![reply_id];
             let first = inspect()
                 .read_member_dependency(&view, channel, reply_id, &fresh, &mut rng)
@@ -1427,13 +1446,13 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             let mut signed = vec![(first.action().clone(), first.receipt().admission)];
             drop(first);
             let mut previous = None;
-            for count in 1..=24_u8 {
-                let body = if count == 24 {
+            for count in 1..=last {
+                let body = if count == last {
                     Body::Delete { create: reply_id }
                 } else {
                     Body::Edit {
                         create: reply_id,
-                        text: format!("dense revision {count}"),
+                        text: format!("{label} revision {count}"),
                     }
                 };
                 let dependencies: Vec<_> = signed
@@ -1452,19 +1471,18 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     parents: &parents,
                     dependencies: &dependencies,
                 };
-                assert_eq!(
-                    inspect()
-                        .prepare_member_save(
-                            &view,
-                            V2MemberSignRequest { ..draft },
-                            &fresh,
-                            &mut rng
-                        )
-                        .unwrap_or_else(|error| panic!(
-                            "signed revision {count} was refused: {error:?}"
-                        )),
-                    V2MemberSaveOutcome::Ready
-                );
+                for attempt in 0..32 {
+                    match inspect().prepare_member_save(
+                        &view,
+                        V2MemberSignRequest { ..draft },
+                        &fresh,
+                        &mut rng,
+                    ) {
+                        Ok(V2MemberSaveOutcome::Ready) => break,
+                        Err(V2MemberSaveRefusal::Busy) if attempt < 31 => continue,
+                        other => panic!("signed revision {count} was refused: {other:?}"),
+                    }
+                }
                 let mut prepared = Some(
                     inspect()
                         .finish_member_admission(view.clone(), draft.token, &fresh)
@@ -1491,21 +1509,26 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         let NativeChatMemberGossipEvent::Frame(frame) = event else {
                             continue;
                         };
-                        let received = founder_capture()
-                            .receive_founder_member(
+                        let apply = || {
+                            founder_capture().receive_founder_member(
                                 &founder_receiver,
                                 &frame,
                                 &TestArchiveAdmission,
                             )
-                            .unwrap()
-                            .unwrap();
-                        if received.action == action {
-                            assert_eq!(received.projection_target, reply_id);
-                            assert_eq!(received.archived, Some(true));
+                        };
+                        let result = match apply() {
+                            Err(V2MemberSaveRefusal::ReceiveCapacity) => apply(),
+                            result => result,
+                        }
+                        .unwrap()
+                        .unwrap();
+                        if result.action == action {
+                            assert_eq!(result.projection_target, reply_id);
+                            assert_eq!(result.archived, Some(true));
                             return;
                         }
                     }
-                    panic!("the dense revision did not reach the current founder");
+                    panic!("the selected revision did not reach the current founder");
                 })
                 .await
                 .unwrap();
@@ -1515,16 +1538,22 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         .unwrap(),
                     ordinal + 1,
                 );
-                if count >= 23 {
+                if count != last {
+                    edits.push((action, format!("{label} revision {count}")));
+                }
+                if count >= last - 1 {
                     let next = founder_capture()
                         .archived_founder_message_projection(channel, reply_id, &fresh)
                         .expect("the complete selected archive fits the existing bounds")
                         .unwrap();
-                    if count == 23 {
+                    if count == last - 1 {
+                        let (winner, expected_text) =
+                            edits.iter().max_by_key(|(id, _)| id).unwrap();
                         assert!(next
                             .with_publication(|view| matches!(
                                 view, GuardedProjection::Visible { selected, text, .. }
-                                    if *selected == action && text == "dense revision 23"
+                                    if (dense && *selected == action && text == "dense revision 23")
+                                        || (!dense && selected == winner && text == expected_text)
                             ))
                             .unwrap());
                         previous = Some(next);
@@ -1538,13 +1567,15 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                             .unwrap());
                     }
                 }
-                let saved = inspect()
-                    .read_member_dependency(&view, channel, action, &fresh, &mut rng)
-                    .unwrap()
-                    .unwrap();
-                signed.push((saved.action().clone(), saved.receipt().admission));
-                parents.push(action);
-                parents.sort_unstable();
+                if dense && count != last {
+                    let saved = inspect()
+                        .read_member_dependency(&view, channel, action, &fresh, &mut rng)
+                        .unwrap()
+                        .unwrap();
+                    signed.push((saved.action().clone(), saved.receipt().admission));
+                    parents.push(action);
+                    parents.sort_unstable();
+                }
             }
             return;
         }

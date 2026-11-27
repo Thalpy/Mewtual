@@ -3,8 +3,11 @@ use super::*;
 use crate::store::critical_namespaces::joined_pin::pending::{
     JoinedTransportReservation, RecoveredPinnedPending,
 };
+use crate::store::persistence::v2_member_outbox::fs::{remove_listed, Removal};
 use crate::store::NativeTextInvitePacketData;
-use catcoms_rt::{NativeChatKeyEnds, NativeChatPreparedKeyCut, NativeChatSourceObservation};
+use catcoms_rt::{
+    NativeChatKeyEnds, NativeChatKeyPurpose, NativeChatPreparedKeyCut, NativeChatSourceObservation,
+};
 use catcoms_sync::{
     DirectJoinLimits, NativeV2JoinKeyEntry, PreparedV2JoinRequest, RecoveredV2PendingJoinSource,
     SealedV2PendingJoinSource, V2JoinRequestPacketData, V2PendingJoinContextData,
@@ -13,14 +16,14 @@ use catcoms_sync::{
 use catcoms_wire::{Decoder, Encoder};
 
 mod received;
+pub(in crate::store) use received::{
+    InstalledRejoin, RejoinIndexInputs, RejoinIndexOwner, RejoinIndexRecovery, RejoinPrefixInputs,
+    RejoinPrefixOwner, RejoinReceivedInput, RejoinReceivedOwner, RejoinWelcomeKeyEntry,
+    RejoinWelcomeOwner, RejoinWelcomeOwners,
+};
 pub use received::{
     NativeTextRejoinIndexReceipt, NativeTextRejoinOutcomeReceipt, NativeTextRejoinPrefixReceipt,
     NativeTextRejoinReceivedReceipt, NativeTextRejoinWelcomeStatus,
-};
-pub(in crate::store) use received::{
-    RejoinIndexInputs, RejoinIndexOwner, RejoinIndexRecovery, RejoinPrefixInputs,
-    RejoinPrefixOwner, RejoinReceivedInput, RejoinReceivedOwner, RejoinWelcomeKeyEntry,
-    RejoinWelcomeOwner, RejoinWelcomeOwners,
 };
 
 const ATTEMPT: &str = "chat-critical-namespaces.rejoin-attempt.bin";
@@ -31,6 +34,14 @@ const MAX_ATTEMPT: usize = 40 + 36 + 4 + crate::store::MAX_NATIVE_TEXT_INVITE_PA
 const MAX_SOURCE: usize = 512 * 1024 + MAX_V2_JOIN_REQUEST_PACKET_BYTES + 1024;
 const MAX_PENDING: usize = 40 + 36 + 36 + 2 + 28 + 4 + MAX_SOURCE;
 const WORK_BYTES: usize = 8 * MAX_PENDING + 4 * MAX_ATTEMPT + 4 * 1024 * 1024;
+
+/// An unselected catalog can only precede an untouched rejoin. Stage itself
+/// is a separate catalog role and may be resumed from its authenticated bytes.
+pub(super) fn require_unstarted(store: &ServerStore) -> Result<(), AppError> {
+    absent(&fixed(store, false, ATTEMPT)?)?;
+    absent(&fixed(store, false, PENDING)?)?;
+    received::require_absent(store)
+}
 
 /// Covered historical data for an exact signed A2 request. It cannot start
 /// transport, enter the Welcome SDK or install active membership.
@@ -277,8 +288,65 @@ pub(in crate::store) struct WarmRejoinPending {
     request: Option<PreparedV2JoinRequest>,
     transport: Option<JoinedTransportReservation>,
     key_may_have_entered: bool,
+    retirement: UnenteredAttempt,
     _lease: catcoms_storage::VaultPhysicalWorkLease,
     _fee: CatalogReadReservation,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnenteredAttempt {
+    Writing,
+    Retiring,
+    Unlinked,
+}
+
+impl UnenteredAttempt {
+    /// Only a warm caller that has positively proved no irreversible
+    /// entry may retire the exact staged name. Preserve an interrupted
+    /// unlink phase until the original parent and genuine absence are covered.
+    fn retire(
+        &mut self,
+        (path, expected, file): (&Path, &[u8], &mut Option<CreatedStage>),
+        store: &ServerStore,
+        inventory: &UpgradeInventory,
+    ) -> Result<(), AppError> {
+        if *self != Self::Unlinked {
+            *self = Self::Retiring;
+            exact_retained(path, file.as_ref().ok_or_else(denied)?, expected)?;
+            if remove_listed(path)? != Removal::Removed {
+                return Err(denied());
+            }
+            *self = Self::Unlinked;
+            drop(file.take());
+        }
+        inventory.sync_rejoin_catalog_parent(store)?;
+        absent(path)
+    }
+}
+
+impl WarmRejoinPending {
+    fn retire_unentered(
+        &mut self,
+        store: &ServerStore,
+        inventory: &UpgradeInventory,
+        (attempt, pending): (&Path, &Path),
+    ) -> Result<(), AppError> {
+        if self.key_may_have_entered
+            || self.request.is_some()
+            || self.transport.is_some()
+            || self.pending.is_some()
+            || self.pending_file.is_some()
+        {
+            return Err(denied());
+        }
+        absent(pending)?;
+        received::require_absent(store)?;
+        self.retirement.retire(
+            (attempt, &self.attempt, &mut self.attempt_file),
+            store,
+            inventory,
+        )
+    }
 }
 
 pub(in crate::store) struct ColdRejoinPending {
@@ -603,6 +671,29 @@ impl ServerStore {
         let catalog = self.cover_selected_rejoin_catalog(registration, removal, inventory)?;
         let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
         let pool = &policy.current.archive.pending.pool;
+        let binding = Binding::new(catalog, registration, removal, invite, token)?;
+        let key = Zeroizing::new(self.keys.db_key()?);
+        let attempt_path = fixed(self, false, ATTEMPT)?;
+        let pending_path = fixed(self, false, PENDING)?;
+        let limits = pending_limits()?;
+        let require_files = || {
+            inventory.require(self)?;
+            self.require_recovered_joined_removal(registration, removal)?;
+            absent(&fixed(self, false, REJOIN_STAGE)?)
+        };
+        let require = || {
+            require_current()?;
+            require_files()
+        };
+
+        if let Some(RejoinPendingOwner::Warm(original)) = slot.as_mut() {
+            if original.retirement != UnenteredAttempt::Writing {
+                require_files()?;
+                original.retire_unentered(self, inventory, (&attempt_path, &pending_path))?;
+                *slot = None;
+                require_current()?;
+            }
+        }
         let fee = if let Some(original) = slot.as_ref() {
             // The original invoice covers the files, retained request
             // and their transient sealing and read overlap.
@@ -610,18 +701,6 @@ impl ServerStore {
             None
         } else {
             Some(pool.try_reserve(WORK_BYTES)?)
-        };
-        let binding = Binding::new(catalog, registration, removal, invite, token)?;
-        let attempt = attempt_plain(&binding, invite)?;
-        let key = Zeroizing::new(self.keys.db_key()?);
-        let attempt_path = fixed(self, false, ATTEMPT)?;
-        let pending_path = fixed(self, false, PENDING)?;
-        let limits = pending_limits()?;
-        let require = || {
-            require_current()?;
-            inventory.require(self)?;
-            self.require_recovered_joined_removal(registration, removal)?;
-            absent(&fixed(self, false, REJOIN_STAGE)?)
         };
 
         let paths = [attempt_path.as_path(), pending_path.as_path()];
@@ -659,9 +738,6 @@ impl ServerStore {
             // An orphaned or unresolved reply cannot be reassigned to a
             // replacement attempt. Preserve it and refuse before entropy.
             received::require_absent(self)?;
-            if invite.binding().expired_at_data(now_ms) {
-                return Err(denied());
-            }
             self.with_rejoin_donor(registration, |layout, raw| {
                 RecoveredPinnedPending::require_rejoin_invite(
                     &key,
@@ -671,7 +747,15 @@ impl ServerStore {
                     invite.binding(),
                 )
             })?;
-            let sealed_attempt = seal_frame(&key, ATTEMPT_PURPOSE, &attempt, rng)?;
+            if invite.binding().expired_at_data(now_ms) {
+                return Err(AppError::ChatV2RejoinNeedsFreshInvite);
+            }
+            let sealed_attempt = seal_frame(
+                &key,
+                ATTEMPT_PURPOSE,
+                &attempt_plain(&binding, invite)?,
+                rng,
+            )?;
             *slot = Some(RejoinPendingOwner::Warm(Box::new(WarmRejoinPending {
                 cookie: std::sync::Arc::new(()),
                 binding,
@@ -682,6 +766,7 @@ impl ServerStore {
                 request: None,
                 transport: None,
                 key_may_have_entered: false,
+                retirement: UnenteredAttempt::Writing,
                 _lease: self._session.retain_for_physical_work(),
                 _fee: fee.ok_or_else(denied)?,
             })));
@@ -693,23 +778,41 @@ impl ServerStore {
             return Err(denied());
         }
         require()?;
+        if original.request.is_none() {
+            if original.key_may_have_entered {
+                return Err(denied());
+            }
+            if invite.binding().expired_at_data(now_ms) {
+                if original.attempt_file.is_some() {
+                    original.retire_unentered(self, inventory, (&attempt_path, &pending_path))?;
+                } else {
+                    absent(&attempt_path)?;
+                    absent(&pending_path)?;
+                    received::require_absent(self)?;
+                }
+                *slot = None;
+                return Err(AppError::ChatV2RejoinNeedsFreshInvite);
+            }
+        }
         if original.pending.is_none() {
             received::require_absent(self)?;
         }
         cover_new(&attempt_path, &original.attempt, &mut original.attempt_file)?;
         inventory.sync_rejoin_catalog_parent(self)?;
         if original.request.is_none() {
-            if original.key_may_have_entered || invite.binding().expired_at_data(now_ms) {
-                return Err(denied());
-            }
             absent(&pending_path)?;
-            require()?;
+            require_files()?;
             exact_retained(
                 &attempt_path,
                 original.attempt_file.as_ref().ok_or_else(denied)?,
                 &original.attempt,
             )?;
             received::require_absent(self)?;
+            if let Err(error) = require_current() {
+                original.retire_unentered(self, inventory, (&attempt_path, &pending_path))?;
+                *slot = None;
+                return Err(error);
+            }
             original.key_may_have_entered = true;
             let prepared = self.with_rejoin_donor(registration, |layout, raw| {
                 RecoveredPinnedPending::prepare_rejoin_from_original(
@@ -720,7 +823,9 @@ impl ServerStore {
                     (invite.binding(), token, now_ms),
                     removal,
                     limits,
-                    NativeV2JoinKeyEntry::new(native, cut, ends),
+                    (NativeV2JoinKeyEntry::new(native, cut, ends), || {
+                        require_current().is_ok()
+                    }),
                 )
             });
             match prepared {
@@ -732,11 +837,31 @@ impl ServerStore {
                 // have issued a KeyPackage. An unwind never reaches here.
                 Ok(Err(catcoms_sync::NativeV2RejoinFailure::BeforeDeviceEntry(_))) | Err(_) => {
                     original.key_may_have_entered = false;
+                    if require_current().is_err() {
+                        require_files()?;
+                        original.retire_unentered(
+                            self,
+                            inventory,
+                            (&attempt_path, &pending_path),
+                        )?;
+                        *slot = None;
+                    }
                     return Err(denied());
                 }
             }
         }
-        require()?;
+        let device_entered =
+            ends.holds_admitted_purpose_data(native, NativeChatKeyPurpose::JoinerDevice);
+        let require_cover = || {
+            if !device_entered {
+                require_current()?;
+            }
+            require_files()
+        };
+        // A successful exact key entry may cover only its own Pending
+        // before retiring. Lock suppresses this receipt and all further
+        // phases, but must not strand a provably completed KeyPackage.
+        require_cover()?;
         if original.transport.is_none() {
             original.transport = Some(JoinedTransportReservation::generate(rng)?);
         }
@@ -770,7 +895,7 @@ impl ServerStore {
         }
         let pending = original.pending.as_ref().ok_or_else(denied)?;
         let receipt = verify_pending(&binding, invite, &key, limits, pending)?;
-        require()?;
+        require_cover()?;
         cover_new(&pending_path, pending, &mut original.pending_file)?;
         inventory.sync_rejoin_catalog_parent(self)?;
         exact_retained(

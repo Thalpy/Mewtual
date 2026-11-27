@@ -360,7 +360,7 @@ async fn studio_scan_once(app: AppHandle) {
             .as_mut()
             .and_then(|vault| match vault {
                 MountedVault::Legacy(store) => Some(store.as_mut()),
-                MountedVault::TextV2(_) => None,
+                MountedVault::TextV2(_) | MountedVault::TextV2Retired(_) => None,
             })
             .map(|store| store.creative_pinned_cids().is_ok())
     })
@@ -451,7 +451,7 @@ pub(super) async fn clean_namespace(
                 .as_mut()
                 .and_then(|vault| match vault {
                     MountedVault::Legacy(store) => Some(store.as_mut()),
-                    MountedVault::TextV2(_) => None,
+                    MountedVault::TextV2(_) | MountedVault::TextV2Retired(_) => None,
                 })?
                 .begin_leave_cleanup(&key)
                 .ok()

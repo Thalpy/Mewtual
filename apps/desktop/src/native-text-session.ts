@@ -7,7 +7,7 @@ export type NativeTextServer = Readonly<{
 }>;
 export type RestoredChatSession<Legacy> =
   | { backend: "legacy"; servers: Legacy[] }
-  | { backend: "text-v2"; servers: NativeTextServer[] };
+  | { backend: "text-v2"; servers: NativeTextServer[]; recovery?: "removed" };
 export type NativeMembershipNotice = Readonly<{ server: number; context: string; removed: boolean }>;
 const fail = (): never => { throw new Error("The chat session could not be restored. Unlock again."); };
 const encoder = new TextEncoder();
@@ -49,6 +49,12 @@ export function decodeRestoredChatSession<Legacy>(value: unknown): RestoredChatS
     return { backend: "legacy", servers: value as Legacy[] };
   }
   const root = object(value);
+  if (Object.hasOwn(root, "recovery")) {
+    fields(root, ["backend", "servers", "recovery"]);
+    if (root.backend !== "text-v2" || root.recovery !== "removed"
+      || !Array.isArray(root.servers) || root.servers.length !== 0) return fail();
+    return { backend: "text-v2", servers: [], recovery: "removed" };
+  }
   fields(root, ["backend", "servers"]);
   if (root.backend !== "text-v2" || !Array.isArray(root.servers) || root.servers.length > 2) return fail();
   const seen = new Set<number>();

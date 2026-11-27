@@ -682,9 +682,27 @@ registration, Welcome and Remove stay in place through this step.
 The new admission descends from the exact selected removal. The retired
 owner can exchange the saved request over TCP and cover its Welcome,
 Outcome, signed prefix and Index4. The covered successor retains the old
-row and selects one replacement row. Saved outbox originals keep their
-original scopes. Live attachment, renderer rejoin, further same-device
-successors and physical acceptance remain open.
+row and selects one replacement row. Native startup attaches the exact
+replacement and replays its subsequent governing history. Saved outbox
+originals keep their original scopes. Terminal A1 can also be recovered
+before a replacement index exists without binding the old port.
+Native unlock and resume retain that authenticated mount as a
+recovery-only session with no active rows. In that session, use a fresh
+invite and approve the founder's numeric IP. The first command covers
+the rejoin catalog. Reopen Mewtual and enter the same invite to complete
+the original Pending, Welcome, prefix and replacement index. Reopen
+again to activate the new membership. A received delivery can resume
+locally without another network request. Later same-device successors
+and physical acceptance remain open.
+
+Selecting the rejoin catalog for a new invite checks the original
+retired vault, the signed anchor and policy, a new nonce, invite
+freshness and the current UI generation. Writing the Stage and
+renaming it to Current check that generation separately. The Stage is
+synced before the rename, including a cold retry with complete bytes.
+If the rename may have happened, an authenticated reopen confirms the
+same catalog. The Pending and Welcome cuts still require their own
+authorization.
 
 ## Acceptance before enabling
 

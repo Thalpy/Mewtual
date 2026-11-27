@@ -81,8 +81,22 @@ impl RequestAuthority for EntryAuthority {
 /// synchronous lock retirement; the generation prevents a thread paused before retirement
 /// from admitting an old request in the meantime. Duplicate same-session unlocks reuse custody.
 pub(super) fn current(state: &AppState, expected: u64) -> Option<RequestCancellation> {
+    current_for(state, expected, || !ui_session_closed(state))
+}
+
+pub(super) fn current_retired(state: &AppState, expected: u64) -> Option<RequestCancellation> {
+    current_for(state, expected, || {
+        native_text::retired_ui_current(state, expected)
+    })
+}
+
+fn current_for(
+    state: &AppState,
+    expected: u64,
+    permitted: impl FnOnce() -> bool,
+) -> Option<RequestCancellation> {
     let mut slot = state.keep_session.lock().unwrap_or_else(|e| e.into_inner());
-    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::SeqCst) != expected {
+    if !permitted() || state.ui_session_generation.load(Ordering::SeqCst) != expected {
         return None;
     }
     if slot

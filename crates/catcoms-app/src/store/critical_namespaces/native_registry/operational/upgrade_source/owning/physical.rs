@@ -285,7 +285,23 @@ impl Physical {
         &self,
         data: crate::store::NativeTextJoinedRegistrationData,
     ) -> Result<(), AppError> {
+        let store = self.current()?.checked_store()?;
+        if store
+            .with_installed_rejoin(|original| original.row(store, data).map(drop))?
+            .is_some()
+        {
+            return Ok(());
+        }
         self.with_registered_native_join(data, |_, _| Ok(()))
+    }
+
+    pub(super) fn has_recovered_terminal_candidate(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+    ) -> Result<bool, AppError> {
+        self.with_registered_native_join(data, |store, _| {
+            store.has_recovered_terminal_candidate(data)
+        })
     }
 
     pub(super) fn require_recovered_native_join_removal(
@@ -337,6 +353,18 @@ impl Physical {
         store.prepare_retired_rejoin_catalog(data, removal, original, rng)
     }
 
+    pub(super) fn require_fresh_rejoin_invite(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+        removal: catcoms_sync::SelectedRejoinRemoval,
+        invite: &catcoms_replication::chat::join_bindings::SignedInviteBindingData,
+        now_ms: u64,
+    ) -> Result<(), AppError> {
+        self.with_registered_native_join(data, |store, _| {
+            store.require_fresh_rejoin_invite(data, removal, invite, now_ms)
+        })
+    }
+
     pub(super) fn require_original_rejoin_catalog(
         &self,
         data: crate::store::NativeTextJoinedRegistrationData,
@@ -367,6 +395,7 @@ impl Physical {
             .is_some())
     }
 
+    #[cfg(any(test, feature = "native-chat-test-hooks"))]
     pub(super) fn stage_retired_rejoin_catalog(
         &self,
         prepared: &mut crate::store::persistence::governance_layout::joined::rejoin::RejoinCatalogPreparation,
@@ -374,17 +403,18 @@ impl Physical {
         let cell = self.cell.try_lock().map_err(|_| refused())?;
         cell.require_idle()?;
         self.handler.require_idle_cached()?;
-        prepared.stage_catalog(self.current()?.checked_store()?)
+        prepared.stage_catalog(self.current()?.checked_store()?, &|| Ok(()))
     }
 
     pub(super) fn select_retired_rejoin_catalog(
         &self,
         prepared: &mut crate::store::persistence::governance_layout::joined::rejoin::RejoinCatalogPreparation,
+        admit: &impl Fn() -> Result<(), AppError>,
     ) -> Result<(), AppError> {
         let cell = self.cell.try_lock().map_err(|_| refused())?;
         cell.require_idle()?;
         self.handler.require_idle_cached()?;
-        prepared.select_catalog(self.current()?.checked_store()?)
+        prepared.select_catalog(self.current()?.checked_store()?, admit)
     }
 
     pub(super) fn cover_selected_rejoin_catalog(
@@ -588,6 +618,16 @@ impl Physical {
         data: crate::store::NativeTextJoinedRegistrationData,
         complete_under_cell: impl FnOnce(&ServerStore, &UpgradeInventory) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
+        self.with_owned_join_inventory(data, |store, inventory| {
+            complete_under_cell(store, &inventory)
+        })
+    }
+
+    fn with_owned_join_inventory<T>(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+        complete_under_cell: impl FnOnce(&ServerStore, UpgradeInventory) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
         let cell = self.cell.try_lock().map_err(|_| refused())?;
         cell.require_idle()?;
         self.handler.require_idle_cached()?;
@@ -603,7 +643,46 @@ impl Physical {
         if store.recovered_join_registration_data()? != Some(data) {
             return Err(refused());
         }
-        complete_under_cell(store, &inventory)
+        complete_under_cell(store, inventory)
+    }
+
+    pub(super) fn has_rejoin_index(&self) -> Result<bool, AppError> {
+        self.current()?.checked_store()?.has_rejoin_index()
+    }
+
+    pub(super) fn has_rejoin_evidence(&self) -> Result<bool, AppError> {
+        self.current()?.checked_store()?.has_rejoin_evidence()
+    }
+
+    pub(super) fn recover_installed_rejoin(
+        &self,
+        registration: crate::store::NativeTextJoinedRegistrationData,
+        removal: catcoms_sync::SelectedRejoinRemoval,
+        negative: &catcoms_rt::RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<crate::store::NativeTextJoinedRegistrationData>, AppError> {
+        if !self.rejoin_catalog_selected()? {
+            return Err(refused());
+        }
+        self.with_owned_join_inventory(registration, |store, inventory| {
+            if !store.has_rejoin_index()? {
+                return Ok(None);
+            }
+            store
+                .recover_installed_rejoin(inventory, (registration, removal), negative, rng)
+                .map(Some)
+        })
+    }
+
+    pub(super) fn attach_recovered_rejoin<R: CryptoRngCore>(
+        &self,
+        inputs: &mut Option<JoinedRuntimeInputs<catcoms_net::MeshService, R>>,
+        output: &mut Option<catcoms_sync::ClosedV2JoinedNode<catcoms_net::MeshService, R>>,
+    ) -> Result<(), AppError> {
+        let store = self.current()?.checked_store()?;
+        store
+            .with_installed_rejoin_mut(|original| original.attach(store, inputs, output))?
+            .ok_or_else(refused)
     }
 
     pub(super) fn prepare_recovered_native_join_tcp(
@@ -614,7 +693,13 @@ impl Physical {
         let store = self.current()?.checked_store()?;
         let (mount, fee) =
             self.joined_exchange_resources(catcoms_net::NATIVE_TCP_LIFETIME_BYTES)?;
-        let seed = store.recovered_join_transport_seed(data)?;
+        let seed = match store.with_installed_rejoin(|original| {
+            original.row(store, *data)?;
+            original.prepare_tcp(store)
+        })? {
+            Some(seed) => seed,
+            None => store.recovered_join_transport_seed(data)?,
+        };
         if mount.is_cancelled() {
             return Err(refused());
         }
@@ -1964,6 +2049,24 @@ impl MetadataWork {
             self.physical.handler.debit(),
             self.physical.handler.pool(),
         )?;
+        if let Some((row, prior)) = store.with_installed_rejoin(|original| {
+            if warm.is_some() {
+                return Err(refused());
+            }
+            Ok((original.row(store, data)?, original.prior_registration()))
+        })? {
+            let (_, names) =
+                super::super::super::super::lifecycle::preparation::observe_registered_native_join(
+                    store, &inventory, prior,
+                )?;
+            inventory.require(store)?;
+            return Ok((row, names));
+        }
+        // A genuine older A1 can still be restored from old files. Surviving
+        // A2 evidence prevents publishing it through the normal row route.
+        if store.has_rejoin_evidence()? {
+            return Err(refused());
+        }
         let result =
             super::super::super::super::lifecycle::preparation::observe_registered_native_join(
                 store, &inventory, data,

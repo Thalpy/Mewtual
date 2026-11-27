@@ -12,7 +12,7 @@ const MAX_EPOCH: u64 = MAX_V2_GOVERNING_JOIN_STEPS as u64;
 const RECORD_FEE: usize = 8 * (codec::MEMBER_ADD_FRAME + codec::MEMBER_SELECTION_FRAME + 1) + 4096;
 
 #[derive(Default)]
-pub(super) struct MemberAdds {
+pub(in crate::store::persistence::governance_layout::joined) struct MemberAdds {
     covered: Vec<Covered>,
     pending: Option<Pending>,
     evicted: bool,
@@ -95,6 +95,45 @@ fn reserve(store: &ServerStore) -> Result<CatalogReadReservation, AppError> {
 }
 
 impl MemberAdds {
+    /// Choose whether startup must stay offline. An authenticated local
+    /// journal record can indicate a potential self-Remove but cannot prove
+    /// membership or issue authority. The one real graph replay does that.
+    pub(super) fn has_terminal_candidate(
+        store: &ServerStore,
+        context: V2PendingJoinContextData,
+        welcome: &[u8],
+        (own, epoch): (OwnerFactId, u64),
+    ) -> Result<bool, AppError> {
+        let _fee = reserve(store)?;
+        let key = Zeroizing::new(store.keys.db_key()?);
+        let mut predecessor = None::<OpenedArchiveObject>;
+        let mut gap = false;
+        for next in epoch.checked_add(1).ok_or_else(denied)?..=MAX_EPOCH {
+            let path = path(store, context, next)?;
+            let Some(file) = read(&path, codec::MEMBER_ADD_FRAME)? else {
+                // An orphaned selector is uncertainty, even if no later
+                // bodies survived. Never bind the old transport in this case.
+                absent(&selection_path(store, context, next)?)?;
+                gap = true;
+                continue;
+            };
+            if gap {
+                return Err(denied());
+            }
+            let latest = predecessor
+                .as_ref()
+                .map_or(welcome, |entry| entry.1.as_slice());
+            let record = codec::open_member_add(&key, context, latest, &file.1)?;
+            let frame = V2MemberTransitionFrameData::decode(&record.delivery)?;
+            exact_held(&path, &file.0, session_id(&file.0).map_err(io)?, &file.1)?;
+            if frame.removal_admission_data()? == Some(own) {
+                return Ok(true);
+            }
+            predecessor = Some(file);
+        }
+        Ok(false)
+    }
+
     fn require_original(&self) -> Result<(), AppError> {
         for covered in &self.covered {
             let (file, raw) = &covered.file;
@@ -140,7 +179,9 @@ impl MemberAdds {
         Ok(())
     }
 
-    pub(super) fn require_current(&self) -> Result<(), AppError> {
+    pub(in crate::store::persistence::governance_layout::joined) fn require_current(
+        &self,
+    ) -> Result<(), AppError> {
         if self.pending.is_some() || self.evicted || self.fork.is_some() {
             return Err(denied());
         }
@@ -160,7 +201,7 @@ impl MemberAdds {
         self.covered.try_reserve(1).map_err(|_| denied())
     }
 
-    pub(super) fn encode_selected_successor(
+    pub(in crate::store::persistence::governance_layout::joined) fn encode_selected_successor(
         &self,
         store: &ServerStore,
         context: V2PendingJoinContextData,
@@ -186,7 +227,10 @@ impl MemberAdds {
         Ok(data.delivery)
     }
 
-    pub(super) fn cover<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore>(
+    pub(in crate::store::persistence::governance_layout::joined) fn cover<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
         &mut self,
         (store, context): (&ServerStore, V2PendingJoinContextData),
         welcome: &[u8],
@@ -326,7 +370,10 @@ impl MemberAdds {
         Ok(retired)
     }
 
-    pub(super) fn recover<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore>(
+    pub(in crate::store::persistence::governance_layout::joined) fn recover<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
         &mut self,
         store: &ServerStore,
         context: V2PendingJoinContextData,

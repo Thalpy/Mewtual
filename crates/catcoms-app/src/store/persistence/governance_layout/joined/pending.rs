@@ -17,7 +17,7 @@ const INDEX_STAGE: &str = "chat-critical-namespaces.joined-pin.stage";
 const SOURCE_FEE: usize = 12 * MAX_FRAME + 4 * 1024 * 1024;
 const SOURCE_ID_DOMAIN: &str = "catcoms/private-chat-v2-native-pending-source-id/v1";
 mod registration;
-mod welcome;
+pub(super) mod welcome;
 pub(in crate::store) use registration::JoinedRegistrationDependency;
 pub(in crate::store) use welcome::RecoveredMemberPrefix;
 pub(super) use welcome::{reserve_sdk_graph, JoinedCore};
@@ -264,6 +264,11 @@ impl ServerStore {
         expected: NativeTextJoinedRegistrationData,
         request: &catcoms_sync::V2MemberAddRequestData,
     ) -> Result<Vec<u8>, AppError> {
+        if let Some(frame) =
+            self.with_installed_rejoin(|owner| owner.encode_successor(self, expected, request))?
+        {
+            return Ok(frame);
+        }
         if self.recovered_join_registration_data()? != Some(expected) {
             return Err(denied());
         }
@@ -290,6 +295,35 @@ impl ServerStore {
         caller: &catcoms_rt::RequestCancellation,
         rng: &mut impl catcoms_rt::CryptoRngCore,
     ) -> Result<critical_namespaces::joined_pin::welcome::RetiredJoinedMembership, AppError> {
+        let (retired, verified) = self.observe_recovered_member_add(node, delivery, caller, rng)?;
+        verified?;
+        Ok(retired)
+    }
+
+    /// Return the actual retired graph even if the final physical reproof
+    /// refuses. Native must still revoke the terminal source and drop that
+    /// graph outside its guards. Only successful reproof may report success.
+    pub(in crate::store) fn observe_recovered_member_add<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &self,
+        node: &mut catcoms_sync::ClosedV2JoinedNode<T, R>,
+        delivery: &[u8],
+        caller: &catcoms_rt::RequestCancellation,
+        rng: &mut impl catcoms_rt::CryptoRngCore,
+    ) -> Result<
+        (
+            critical_namespaces::joined_pin::welcome::RetiredJoinedMembership,
+            Result<(), AppError>,
+        ),
+        AppError,
+    > {
+        if let Some(retired) = self.with_installed_rejoin_mut(|owner| {
+            owner.cover_successor(self, node, delivery, caller, rng)
+        })? {
+            return Ok(retired);
+        }
         let (_, context) = self.selected_pending_join_data()?.ok_or_else(denied)?;
         let (retired, verified) = {
             let mut slot = self.joined_pin_index.try_lock().map_err(|_| denied())?;
@@ -303,8 +337,7 @@ impl ServerStore {
             let retired = welcome.cover_member_add(self, context, node, delivery, caller, rng)?;
             (retired, selected.require(self))
         };
-        verified?;
-        Ok(retired)
+        Ok((retired, verified))
     }
 
     #[cfg(all(test, any(windows, target_os = "linux")))]
@@ -391,6 +424,11 @@ impl ServerStore {
         &self,
         expected: NativeTextJoinedRegistrationData,
     ) -> Result<RecoveredMemberPrefix, AppError> {
+        if let Some(prefix) =
+            self.with_installed_rejoin(|owner| owner.capture_prefix(self, expected))?
+        {
+            return Ok(prefix);
+        }
         if self.recovered_join_registration_data()? != Some(expected) {
             return Err(denied());
         }
@@ -860,6 +898,42 @@ impl ServerStore {
         perform(layout, &original.original.1)
     }
 
+    /// Check a fresh candidate without creating a catalog stage, entering
+    /// a device key, taking signer custody or using entropy. After Pending
+    /// exists the exact saved-request recovery path handles invite expiry.
+    pub(in crate::store) fn require_fresh_rejoin_invite(
+        &self,
+        registration: NativeTextJoinedRegistrationData,
+        removal: catcoms_sync::SelectedRejoinRemoval,
+        invite: &SignedInviteBindingData,
+        now_ms: u64,
+    ) -> Result<(), AppError> {
+        super::rejoin::require_no_rejoin_journals(self)?;
+        self.require_recovered_joined_removal(registration, removal)?;
+        let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        let _fee = policy
+            .current
+            .archive
+            .pending
+            .pool
+            .try_reserve(SOURCE_FEE)?;
+        let key = Zeroizing::new(self.keys.db_key()?);
+        self.with_rejoin_donor(registration, |layout, raw| {
+            RecoveredPinnedPending::require_rejoin_invite(
+                &key,
+                layout,
+                raw,
+                registration.context,
+                invite,
+            )
+        })?;
+        self.require_recovered_joined_removal(registration, removal)?;
+        if invite.expired_at_data(now_ms) {
+            return Err(AppError::ChatV2RejoinNeedsFreshInvite);
+        }
+        Ok(())
+    }
+
     pub(in crate::store) fn require_recovered_joined_removal(
         &self,
         registration: NativeTextJoinedRegistrationData,
@@ -899,6 +973,27 @@ impl ServerStore {
             .ok_or_else(denied)?
             .require_recovered_removal(self, registration.context, removal)?;
         selected.require_with_rejoin_catalog(self, rejoin_catalog)
+    }
+
+    /// Read a routing hint from this mounted original. It cannot select a
+    /// retired membership or take the affine Welcome graph.
+    pub(in crate::store) fn has_recovered_terminal_candidate(
+        &self,
+        registration: NativeTextJoinedRegistrationData,
+    ) -> Result<bool, AppError> {
+        let (_, own, epoch) = registration.selected_data();
+        let slot = self.joined_pin_index.try_lock().map_err(|_| denied())?;
+        let selected = slot.as_ref().ok_or_else(denied)?;
+        selected.require(self)?;
+        let pending = selected.pending.as_ref().ok_or_else(denied)?;
+        if pending._pending.pending_data().1 != registration.context {
+            return Err(denied());
+        }
+        pending
+            .welcome
+            .as_ref()
+            .ok_or_else(denied)?
+            .has_terminal_candidate(self, registration.context, (own, epoch))
     }
 
     /// Exclusive access keeps the original held index and Welcome outside
