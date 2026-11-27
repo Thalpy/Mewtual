@@ -2638,6 +2638,38 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     let request = provider.next().await.expect("reverse history request");
                     third_row().serve_dependency_request(&third_selection, channel, request, fresh.clone(), rng)
                 };
+                // C can advertise B's exact received originals back to B.
+                // A clean own reply covers this sweep entry without treating
+                // B as having installed a received copy. Delete still needs
+                // the normal archive path in case a Create was retained there.
+                third_row()
+                    .prepare_member_contact(&third_selection, &member_contact, host, fresh.clone())
+                    .unwrap().connect(&scheduler).await.unwrap();
+                assert!((0..=256).any(|_| third_row()
+                    .maintain_archive_relay_catalogue(&third_selection, channel, &fresh).unwrap()));
+                let echo = recovered_row().prepare_archive_history_exchange(
+                    &selection, channel, author, fresh.clone(), &mut history_rng,
+                ).unwrap();
+                let (reply, served) = tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::join!(echo.receive(), serve_return(&mut provider, &mut third_rng))
+                }).await.unwrap();
+                served.unwrap();
+                let echo = recovered_row().open_history_response(
+                    &selection, reply.unwrap(), &fresh,
+                ).unwrap();
+                assert_eq!(recovered_row().covers_discovered_own_create(
+                    &selection, &echo, deepest, &fresh,
+                ), Ok(true));
+                assert_eq!(recovered_row().covers_discovered_own_create(
+                    &selection, &echo, edited.0, &fresh,
+                ), Ok(false));
+                assert_eq!(recovered_row().covers_discovered_own_create(
+                    &selection, &echo, deleted.0, &fresh,
+                ), Ok(false));
+                assert_eq!(recovered_row().selected_discovered_target(
+                    &selection, &echo, deepest, &fresh,
+                ), Ok(None));
+                drop(echo);
                 let exchange = recovered_row().prepare_history_exchange(
                     &selection, channel, author, fresh.clone(), &mut history_rng,
                 ).unwrap();
