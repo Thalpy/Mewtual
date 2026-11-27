@@ -542,20 +542,8 @@ async fn execute_received(
     let scope = call.scope.clone();
     let payment = call.payment.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let joined = matches!(&reader, Preparation::Joined(..));
-        let mut projection =
+        let projection =
             read_archived_target(reader, channel, action, &scope, &local, TargetRead::Refresh)?;
-        // The founder has already checked its own live ledger after a
-        // confirmed archive miss. Joined live rows are held by this worker.
-        if joined && projection.is_none() {
-            let slot = local.received.lock().map_err(|_| STALE.to_owned())?;
-            projection = slot
-                .as_ref()
-                .map(|ledger| ledger.read_message_projection(action))
-                .transpose()
-                .map_err(|_| STALE.to_owned())?
-                .flatten();
-        }
         Ok(ReceivedOutput {
             scope: "received-live",
             projection,
@@ -590,13 +578,21 @@ fn read_archived_target(
                 original.archived_founder_message_projection(channel, action, scope)
             }
         },
-        Preparation::Joined(original, row) => original.archived_message_projection(
-            &row,
-            channel,
-            action,
-            scope.clone(),
-            &mut OsCryptoRng,
-        ),
+        Preparation::Joined(original, row) => original
+            .received_archive_lookup(&row, channel, action, scope.clone(), &mut OsCryptoRng)
+            .and_then(|(mounted, projection)| {
+                if mounted || matches!(read, TargetRead::Archive) {
+                    return Ok(projection);
+                }
+                let slot = local
+                    .received
+                    .lock()
+                    .map_err(|_| V2MemberSaveRefusal::Stale)?;
+                slot.as_ref()
+                    .map(|ledger| ledger.read_message_projection(action))
+                    .transpose()
+                    .map(Option::flatten)
+            }),
     }
     .map_err(|failure| match failure {
         V2MemberSaveRefusal::Busy => BUSY.to_owned(),

@@ -1,5 +1,25 @@
 # Mewtual; Handover
 
+## Display received messages after archive selection
+
+A mounted Text Chat V2 receiver stages incoming signed originals in its
+paid ledger. Both new messages and revisions come from its selected
+archive. An unfinished archive write does not become visible through
+the live ledger. Older unmounted layouts can still use a live view.
+
+A native notice invalidates one Create. It carries neither the body nor a
+save receipt. When an archive write is uncertain, the notice clears any
+old text and the read remains fenced until the exact attempt is resolved.
+Warm and reopened founders now reconcile one exact debt per background
+turn using the original mounted row. The write may have completed after
+the carrier disconnected. An unresolved or damaged WAL is preserved.
+
+Windows passed the native interrupted Delete, exact debt reconciliation
+and alternate-member recovery cases on the integrated branch. Two App
+TCP cases also passed, including an interrupted Create. This checkpoint
+keeps the existing hot receive and archive retention limits. An
+interruption before a recoverable write still requires signed redelivery.
+
 ## Reply to an original saved before membership changes
 
 A current member can reply to an exact original it verified and saved

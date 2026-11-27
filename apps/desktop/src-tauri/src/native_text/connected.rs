@@ -220,8 +220,8 @@ impl Source {
         self.generation
     }
 
-    /// Notify the main renderer of one changed Create. Text is available only
-    /// through a fresh guarded history invocation from the installed row.
+    /// Invalidate a cached Create, including when a newly staged mutation
+    /// is waiting on disk. The event carries no text or save success.
     pub(super) async fn notify_received<R: tauri::Runtime>(
         &self,
         app: &tauri::AppHandle<R>,

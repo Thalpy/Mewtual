@@ -482,40 +482,41 @@ impl NativeTextColdFounderSource {
             .filter(|ledger| Arc::ptr_eq(&ledger.session.identity, &session.identity))
             .ok_or_else(refused)?;
         let governed = self.governed.as_mut().ok_or_else(refused)?;
-        let archived =
-            self.work
-                .with_recovered_founder_store(&self.selection, &self.source, |store| {
-                    governed.with_checked_member_parts(
-                        store,
-                        &self.source,
-                        |verifier, _, _, require| {
-                            archive_founder_member(
-                                (store, scope),
-                                &original,
-                                (&ledger.ledger, verifier),
-                                rng,
-                                |dependency, rng| {
-                                    let context =
-                                        history::outbox_context(&self.selection, &self.source);
-                                    history::saved_dependency(
-                                        store,
-                                        context,
-                                        &self.source,
-                                        scope,
-                                        dependency,
-                                        rng,
-                                    )
-                                },
-                                || {
-                                    require_response()?;
-                                    require()
-                                },
-                            )
-                        },
-                    )
-                })?;
-        require_response()?;
+        let archived = self
+            .work
+            .with_recovered_founder_store(&self.selection, &self.source, |store| {
+                governed.with_checked_member_parts(
+                    store,
+                    &self.source,
+                    |verifier, _, _, require| {
+                        archive_founder_member(
+                            (store, scope),
+                            &original,
+                            (&ledger.ledger, verifier),
+                            rng,
+                            |dependency, rng| {
+                                let context =
+                                    history::outbox_context(&self.selection, &self.source);
+                                history::saved_dependency(
+                                    store,
+                                    context,
+                                    &self.source,
+                                    scope,
+                                    dependency,
+                                    rng,
+                                )
+                            },
+                            || {
+                                require_response()?;
+                                require()
+                            },
+                        )
+                    },
+                )
+            })
+            .unwrap_or(Some(false));
         self.restore_first_add(&session.signal)?;
+        require_response()?;
         Ok(NativeTextFounderFrameOutcome::Retained(
             NativeTextFounderReceived::from_original(&original, archived),
         ))

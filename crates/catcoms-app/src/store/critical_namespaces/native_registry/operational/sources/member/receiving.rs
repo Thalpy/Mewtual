@@ -424,6 +424,24 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
         }
     }
 
+    /// Resolve an exact archive reservation under the current founder row,
+    /// independent of the original peer's connection or UI projection.
+    pub fn selected_founder_archive_target(
+        self,
+        channel: u128,
+        action: ActionId,
+        caller: &RequestCancellation,
+    ) -> Result<Option<ActionId>, V2MemberSaveRefusal> {
+        match self.finish()?.run_founder_member_receive(
+            channel,
+            FounderReceiveOperation::SelectedTarget(action),
+            caller,
+        )? {
+            FounderReceiveOutcome::SelectedTarget(target) => Ok(target),
+            _ => Err(V2MemberSaveRefusal::Failed),
+        }
+    }
+
     /// Read selected signed Creates, or the exact target's retained originals,
     /// under the live founder source. This cannot settle archive writes.
     pub fn audit_founder_history(
@@ -545,12 +563,17 @@ fn run_recovered_receive(
             )
         }
         FounderReceiveOperation::TargetMessage(action) => {
-            let archived = founder.archived_message_projection(channel, action, caller, rng)?;
-            FounderReceiveOutcome::RecoveredProjection(match archived {
-                Some(projection) => Some(projection),
-                None => founder.read_member_projection(channel, action, caller)?,
+            let (mounted, archived) =
+                founder.received_archive_lookup(channel, action, caller, rng)?;
+            FounderReceiveOutcome::RecoveredProjection(if mounted {
+                archived
+            } else {
+                founder.read_member_projection(channel, action, caller)?
             })
         }
+        FounderReceiveOperation::SelectedTarget(action) => FounderReceiveOutcome::SelectedTarget(
+            founder.selected_archive_target(channel, action, caller)?,
+        ),
         FounderReceiveOperation::Audit(query) => {
             FounderReceiveOutcome::Audit(founder.selected_history_audit(channel, query, caller)?)
         }

@@ -377,19 +377,42 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         caller: RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Option<NativeTextJoinedMemberProjection>, V2MemberSaveRefusal> {
-        let (ledger, selected) = self
+        self.received_archive_lookup(selection, channel, create, caller, rng)
+            .map(|(_, projection)| projection)
+    }
+
+    /// Distinguish a mounted archive miss from a layout with no archive.
+    /// Only the latter may fall back to an older live receive ledger.
+    pub fn received_archive_lookup(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        channel: u128,
+        create: ActionId,
+        caller: RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(bool, Option<NativeTextJoinedMemberProjection>), V2MemberSaveRefusal> {
+        let (ledger, (mounted, selected)) = self
             .prepare_member_ledger_with(
                 selection,
                 channel,
                 (caller.clone(), ReceiverView::LocalArchive),
                 |_| Ok(Some(())),
                 |source, ledger, view, ()| {
-                    source.replay_archived_message(ledger, view, create, &caller, rng)
+                    let mounted = source
+                        .store
+                        .has_mounted_shared_history()
+                        .map_err(|_| V2MemberSaveRefusal::Busy)?;
+                    if !mounted {
+                        return Ok((false, None));
+                    }
+                    source
+                        .replay_archived_message(ledger, view, create, &caller, rng)
+                        .map(|selected| (true, selected))
                 },
             )?
             .ok_or(V2MemberSaveRefusal::Unavailable)?;
         let Some(selected) = selected else {
-            return Ok(None);
+            return Ok((mounted, None));
         };
         use V2MemberSaveRefusal as Refusal;
         if ledger.signal.is_cancelled() {
@@ -403,18 +426,21 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             .ledger
             .guarded_projection(create, ARCHIVED_PROJECTION_WORK)
             .map_err(|_| Refusal::Failed)?;
-        Ok(Some(NativeTextJoinedMemberProjection::from_archive(
-            projection,
-            ledger.signal,
-            payment,
-            Box::new(SharedHistoryProjectionLease {
-                selected,
-                _view: ledger.view,
-                _ledger: ledger.ledger,
-                _invocation: Some(ledger._invocation),
-                _fee: ledger._fee,
-            }),
-        )))
+        Ok((
+            true,
+            Some(NativeTextJoinedMemberProjection::from_archive(
+                projection,
+                ledger.signal,
+                payment,
+                Box::new(SharedHistoryProjectionLease {
+                    selected,
+                    _view: ledger.view,
+                    _ledger: ledger.ledger,
+                    _invocation: Some(ledger._invocation),
+                    _fee: ledger._fee,
+                }),
+            )),
+        ))
     }
 
     #[cfg(test)]
@@ -838,26 +864,10 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     ) -> Result<Option<ActionId>, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
         self.with_member_receiver(selection, caller, |source| {
-            if !source
+            source
                 .store
-                .has_mounted_shared_history()
-                .map_err(|_| Refusal::Busy)?
-            {
-                return Ok(None);
-            }
-            let record = source
-                .store
-                .read_shared_history_record(source.history_scope(channel), action)
-                .map_err(|_| Refusal::Failed)?;
-            Ok(record.map(|record| {
-                record
-                    .original
-                    .action()
-                    .spec()
-                    .body
-                    .create()
-                    .unwrap_or(action)
-            }))
+                .selected_shared_history_target(source.history_scope(channel), action)
+                .map_err(|_| Refusal::Failed)
         })
     }
 

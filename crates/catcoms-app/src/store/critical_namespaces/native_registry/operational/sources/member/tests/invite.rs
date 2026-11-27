@@ -108,6 +108,11 @@ fn mounted_history_discovers_disconnected_originals_and_covers_their_archive() {
 }
 
 #[test]
+fn mounted_founder_never_projects_an_uncertain_received_create() {
+    run_mounted_successor(MountedSuccessor::UnsettledCreate);
+}
+
+#[test]
 fn mounted_native_remove_retires_the_exact_joined_row_and_preserves_the_survivor() {
     run_mounted_successor(MountedSuccessor::Remove);
 }
@@ -134,6 +139,7 @@ enum MountedSuccessor {
     OfflineDelivery,
     MissedHistory,
     Remove,
+    UnsettledCreate,
 }
 
 #[test]
@@ -425,6 +431,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         (false, Some(MountedSuccessor::OfflineDelivery)) => 0xe780,
         (false, Some(MountedSuccessor::Remove)) => 0xe790,
         (false, Some(MountedSuccessor::MissedHistory)) => 0xe7a0,
+        (false, Some(MountedSuccessor::UnsettledCreate)) => 0xe7b0,
     };
     let founder_dir = tempfile::tempdir().unwrap();
     let (founder, founder_budget) = selected_joined(founder_dir.path());
@@ -1081,13 +1088,17 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             else {
                 panic!("expected the original joined reply at the founder");
             };
+            let unsettled = successor == Some(MountedSuccessor::UnsettledCreate);
+            if unsettled {
+                crate::store::persistence::governance_layout::joined::shared_history::fail_next_history_wal_write_for_test();
+            }
             let received = founder_capture()
                 .receive_founder_member(&founder_receiver, &frame, &TestArchiveAdmission)
                 .unwrap()
                 .unwrap();
             assert_eq!(received.action, reply_id);
             assert_eq!(received.projection_target, reply_id);
-            assert_eq!(received.archived, Some(true));
+            assert_eq!(received.archived, Some(!unsettled));
             receipt
         })
         .await
@@ -1095,13 +1106,41 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         let projected = founder_capture()
             .read_founder_member_projection(channel, reply_id, &fresh)
             .unwrap()
-            .expect("the founder loaded its own exact saved parent");
-        assert!(projected
-            .with_publication(|view| matches!(
-                view, catcoms_replication::chat::GuardedProjection::Visible { text, .. }
-                if text == "Joined reply to the founder's saved original"
-            ))
-            .unwrap());
+            .expect("the founder staged the exact original and its parent");
+        assert!(
+            projected
+                .with_publication(|view| matches!(
+                    view, catcoms_replication::chat::GuardedProjection::Held { create }
+                    if *create == reply_id
+                ))
+                .unwrap(),
+            "the mounted live ledger cannot publish an archive body"
+        );
+        if successor == Some(MountedSuccessor::UnsettledCreate) {
+            let wal = only_named(founder_dir.path(), "history.wal");
+            let prefix = std::fs::read(&wal).unwrap();
+            assert_eq!(prefix.len(), 80);
+            let mut conflicting = prefix.clone();
+            conflicting[0] ^= 1;
+            std::fs::write(&wal, &conflicting).unwrap();
+            assert!(founder_capture()
+                .read_founder_target_projection(channel, reply_id, &fresh)
+                .is_err());
+            assert_eq!(std::fs::read(&wal).unwrap(), conflicting);
+            std::fs::write(&wal, &prefix).unwrap();
+            let selected = founder_capture()
+                .read_founder_target_projection(channel, reply_id, &fresh)
+                .unwrap()
+                .unwrap();
+            assert!(selected
+                .with_publication(|view| matches!(
+                    view, catcoms_replication::chat::GuardedProjection::Visible { text, .. }
+                    if text == "Joined reply to the founder's saved original"
+                ))
+                .unwrap());
+            assert!(!wal.exists());
+            return;
+        }
         let parent_projection = founder_capture()
             .read_founder_member_projection(channel, parent, &fresh)
             .unwrap()
@@ -3657,10 +3696,21 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 .unwrap();
             assert!(live
                 .with_publication(|view| matches!(
+                    view, catcoms_replication::chat::GuardedProjection::Held { create }
+                    if *create == reply_id
+                ))
+                .unwrap());
+            let selected_reply = original
+                .archived_message_projection(channel, reply_id, &fresh, &mut founder_rng)
+                .unwrap()
+                .unwrap();
+            assert!(selected_reply
+                .with_publication(|view| matches!(
                     view, catcoms_replication::chat::GuardedProjection::Visible { text, .. }
                     if text == reply_text
                 ))
                 .unwrap());
+            drop(selected_reply);
             stop.send_replace(true);
             assert!(original
                 .receive_member_frame(

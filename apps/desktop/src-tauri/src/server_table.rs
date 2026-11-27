@@ -114,6 +114,7 @@ struct ArchiveChanges {
 pub(super) struct ArchiveChange {
     pub(super) action: ActionId,
     pub(super) target: ActionId,
+    invalidated: bool,
 }
 
 impl NativeMemberWork {
@@ -142,7 +143,7 @@ impl NativeMemberWork {
         self.local.clone().try_lock_owned().ok()
     }
 
-    /// Admit an exact archive write before a live mutation can change the view.
+    /// Admit an exact archive write before refreshing any affected message.
     /// The caller holds the original row's local work permit.
     pub(super) fn reserve_archive_change(
         &self,
@@ -159,7 +160,11 @@ impl NativeMemberWork {
             return (change.target == target).then_some(false);
         }
         let slot = changes.unsettled.iter_mut().find(|item| item.is_none())?;
-        *slot = Some(ArchiveChange { action, target });
+        *slot = Some(ArchiveChange {
+            action,
+            target,
+            invalidated: false,
+        });
         Some(true)
     }
 
@@ -173,8 +178,8 @@ impl NativeMemberWork {
             })
     }
 
-    /// Retire only the exact outstanding joined entry. A confirmed absence
-    /// is safe because a joined mutation was staged without a live effect.
+    /// Retire only the exact outstanding entry. A confirmed absence is safe
+    /// because a mounted row stages actions without a live effect.
     pub(super) fn reconcile_archive_change(
         &self,
         attempted: ArchiveChange,
@@ -195,8 +200,30 @@ impl NativeMemberWork {
         None
     }
 
+    /// Mark one outstanding target dirty even if its original carrier
+    /// retired before dispatching a notice. The row permit serializes this
+    /// with admission and settlement. A later settlement still refreshes.
+    pub(super) fn take_archive_invalidation(&self, attempted: ArchiveChange) -> Option<ActionId> {
+        let mut changes = self.archive_changes.lock().ok()?;
+        let entry =
+            changes.unsettled.iter_mut().flatten().find(|entry| {
+                entry.action == attempted.action && entry.target == attempted.target
+            })?;
+        if std::mem::replace(&mut entry.invalidated, true) {
+            return None;
+        }
+        Some(entry.target)
+    }
+
     pub(super) fn settle_archive_change(&self, action: ActionId, target: ActionId) {
-        let _ = self.reconcile_archive_change(ArchiveChange { action, target }, Some(target));
+        let _ = self.reconcile_archive_change(
+            ArchiveChange {
+                action,
+                target,
+                invalidated: false,
+            },
+            Some(target),
+        );
     }
 
     pub(super) fn unsettled_archive_changes(
@@ -619,6 +646,12 @@ mod tests {
             panic!("the exact pending actions must survive");
         };
         assert_eq!(work.reconcile_archive_change(create, Some(other)), None);
+        assert_eq!(work.take_archive_invalidation(create), Some(target));
+        assert_eq!(work.take_archive_invalidation(create), None);
+        assert!(work
+            .unsettled_archive_changes(target)
+            .unwrap()
+            .contains(&Some(target)));
         // Selection can appear after the original wire lease has ended.
         assert_eq!(
             work.reconcile_archive_change(create, Some(target)),
