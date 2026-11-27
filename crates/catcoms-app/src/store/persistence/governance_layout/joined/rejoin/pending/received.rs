@@ -1,6 +1,12 @@
 //! Store authenticated A2 reply data before any Welcome key operation.
 use super::*;
 
+mod welcome;
+pub use welcome::{NativeTextRejoinOutcomeReceipt, NativeTextRejoinWelcomeStatus};
+pub(in crate::store) use welcome::{
+    RejoinWelcomeKeyEntry, RejoinWelcomeOwner, RejoinWelcomeOwners,
+};
+
 const RECEIVED: &str = "chat-critical-namespaces.rejoin-received.bin";
 const PURPOSE: &str = "catcoms/chat-v2/rejoin-received/v1";
 const VERSION: u16 = 1;
@@ -8,7 +14,8 @@ const MAX_FRAME: usize = 40 + 2 + 2 * 36 + 4 + MAX_V2_GOVERNING_JOIN_DELIVERY_BY
 const WORK: usize = 5 * MAX_FRAME + 128 * 1024;
 
 pub(super) fn require_absent(store: &ServerStore) -> Result<(), AppError> {
-    absent(&fixed(store, false, RECEIVED)?)
+    absent(&fixed(store, false, RECEIVED)?)?;
+    welcome::require_unstarted(store)
 }
 
 /// Exact covered reply data. It grants no authority to use the Welcome SDK.
@@ -77,12 +84,11 @@ fn encode_delivery(
     Ok(Zeroizing::new(out.finish()))
 }
 
-fn verify_delivery(
+fn delivery_bytes<'a>(
     binding: &Binding,
     original: &OpenedPending,
-    plain: &[u8],
-    received: Option<&[u8]>,
-) -> Result<NativeTextRejoinReceivedReceipt, AppError> {
+    plain: &'a [u8],
+) -> Result<&'a [u8], AppError> {
     let mut decoder = Decoder::new(plain);
     let invalid = |_| denied();
     if decoder.get_u16().map_err(invalid)? != VERSION
@@ -93,10 +99,20 @@ fn verify_delivery(
     }
     let delivery = decoder.get_bytes().map_err(invalid)?;
     decoder.finish().map_err(invalid)?;
-    if delivery.is_empty()
-        || delivery.len() > MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES
-        || received.is_some_and(|bytes| bytes != delivery)
-    {
+    if delivery.is_empty() || delivery.len() > MAX_V2_GOVERNING_JOIN_DELIVERY_BYTES {
+        return Err(denied());
+    }
+    Ok(delivery)
+}
+
+fn verify_delivery(
+    binding: &Binding,
+    original: &OpenedPending,
+    plain: &[u8],
+    received: Option<&[u8]>,
+) -> Result<NativeTextRejoinReceivedReceipt, AppError> {
+    let delivery = delivery_bytes(binding, original, plain)?;
+    if received.is_some_and(|bytes| bytes != delivery) {
         return Err(denied());
     }
     original
@@ -173,16 +189,24 @@ impl ServerStore {
                 let plain = open_frame(&key, PURPOSE, &frame)?;
                 verify_delivery(&binding, &original, &plain, received)?;
                 (Held::Selected(file), frame)
-            } else if let Some(delivery) = received {
-                let plain = encode_delivery(&binding, original.receipt.request_digest, delivery)?;
-                verify_delivery(&binding, &original, &plain, Some(delivery))?;
-                require()?;
-                (Held::Stage(None), seal_frame(&key, PURPOSE, &plain, rng)?)
             } else {
-                require()?;
-                absent(&path)?;
-                require_current()?;
-                return Ok(None);
+                // A later journal binds the exact original Received frame.
+                // Its missing parent cannot be rebuilt with a new nonce.
+                welcome::require_unstarted(self)?;
+                if let Some(delivery) = received {
+                    let plain =
+                        encode_delivery(&binding, original.receipt.request_digest, delivery)?;
+                    verify_delivery(&binding, &original, &plain, Some(delivery))?;
+                    require()?;
+                    welcome::require_unstarted(self)?;
+                    (Held::Stage(None), seal_frame(&key, PURPOSE, &plain, rng)?)
+                } else {
+                    require()?;
+                    welcome::require_unstarted(self)?;
+                    absent(&path)?;
+                    require_current()?;
+                    return Ok(None);
+                }
             };
             require()?;
             *slot = Some(RejoinReceivedOwner {

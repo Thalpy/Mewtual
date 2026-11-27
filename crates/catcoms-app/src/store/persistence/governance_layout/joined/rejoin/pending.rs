@@ -13,8 +13,13 @@ use catcoms_sync::{
 use catcoms_wire::{Decoder, Encoder};
 
 mod received;
-pub use received::NativeTextRejoinReceivedReceipt;
-pub(in crate::store) use received::{RejoinReceivedInput, RejoinReceivedOwner};
+pub use received::{
+    NativeTextRejoinOutcomeReceipt, NativeTextRejoinReceivedReceipt, NativeTextRejoinWelcomeStatus,
+};
+pub(in crate::store) use received::{
+    RejoinReceivedInput, RejoinReceivedOwner, RejoinWelcomeKeyEntry, RejoinWelcomeOwner,
+    RejoinWelcomeOwners,
+};
 
 const ATTEMPT: &str = "chat-critical-namespaces.rejoin-attempt.bin";
 const PENDING: &str = "chat-critical-namespaces.rejoin-pending.bin";
@@ -149,6 +154,7 @@ fn attempt_plain(
 struct OpenedPending {
     receipt: NativeTextRejoinPendingReceipt,
     recovered: RecoveredV2PendingJoinSource,
+    sealed: SealedV2PendingJoinSource,
     transport: JoinedTransportReservation,
 }
 
@@ -209,6 +215,7 @@ fn open_pending(
             context: binding.context,
         },
         recovered,
+        sealed,
         transport,
     })
 }

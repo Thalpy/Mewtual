@@ -1533,6 +1533,11 @@ async fn native_text_rejoin_received_data_recovers_without_network_or_key_entry(
     native_text_membership_removal_reopen(MembershipAfterRemove::RejoinReceived).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_rejoin_welcome_covers_a_closed_outcome_and_holds_ambiguous_entry() {
+    native_text_membership_removal_reopen(MembershipAfterRemove::RejoinWelcome).await;
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MembershipAfterRemove {
     Retired,
@@ -1540,6 +1545,7 @@ enum MembershipAfterRemove {
     StagedAdd,
     RejoinExchange,
     RejoinReceived,
+    RejoinWelcome,
 }
 
 async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) {
@@ -2090,7 +2096,9 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
         std::fs::write(&pending, &pending_bytes).unwrap();
         if matches!(
             scenario,
-            MembershipAfterRemove::RejoinExchange | MembershipAfterRemove::RejoinReceived
+            MembershipAfterRemove::RejoinExchange
+                | MembershipAfterRemove::RejoinReceived
+                | MembershipAfterRemove::RejoinWelcome
         ) {
             let admit = |owner: &catcoms_app::store::NativeTextRemovedJoinedVault, generation| {
                 let mut prepared = owner
@@ -2166,7 +2174,8 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
             assert_eq!(std::fs::read(&catalog).unwrap(), bytes);
             assert_eq!(std::fs::read(&pending).unwrap(), pending_bytes);
 
-            if scenario == MembershipAfterRemove::RejoinReceived {
+            if scenario != MembershipAfterRemove::RejoinExchange {
+                use catcoms_app::store::NativeTextRejoinWelcomeStatus;
                 let receipt = delivery
                     .cover(&mut reopened, invitation, &mut OsCryptoRng)
                     .unwrap();
@@ -2187,6 +2196,26 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                         .unwrap(),
                     Some(receipt),
                 );
+                let welcome = if scenario == MembershipAfterRemove::RejoinWelcome {
+                    let NativeTextRejoinWelcomeStatus::Covered(result) = reopened
+                        .cover_rejoin_welcome(&local_ui, invitation, &caller, &mut OsCryptoRng)
+                        .unwrap()
+                    else {
+                        panic!("the exact covered delivery enters one Welcome");
+                    };
+                    assert_eq!(result.request_digest, receipt.request_digest);
+                    assert_eq!(result.epoch, 3);
+                    assert_eq!(
+                        reopened
+                            .cover_rejoin_welcome(&local_ui, invitation, &caller, &mut NeverRng)
+                            .unwrap(),
+                        NativeTextRejoinWelcomeStatus::Covered(result),
+                    );
+                    assert_eq!(reopened.removal_data().unwrap(), Some(proof));
+                    Some(result)
+                } else {
+                    None
+                };
                 drop((local_ui, ui, candidate, reopened));
                 wait_for_original_vault().await;
 
@@ -2213,6 +2242,24 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                     .unwrap()
                     .unwrap();
                 assert_eq!(replay.request_digest, saved.request_digest);
+                if welcome.is_some() {
+                    let backup = original_received.with_extension("missing-received-for-test");
+                    let sdk =
+                        member_path.join("chat-critical-namespaces.rejoin-welcome-attempt.bin");
+                    let outcome = member_path.join("chat-critical-namespaces.rejoin-outcome.bin");
+                    let before = (
+                        std::fs::read(&sdk).unwrap(),
+                        std::fs::read(&outcome).unwrap(),
+                    );
+                    std::fs::rename(&original_received, &backup).unwrap();
+                    assert!(cold
+                        .recover_rejoin_received(&ui, invitation, &caller, &mut NeverRng)
+                        .is_err());
+                    assert!(!original_received.exists());
+                    assert_eq!(std::fs::read(sdk).unwrap(), before.0);
+                    assert_eq!(std::fs::read(outcome).unwrap(), before.1);
+                    std::fs::rename(&backup, &original_received).unwrap();
+                }
                 let partial = &raw[..raw.len() / 2];
                 std::fs::write(&original_received, partial).unwrap();
                 assert!(cold
@@ -2227,8 +2274,57 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                 );
                 assert_eq!(std::fs::read(&original_received).unwrap(), raw);
                 assert_eq!(cold.removal_data().unwrap(), Some(proof));
+                if let Some(result) = welcome {
+                    assert_eq!(
+                        cold.recover_rejoin_welcome(&ui, invitation, &caller, &mut NeverRng)
+                            .unwrap(),
+                        NativeTextRejoinWelcomeStatus::Covered(result),
+                    );
+                    assert_eq!(cold.removal_data().unwrap(), Some(proof));
+                }
                 drop((ui, capture, cold));
                 wait_for_original_vault().await;
+
+                if welcome.is_some() {
+                    let sdk_attempt =
+                        member_path.join("chat-critical-namespaces.rejoin-welcome-attempt.bin");
+                    let sdk_outcome =
+                        member_path.join("chat-critical-namespaces.rejoin-outcome.bin");
+                    let attempt_frame = std::fs::read(&sdk_attempt).unwrap();
+                    let held_outcome = sdk_outcome.with_extension("held-outcome-for-test");
+                    std::fs::rename(&sdk_outcome, &held_outcome).unwrap();
+                    let (mut held, paid) = open();
+                    timeout(Duration::from_secs(10), async {
+                        while held.removal_data().unwrap().is_none() {
+                            SystemClock.sleep(Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    let mut capture = held
+                        .prepare_rejoin_ui(3, paid.prepare().unwrap())
+                        .finish()
+                        .unwrap();
+                    let ui = held.admit_rejoin_ui(&mut capture).unwrap();
+                    held.cover_rejoin_pending(&ui, inputs, &caller, &mut NeverRng)
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        held.recover_rejoin_received(&ui, invitation, &caller, &mut NeverRng)
+                            .unwrap(),
+                        Some(receipt),
+                    );
+                    assert_eq!(
+                        held.recover_rejoin_welcome(&ui, invitation, &caller, &mut NeverRng)
+                            .unwrap(),
+                        NativeTextRejoinWelcomeStatus::Held,
+                    );
+                    assert_eq!(std::fs::read(&sdk_attempt).unwrap(), attempt_frame);
+                    assert!(!sdk_outcome.exists());
+                    std::fs::rename(&held_outcome, &sdk_outcome).unwrap();
+                    drop((ui, capture, held));
+                    wait_for_original_vault().await;
+                }
 
                 let held_attempt = attempt.with_extension("rejoin-attempt-held-for-test");
                 let held_pending = pending.with_extension("rejoin-pending-held-for-test");

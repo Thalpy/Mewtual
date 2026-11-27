@@ -3,10 +3,11 @@
 use super::super::super::native_ui::UiEffectNegative;
 use super::*;
 use crate::store::persistence::governance_layout::joined::rejoin::{
-    PreparedRejoinTransport, RejoinReceivedInput,
+    PreparedRejoinTransport, RejoinReceivedInput, RejoinWelcomeKeyEntry,
 };
 use crate::store::{
     NativeTextInvitePacketData, NativeTextRejoinPendingReceipt, NativeTextRejoinReceivedReceipt,
+    NativeTextRejoinWelcomeStatus,
 };
 use catcoms_rt::{Clock, PeerId, RequestAuthority, SystemClock};
 
@@ -144,6 +145,84 @@ impl NativeTextRemovedJoinedVault {
 }
 
 impl NativeTextRemovedJoinedVault {
+    /// Complete or recover the private Welcome result. This leaves the
+    /// retired native index active until a separate installation settles.
+    pub fn cover_rejoin_welcome(
+        &mut self,
+        ui: &UiCapture,
+        invite: (&NativeTextInvitePacketData<'_>, [u8; 32]),
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextRejoinWelcomeStatus, AppError> {
+        if !self.tcp_drain.is_drained() {
+            return Ok(NativeTextRejoinWelcomeStatus::WaitingForTransport);
+        }
+        let command = self.ui.require_capture(ui)?;
+        let source = self.key_source.observe();
+        let mut pending_cut = self
+            .key_source
+            .prepare_cut(
+                command,
+                catcoms_rt::NativeChatKeyPurpose::JoinerPendingSource,
+            )
+            .map_err(|_| refused())?;
+        let mut welcome_cut = self
+            .key_source
+            .prepare_cut(command, catcoms_rt::NativeChatKeyPurpose::JoinerWelcomeSdk)
+            .map_err(|_| refused())?;
+        let mut ends = catcoms_rt::NativeChatKeyEnds::new();
+        let keys = RejoinWelcomeKeyEntry {
+            source: &source,
+            pending: &mut pending_cut,
+            welcome: &mut welcome_cut,
+            ends: &mut ends,
+        };
+        self.run_rejoin_welcome(ui, invite, caller, rng, Some(keys))
+    }
+
+    /// Recover the covered closed result or a held attempt without preparing
+    /// either native key cut. The caller has already covered Received.
+    pub fn recover_rejoin_welcome(
+        &mut self,
+        ui: &UiCapture,
+        invite: (&NativeTextInvitePacketData<'_>, [u8; 32]),
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextRejoinWelcomeStatus, AppError> {
+        if !self.tcp_drain.is_drained() {
+            return Ok(NativeTextRejoinWelcomeStatus::WaitingForTransport);
+        }
+        self.ui.require_capture(ui)?;
+        self.run_rejoin_welcome(ui, invite, caller, rng, None)
+    }
+
+    fn run_rejoin_welcome(
+        &mut self,
+        ui: &UiCapture,
+        invite: (&NativeTextInvitePacketData<'_>, [u8; 32]),
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+        keys: Option<RejoinWelcomeKeyEntry<'_>>,
+    ) -> Result<NativeTextRejoinWelcomeStatus, AppError> {
+        let authority = &self.ui;
+        let require_current = || {
+            if caller.is_cancelled() || !authority.is_current_cached(ui) {
+                return Err(refused());
+            }
+            Ok(())
+        };
+        let pending = self.rejoin_pending.as_ref().ok_or_else(refused)?;
+        let received = self.rejoin_received.as_ref().ok_or_else(refused)?;
+        self.index.cover_rejoin_welcome(
+            (self.registration, self.removal),
+            (pending, received, &mut self.rejoin_welcome),
+            invite,
+            (keys, caller),
+            rng,
+            require_current,
+        )
+    }
+
     /// Recover already covered delivery data under a fresh admitted UI
     /// generation. The caller first proves the covered replacement Pending.
     /// Nothing connects or enters a native key on this path.
