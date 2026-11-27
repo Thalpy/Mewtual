@@ -1,5 +1,20 @@
 # Mewtual; Handover
 
+## Cover the closed Welcome for a replacement membership
+
+The retired vault verifies the saved delivery and restores its exact
+private Pending under a native PendingSource cut. Before the Welcome
+SDK cut, it covers a separate possible-entry file. The same warm owner
+retains the completed graph for sealing and retry. A cold opener can
+recover the closed Outcome under a fresh UI capture, without preparing
+either key cut. A possible entry without an Outcome stays held. The
+original A1 registration remains terminal.
+
+The Windows native fixture exercised the closed warm Outcome, its
+cold recovery, and an ambiguous retained attempt. The selected Core
+prefix, Index4 installation, native renderer route and physical
+acceptance still need integration.
+
 ## Recover a received replacement membership reply
 
 The retired vault can cover the authenticated A2 delivery in a separate

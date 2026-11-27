@@ -9,7 +9,9 @@ use super::super::native_ui::{
 };
 use super::*;
 use crate::store::persistence::governance_layout::joined::{
-    rejoin::{RejoinCatalogPreparation, RejoinPendingOwner, RejoinReceivedOwner},
+    rejoin::{
+        RejoinCatalogPreparation, RejoinPendingOwner, RejoinReceivedOwner, RejoinWelcomeOwner,
+    },
     JoinedRuntimeInputs,
 };
 use crate::store::NativeTextJoinedRegistrationData;
@@ -68,6 +70,7 @@ pub struct NativeTextRemovedJoinedVault {
     rejoin_pending: Option<RejoinPendingOwner>,
     rejoin_tcp: Option<Arc<join_tcp::Transport>>,
     rejoin_received: Option<RejoinReceivedOwner>,
+    rejoin_welcome: Option<Box<RejoinWelcomeOwner>>,
 }
 
 catcoms_rt::redacted_debug! {
@@ -620,6 +623,7 @@ impl<R: CryptoRngCore> NativeTextJoinedRuntime<catcoms_net::MeshService, R> {
                 rejoin_pending: None,
                 rejoin_tcp: None,
                 rejoin_received: None,
+                rejoin_welcome: None,
             };
             if negative.is_cancelled() {
                 return Err(refused());

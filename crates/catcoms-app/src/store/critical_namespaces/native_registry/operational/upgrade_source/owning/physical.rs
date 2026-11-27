@@ -479,6 +479,37 @@ impl Physical {
         })
     }
 
+    pub(super) fn cover_rejoin_welcome(
+        &self,
+        original: (
+            crate::store::NativeTextJoinedRegistrationData,
+            catcoms_sync::SelectedRejoinRemoval,
+        ),
+        sources: RejoinWelcomeOwners<'_>,
+        invite: (&crate::store::NativeTextInvitePacketData<'_>, [u8; 32]),
+        authority: (
+            Option<RejoinWelcomeKeyEntry<'_>>,
+            &catcoms_rt::RequestCancellation,
+        ),
+        rng: &mut impl CryptoRngCore,
+        require_current: impl Fn() -> Result<(), AppError>,
+    ) -> Result<crate::store::NativeTextRejoinWelcomeStatus, AppError> {
+        if !self.rejoin_catalog_selected()? {
+            return Err(refused());
+        }
+        self.with_registered_native_join_inventory(original.0, |store, inventory| {
+            store.cover_rejoin_welcome(
+                inventory,
+                original,
+                sources,
+                invite,
+                authority,
+                rng,
+                require_current,
+            )
+        })
+    }
+
     fn with_registered_native_join<T>(
         &self,
         data: crate::store::NativeTextJoinedRegistrationData,

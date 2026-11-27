@@ -57,7 +57,12 @@ Received file. Warm retries retain its original identity and bytes.
 Cold recovery checks the same selected request and delivery with a fresh
 authorized UI capture. Torn records and replies missing their original
 Pending pair are preserved. Neither permits generation of a new package.
-Received conveys no information about entry into the Welcome SDK.
+The Welcome SDK requires a separate native cut and a durable
+possible-entry fence bound to the held Received and Pending frames.
+A verified complete Outcome recovers the closed graph. A cold
+possible-entry without Outcome preserves the journal and does not
+enter Welcome again. Index4 and a selected Core prefix are required
+before the graph can serve an active membership.
 
 Cold founder startup can complete a fully staged later Add only after vault
 authentication and replay under the original pin. It retains and rechecks

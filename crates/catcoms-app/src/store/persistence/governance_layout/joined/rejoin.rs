@@ -14,10 +14,13 @@ use catcoms_sync::SelectedRejoinRemoval;
 const REJOIN_STAGE: &str = "chat-critical-namespaces.rejoin.stage";
 
 mod pending;
-pub use pending::{NativeTextRejoinPendingReceipt, NativeTextRejoinReceivedReceipt};
+pub use pending::{
+    NativeTextRejoinOutcomeReceipt, NativeTextRejoinPendingReceipt,
+    NativeTextRejoinReceivedReceipt, NativeTextRejoinWelcomeStatus,
+};
 pub(in crate::store) use pending::{
     PreparedRejoinTransport, RejoinKeyEntry, RejoinPendingOwner, RejoinReceivedInput,
-    RejoinReceivedOwner,
+    RejoinReceivedOwner, RejoinWelcomeKeyEntry, RejoinWelcomeOwner, RejoinWelcomeOwners,
 };
 
 /// The exact native inventory can outlive the handler scratch that checked

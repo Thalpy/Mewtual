@@ -674,7 +674,9 @@ impl TextCurrentSdkGraphReservation for RestorePayment {
     }
 }
 
-fn reserve_sdk_graph(store: &ServerStore) -> Result<TextCurrentSdkRestoreAdmission, AppError> {
+pub(in crate::store::persistence::governance_layout::joined) fn reserve_sdk_graph(
+    store: &ServerStore,
+) -> Result<TextCurrentSdkRestoreAdmission, AppError> {
     let restore = TextCurrentAddLimits::governed_text_v2();
     let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
     let fee = policy
