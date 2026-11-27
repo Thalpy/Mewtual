@@ -21,7 +21,16 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     /// materialized Header/Admission. No caller-supplied WelcomeSpec is accepted.
     /// Root MUST durably cover the returned intent before sign_welcome_native.
     pub fn prepare_welcome_data(&mut self) -> Result<(), SyncError> {
-        let p = self.pending.as_mut().ok_or_else(unavailable)?;
+        self.pending
+            .as_mut()
+            .ok_or_else(unavailable)?
+            .prepare_welcome()
+    }
+}
+
+impl PendingAdd {
+    pub(super) fn prepare_welcome(&mut self) -> Result<(), SyncError> {
+        let p = self;
         if p.welcome.is_some() {
             return Ok(()); // cached historical DATA, including after closure
         }
@@ -68,16 +77,16 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         });
         Ok(())
     }
+}
 
+impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     /// Exact bounded unsigned DATA for Root's covering WelcomeIntent. This
     /// contains no private routing plaintext, source/key or positive save proof.
     pub fn unsigned_welcome_data(&self) -> Result<(&WelcomeBindingSpecData, &[u8]), SyncError> {
-        let w = self
-            .pending
+        self.pending
             .as_ref()
-            .and_then(|p| p.welcome.as_ref())
-            .ok_or_else(unavailable)?;
-        Ok((&w.spec, &w.bytes))
+            .ok_or_else(unavailable)?
+            .unsigned_welcome()
     }
 
     /// Native key tail with no codec, replay or SDK-graph work. The bounded
@@ -91,20 +100,34 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     /// Borrow the exact cached key result for Root's RawWelcome record before
     /// fallible materialization. Source or native closure cannot erase it.
     pub fn raw_welcome_signature_data(&self) -> Result<&[u8; 64], SyncError> {
-        self.pending
-            .as_ref()
-            .and_then(|p| p.welcome.as_ref()?.raw.as_ref())
-            .ok_or_else(unavailable)
+        self.pending.as_ref().ok_or_else(unavailable)?.raw_welcome()
     }
 
     /// Outside writers, reconstruct and verify using ONLY retained raw64.
     /// Even an error/unwind leaves that raw and the spent key entry owned.
     pub fn materialize_welcome_data(&mut self) -> Result<(), SyncError> {
-        let w = self
-            .pending
+        self.pending
             .as_mut()
-            .and_then(|p| p.welcome.as_mut())
-            .ok_or_else(unavailable)?;
+            .ok_or_else(unavailable)?
+            .materialize_welcome()
+    }
+}
+
+impl PendingAdd {
+    pub(super) fn unsigned_welcome(&self) -> Result<(&WelcomeBindingSpecData, &[u8]), SyncError> {
+        let welcome = self.welcome.as_ref().ok_or_else(unavailable)?;
+        Ok((&welcome.spec, &welcome.bytes))
+    }
+
+    pub(super) fn raw_welcome(&self) -> Result<&[u8; 64], SyncError> {
+        self.welcome
+            .as_ref()
+            .and_then(|welcome| welcome.raw.as_ref())
+            .ok_or_else(unavailable)
+    }
+
+    pub(super) fn materialize_welcome(&mut self) -> Result<(), SyncError> {
+        let w = self.welcome.as_mut().ok_or_else(unavailable)?;
         if w.signed.is_some() {
             return Ok(());
         }
@@ -120,7 +143,9 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
         w.signed = Some(signed);
         Ok(())
     }
+}
 
+impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     /// Cached historical response binding only. Root independently controls
     /// release of this and the exact Welcome/routing payloads after final save.
     pub fn signed_welcome_data(&self) -> Result<&SignedWelcomeBindingData, SyncError> {
@@ -135,15 +160,10 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     /// and original SDK completion. Root may seal these for the covering
     /// transaction. Any publication still requires a separately selected head.
     pub fn join_response_data(&self) -> Result<V2JoinResponseData<'_>, SyncError> {
-        let binding = self.signed_welcome_data()?;
-        let result = self.completed_add_data()?;
-        Ok(V2JoinResponseData {
-            binding,
-            welcome: result.welcome_data(),
-            sealed_routing: result
-                .sealed_routing_transfer_data()
-                .map_err(|_| unavailable())?,
-        })
+        self.pending
+            .as_ref()
+            .ok_or_else(unavailable)?
+            .join_response()
     }
 
     /// Simulate a post-key materializer fault without exposing a production
@@ -163,17 +183,57 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
 
 impl V2FounderAddSigning<'_> {
     pub fn sign_welcome_native(&mut self) -> Result<(), SyncError> {
-        let p = &mut *self.pending;
+        if self
+            .pending
+            .welcome
+            .as_ref()
+            .ok_or_else(unavailable)?
+            .raw
+            .is_some()
+        {
+            return Ok(());
+        }
+        self.negative.require_live_data()?;
+        self.pending.sign_welcome_native(
+            &self.seed.body.device,
+            self.seed.body.context.spec_data().signer,
+        )
+    }
+}
+
+impl PendingAdd {
+    pub(super) fn join_response(&self) -> Result<V2JoinResponseData<'_>, SyncError> {
+        let binding = self
+            .welcome
+            .as_ref()
+            .and_then(|welcome| welcome.signed.as_ref())
+            .ok_or_else(unavailable)?;
+        let result = self
+            .cell
+            .as_ref()
+            .ok_or_else(unavailable)?
+            .completed_result_data()
+            .map_err(|_| unavailable())?;
+        Ok(V2JoinResponseData {
+            binding,
+            welcome: result.welcome_data(),
+            sealed_routing: result
+                .sealed_routing_transfer_data()
+                .map_err(|_| unavailable())?,
+        })
+    }
+
+    pub(super) fn sign_welcome_native(
+        &mut self,
+        device: &MlsDevice,
+        signer: [u8; 32],
+    ) -> Result<(), SyncError> {
+        let p = self;
         let w = p.welcome.as_mut().ok_or_else(unavailable)?;
         if w.raw.is_some() {
             return Ok(());
         }
-        self.negative.require_live_data()?;
-        let signer = self.seed.body.context.spec_data().signer;
-        if w.entered
-            || w.spec.admitter != signer
-            || !self.seed.body.device.retained_ed25519_key_matches(&signer)
-        {
+        if w.entered || w.spec.admitter != signer || !device.retained_ed25519_key_matches(&signer) {
             return Err(unavailable());
         }
         p.welcome_native.enter(
@@ -185,10 +245,7 @@ impl V2FounderAddSigning<'_> {
         w.entered = true;
         #[cfg(test)]
         test_cut(TestCut::WelcomeEntered);
-        let raw = self
-            .seed
-            .body
-            .device
+        let raw = device
             .sign_retained_ed25519_bounded(
                 &signer,
                 &w.bytes,

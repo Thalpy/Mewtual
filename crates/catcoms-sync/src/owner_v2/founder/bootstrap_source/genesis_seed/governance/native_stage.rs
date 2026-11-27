@@ -163,9 +163,20 @@ impl<T, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
         &mut self,
         closed: &[Option<&catcoms_rt::NativeChatKeyDrain>],
     ) -> Result<Option<RetiredV2FounderAddNativeCustody>, SyncError> {
-        let Some(pending) = self.pending.as_ref() else {
+        let Some(pending) = self.pending.as_mut() else {
             return Ok(None);
         };
+        pending.retire_for_closed_ui(closed, &mut self.node._parts.body._rng)
+    }
+}
+
+impl PendingAdd {
+    pub(super) fn retire_for_closed_ui(
+        &mut self,
+        closed: &[Option<&catcoms_rt::NativeChatKeyDrain>],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<RetiredV2FounderAddNativeCustody>, SyncError> {
+        let pending = self;
         let cuts = [&pending.sdk_cut, &pending.header_cut, &pending.welcome_cut];
         if !cuts
             .into_iter()
@@ -184,21 +195,40 @@ impl<T, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
         }
         let phase = pending.phase;
         if phase == Phase::Prepared {
-            return self.retire_unstarted_add_native_data().map(Some);
+            return pending.retire_unstarted_native().map(Some);
         }
-        if phase == Phase::SdkEntered && self.completed_add_data().is_err() {
-            self.finish_admitted_add_data_native()?;
+        if phase == Phase::SdkEntered
+            && !pending
+                .cell
+                .as_ref()
+                .is_some_and(|cell| cell.completed_result_data().is_ok())
+        {
+            pending.finish_admitted_sdk(rng)?;
         }
-        self.retire_closed_add_native_data().map(Some)
+        pending.retire_closed_native().map(Some)
     }
+}
 
+impl<T, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
     /// Complete ONLY the SAME already-admitted finite SDK unit from its frozen
     /// inputs/time and retained RNG. It neither constructs another Cell nor
     /// enters a new native cut. A real retained source End is mandatory even
     /// after UI closure. Root's cleanup owner must retain this capsule through
     /// all partial/lost-return continuations before waiting on key drainage.
     pub fn finish_admitted_add_data_native(&mut self) -> Result<(), SyncError> {
-        let p = self.pending.as_mut().ok_or_else(unavailable)?;
+        self.pending
+            .as_mut()
+            .ok_or_else(unavailable)?
+            .finish_admitted_sdk(&mut self.node._parts.body._rng)
+    }
+}
+
+impl PendingAdd {
+    pub(super) fn finish_admitted_sdk(
+        &mut self,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), SyncError> {
+        let p = self;
         if p.sdk_continuation_retired
             || p.phase != Phase::SdkEntered
             || !p
@@ -210,7 +240,7 @@ impl<T, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
         p.cell
             .as_mut()
             .ok_or_else(unavailable)?
-            .execute_private_with_routing(&mut self.node._parts.body._rng)
+            .execute_private_with_routing(rng)
             .map_err(|_| unavailable())?;
         // Actual routing/provider/output closure, not a caller flag or a
         // previously spent cut. Cache phase before any hook/lost return.
@@ -258,26 +288,10 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     pub fn retire_closed_add_native_data(
         &mut self,
     ) -> Result<RetiredV2FounderAddNativeCustody, SyncError> {
-        let p = self.pending.as_mut().ok_or_else(unavailable)?;
-        if p.retired_sdk.is_none() || p.retired_core.is_none() {
-            p.cell
-                .as_ref()
-                .ok_or_else(unavailable)?
-                .completed_result_data()
-                .map_err(|_| unavailable())?;
-        }
-        if p.phase == Phase::SdkEntered {
-            // A lost Sync return may leave phase behind the actual Cell.
-            p.phase = Phase::Complete;
-        }
-        p.sdk_continuation_retired = true;
-        record_key_eligibility(p);
-        Ok(RetiredV2FounderAddNativeCustody {
-            _sdk: p.sdk_cut.take(),
-            _header: p.header_cut.take(),
-            _welcome: p.welcome_cut.take(),
-            _ends: std::mem::take(&mut p.ends),
-        })
+        self.pending
+            .as_mut()
+            .ok_or_else(unavailable)?
+            .retire_closed_native()
     }
 
     /// Retire cancelled/pre-effect native metadata ONLY before any SDK Cell
@@ -286,26 +300,10 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
     pub fn retire_unstarted_add_native_data(
         &mut self,
     ) -> Result<RetiredV2FounderAddNativeCustody, SyncError> {
-        let p = self.pending.as_mut().ok_or_else(unavailable)?;
-        let cut = p.sdk_cut.as_ref().ok_or_else(unavailable)?;
-        if p.phase != Phase::Prepared
-            || p.cell.is_some()
-            || p.admission.is_none()
-            || p.sdk_continuation_retired
-            || !p
-                .sdk_native
-                .can_retire(cut, &p.original, NativeChatKeyPurpose::AddSdk)
-        {
-            return Err(unavailable());
-        }
-        p.sdk_may_reauthorize = true;
-        record_key_eligibility(p);
-        Ok(RetiredV2FounderAddNativeCustody {
-            _sdk: p.sdk_cut.take(),
-            _header: p.header_cut.take(),
-            _welcome: p.welcome_cut.take(),
-            _ends: std::mem::take(&mut p.ends),
-        })
+        self.pending
+            .as_mut()
+            .ok_or_else(unavailable)?
+            .retire_unstarted_native()
     }
 
     /// Bind a fresh, genuinely never-entered SAME-source cut after displaced
@@ -371,6 +369,50 @@ impl<T, R> PreparedV2FounderGovernanceNode<T, R> {
             _ => return Err(cut),
         }
         Ok(())
+    }
+}
+
+impl PendingAdd {
+    fn retire_closed_native(&mut self) -> Result<RetiredV2FounderAddNativeCustody, SyncError> {
+        if self.retired_sdk.is_none() || self.retired_core.is_none() {
+            self.cell
+                .as_ref()
+                .ok_or_else(unavailable)?
+                .completed_result_data()
+                .map_err(|_| unavailable())?;
+        }
+        if self.phase == Phase::SdkEntered {
+            // A lost Sync return may leave the phase behind the actual Cell.
+            self.phase = Phase::Complete;
+        }
+        self.sdk_continuation_retired = true;
+        Ok(self.take_native_custody())
+    }
+
+    fn retire_unstarted_native(&mut self) -> Result<RetiredV2FounderAddNativeCustody, SyncError> {
+        let cut = self.sdk_cut.as_ref().ok_or_else(unavailable)?;
+        if self.phase != Phase::Prepared
+            || self.cell.is_some()
+            || self.admission.is_none()
+            || self.sdk_continuation_retired
+            || !self
+                .sdk_native
+                .can_retire(cut, &self.original, NativeChatKeyPurpose::AddSdk)
+        {
+            return Err(unavailable());
+        }
+        self.sdk_may_reauthorize = true;
+        Ok(self.take_native_custody())
+    }
+
+    fn take_native_custody(&mut self) -> RetiredV2FounderAddNativeCustody {
+        record_key_eligibility(self);
+        RetiredV2FounderAddNativeCustody {
+            _sdk: self.sdk_cut.take(),
+            _header: self.header_cut.take(),
+            _welcome: self.welcome_cut.take(),
+            _ends: std::mem::take(&mut self.ends),
+        }
     }
 }
 

@@ -17,8 +17,8 @@ pub use genesis_seed::{
     V2FounderAddOutcomeData, V2FounderAddPreparationRefusal, V2FounderAddRequestData,
     V2FounderAddSigning, V2FounderGovernanceNegative, V2FounderInviteRequestData,
     V2FounderRemoveOutcomeData, V2FounderRemoveSigning, V2InstalledFounderAddData,
-    FOUNDER_GOVERNANCE_DATA_BYTES, FOUNDER_INVITE_DATA_BYTES, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES,
-    MAX_FOUNDER_INVITE_LIFETIME_MS,
+    V2RecoveredFounderAddSigning, FOUNDER_GOVERNANCE_DATA_BYTES, FOUNDER_INVITE_DATA_BYTES,
+    MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES, MAX_FOUNDER_INVITE_LIFETIME_MS,
 };
 mod s0;
 pub use codec::{

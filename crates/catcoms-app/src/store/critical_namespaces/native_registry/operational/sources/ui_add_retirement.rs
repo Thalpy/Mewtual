@@ -88,8 +88,13 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextUiAddRetirement<T, R> {
                 cell,
                 recorded,
             };
-            if let Some(driver) = loan.body.as_mut().and_then(|body| body.driver.as_mut()) {
+            let body = loan.body.as_mut().ok_or_else(refused)?;
+            if let Some(driver) = body.driver.as_mut() {
                 driver.retire_add_for_closed_ui(&counters)?;
+            }
+            if let Some(founder) = body.recovered_founder.as_mut() {
+                founder
+                    .retire_add_for_closed_ui(&counters, body.rng.as_mut().ok_or_else(refused)?)?;
             }
         }
         Ok(idle)

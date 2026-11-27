@@ -72,7 +72,6 @@ pub(in crate::store) struct RecoveredGovernedAdd {
     pub(in crate::store) admission: AdmissionBody,
     #[cfg(all(test, any(windows, target_os = "linux")))]
     pub(in crate::store) parent: TextHeadData,
-    #[cfg(all(test, any(windows, target_os = "linux")))]
     consumed_nonce: [u8; 16],
     entry: [u8; ENTRY_BYTES],
     outcome: Zeroizing<Vec<u8>>,
@@ -235,7 +234,6 @@ fn authenticate_first_archive(
             admission: journal.admission,
             #[cfg(all(test, any(windows, target_os = "linux")))]
             parent: _parent,
-            #[cfg(all(test, any(windows, target_os = "linux")))]
             consumed_nonce: journal.nonce,
             entry: journal.entry,
             outcome: journal.outcome,

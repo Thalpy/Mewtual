@@ -180,14 +180,17 @@ impl NativeTextColdFounderSource {
         caller: &RequestCancellation,
     ) -> Result<Vec<u8>, AppError> {
         self.restore_first_add(caller)?;
-        let original = self.governed.as_ref().ok_or_else(refused)?;
+        let packet = catcoms_sync::V2JoinRequestPacketData::decode(request)?;
+        let original = self.governed.as_deref_mut().ok_or_else(refused)?;
         let delivery =
             self.work
                 .with_recovered_founder_store(&self.selection, &self.source, |store| {
                     if caller.is_cancelled() {
                         return Err(refused());
                     }
-                    original.encode_join_delivery(store, &self.source, request)
+                    original
+                        .classify_join_delivery(store, &self.source, &packet)?
+                        .ok_or_else(refused)
                 })?;
         if delivery.len() > CHAT_V2_JOIN_RESPONSE_MAX_BYTES {
             return Err(refused());

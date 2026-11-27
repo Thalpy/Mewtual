@@ -1,5 +1,27 @@
 # Mewtual; Handover
 
+## 27 November 2026 — Prepare a real Add on the recovered founder graph
+
+The recovered founder can stage one private MLS Add in Sync using its
+original policy, L0 routing and file keys, the checked selected Core
+parent, and distinct native SDK, Header, and Welcome key cuts. Exact
+retries reuse the same result. The selected graph stays at its previous
+epoch until the host covers and installs the successor. The UI lock and
+permanent Source close reclaim the original cuts and Ends before drain.
+
+Cold join classification uses the original founder and signed genesis
+anchor. It returns a historical response for the exact original request,
+rejects a different request that reuses a consumed invitation, and only
+reports an unused nonce after rereading the original predecessor digests.
+The desktop listener still serves historical responses only.
+
+Focused Windows Sync tests passed through the actual MLS Add after a
+restored Remove, cached Header and Welcome signing, and native-key
+retirement fixtures. Two focused Windows App tests passed, covering the
+mounted TCP request and predecessor identity and byte checks. The tests
+use controlled native credentials. Durable cold Add selection, fresh
+desktop admission, and rejoin remain open.
+
 ## 26 November 2026 — Restore approved joined contacts after reopening
 
 The disabled native Chat V2 joined row can remember a signed contact for

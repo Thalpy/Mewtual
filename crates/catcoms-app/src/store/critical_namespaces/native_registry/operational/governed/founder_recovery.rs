@@ -127,6 +127,29 @@ impl NativeTextJoinedStorage {
 }
 
 impl NativeTextColdFounderSource {
+    pub(in crate::store::critical_namespaces::native_registry) fn retire_add_for_closed_ui(
+        &mut self,
+        closed: &[Option<&catcoms_rt::NativeChatKeyDrain>],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        if let Some(sdk) = self.sdk.as_mut() {
+            // The caller owns the actual RuntimeLoan and no Root or native
+            // writer. End retirement can safely wake the waiting UI lock.
+            drop(sdk.retire_recovered_add_for_closed_ui(closed, rng)?);
+        }
+        Ok(())
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn discard_add_for_closed_source(
+        &mut self,
+        closed: &catcoms_rt::NativeChatKeyDrain,
+    ) -> Result<(), AppError> {
+        if let Some(sdk) = self.sdk.as_mut() {
+            sdk.discard_recovered_add_for_closed_source(closed)?;
+        }
+        Ok(())
+    }
+
     pub fn registration_data(&self) -> (NativeCreationStatusData, &str) {
         (self.selection.status, &self.selection.name)
     }

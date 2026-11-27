@@ -11,15 +11,19 @@ use catcoms_replication::chat::{
     owner_state::StateFrame,
 };
 
+mod add;
+pub use add::V2RecoveredFounderAddSigning;
 mod member_signing;
 mod member_transport;
 
 /// Paid private graph. Source installation, Core replay and publication have
 /// their own Host proofs and cannot be authorized by these recovered labels.
 pub struct PreparedV2FounderRecoveredAdd {
+    pending: Option<Box<PendingAdd>>,
     device: MlsDevice,
     group: ServerGroup,
     expected: V2InstalledFounderAddData,
+    source: BootstrapSourceId,
     founder: OwnerFactId,
     signer: [u8; 32],
     member: Option<V2AuthenticatedAdmission>,
@@ -28,6 +32,7 @@ pub struct PreparedV2FounderRecoveredAdd {
 }
 
 struct GenesisRestoreScope<'a> {
+    source: BootstrapSourceId,
     group: &'a [u8],
     signer: [u8; 32],
     profile: OwnerFactId,
@@ -48,6 +53,7 @@ impl PreparedV2FounderRecoveredAdd {
         let context = original.context.spec_data();
         Self::restore_checked(
             GenesisRestoreScope {
+                source: original.source,
                 group: context.group,
                 signer: context.signer,
                 profile: original.profile.id(),
@@ -73,10 +79,12 @@ impl PreparedV2FounderRecoveredAdd {
         snapshot: &[u8],
         admission: TextCurrentSdkRestoreAdmission,
     ) -> Result<Self, SyncError> {
+        let source = original.source_id_data();
         let original = original.genesis_public_data();
         let context = original.context_data().spec_data();
         Self::restore_checked(
             GenesisRestoreScope {
+                source,
                 group: context.group,
                 signer: context.signer,
                 profile: original.profile_data().id(),
@@ -163,6 +171,7 @@ impl PreparedV2FounderRecoveredAdd {
             .map_err(|_| unavailable())?;
         Self::restore_graph(
             GenesisRestoreScope {
+                source: original.source_id_data(),
                 group: context.group,
                 signer: context.signer,
                 profile: profile.id(),
@@ -244,9 +253,11 @@ impl PreparedV2FounderRecoveredAdd {
             return Err(unavailable());
         }
         Ok(Self {
+            pending: None,
             device,
             group,
             expected,
+            source: context.source,
             founder: context.founder,
             signer: context.signer,
             member: None,

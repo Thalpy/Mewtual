@@ -440,23 +440,56 @@ impl HeldColdFounderAdd {
         perform(&core.verifier, &core._view, &mut require)
     }
 
-    pub(in crate::store) fn encode_join_delivery(
-        &self,
+    /// Return the exact original delivery, or checked absence for an unused
+    /// nonce. Corrupt or ambiguous history is an error. Checked absence
+    /// carries no permission to admit the new request.
+    pub(in crate::store) fn classify_join_delivery(
+        &mut self,
         store: &ServerStore,
         source: &RetainedBootstrapSourceData,
-        request: &[u8],
-    ) -> Result<Vec<u8>, AppError> {
-        self.files.origin.original.require_same_original(source)?;
+        packet: &V2JoinRequestPacketData<'_>,
+    ) -> Result<Option<Vec<u8>>, AppError> {
+        self.require_current(store, source)?;
         if self.core.is_none() {
             return Err(refused());
         }
+        let result = self.classify_join_delivery_checked(store, source, packet)?;
+        self.require_current(store, source)?;
+        Ok(result)
+    }
+
+    fn classify_join_delivery_checked(
+        &self,
+        store: &ServerStore,
+        source: &RetainedBootstrapSourceData,
+        packet: &V2JoinRequestPacketData<'_>,
+    ) -> Result<Option<Vec<u8>>, AppError> {
+        let request = packet.packet_bytes_data();
         let genesis = source.data().genesis_public_data();
+        let invitation = packet.founder_add_data().invite.spec_data();
+        let anchor = &invitation.anchor;
+        let context = genesis.context_data().spec_data();
+        if invitation.inviter != context.signer
+            || anchor.founder != context.signer
+            || anchor.group != context.group
+            || anchor.profile != *genesis.profile_data().id().as_bytes()
+            || anchor.admission != *genesis.admission_data().admission_id().as_bytes()
+            || anchor.tenure != *genesis.profile_data().tenure().as_bytes()
+            || anchor.header != *genesis.header_data().id().as_bytes()
+            || anchor.state != *genesis.header_data().spec().state.as_bytes()
+        {
+            return Err(refused());
+        }
+        let nonce = invitation.nonce;
         let first = match &self.recovered {
             ColdRecoveredArchive::First(first) if first.request.as_slice() == request => first,
-            ColdRecoveredArchive::First(_) => return Err(refused()),
+            ColdRecoveredArchive::First(first) if first.consumed_nonce == nonce => {
+                return Err(refused());
+            }
+            ColdRecoveredArchive::First(_) => return Ok(None),
             ColdRecoveredArchive::Later(chain) => {
                 let key = Zeroizing::new(store.keys.db_key()?);
-                return chain.encode_join_delivery(
+                return chain.classify_join_delivery(
                     &key,
                     source.original_target_data().0,
                     &GenesisPublicData {
@@ -466,6 +499,7 @@ impl HeldColdFounderAdd {
                         image: genesis.image_data(),
                     },
                     request,
+                    nonce,
                 );
             }
         };
@@ -482,7 +516,10 @@ impl HeldColdFounderAdd {
                 image: first.image_data()?,
             },
         )?;
-        Ok(V2FirstJoinDeliveryData::encode(&first.response, &proof)?)
+        Ok(Some(V2FirstJoinDeliveryData::encode(
+            &first.response,
+            &proof,
+        )?))
     }
 
     pub(in crate::store) fn encode_member_add(

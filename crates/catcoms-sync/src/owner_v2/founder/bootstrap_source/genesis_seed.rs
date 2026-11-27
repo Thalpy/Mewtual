@@ -36,7 +36,8 @@ pub use governance::{
     RetiredV2FounderRemoveInstall, V2FounderAddNativeStage, V2FounderAddOutcomeData,
     V2FounderAddPreparationRefusal, V2FounderAddRequestData, V2FounderAddSigning,
     V2FounderGovernanceNegative, V2FounderRemoveOutcomeData, V2FounderRemoveSigning,
-    V2InstalledFounderAddData, FOUNDER_GOVERNANCE_DATA_BYTES, MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES,
+    V2InstalledFounderAddData, V2RecoveredFounderAddSigning, FOUNDER_GOVERNANCE_DATA_BYTES,
+    MAX_FOUNDER_ADD_KEY_PACKAGE_BYTES,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use invite::{

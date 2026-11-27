@@ -54,6 +54,7 @@ pub(super) struct RecoveredArchiveChain {
     first: PublicStep,
     successors: Vec<PublicStep>,
     prior_requests: Vec<PriorRequest>,
+    consumed_nonces: Vec<[u8; 16]>,
     pub(super) prefix: Vec<u8>,
 }
 
@@ -154,6 +155,7 @@ impl RecoveredArchiveChain {
             first,
             successors,
             prior_requests,
+            consumed_nonces: replay.nonces,
             prefix,
         };
         chain.require_original_predecessors(directory)?;
@@ -189,30 +191,41 @@ impl RecoveredArchiveChain {
         Ok(V2GoverningJoinPrefixData::encode(&proof, &steps)?)
     }
 
-    pub(super) fn encode_join_delivery(
+    pub(super) fn classify_join_delivery(
         &self,
         key: &[u8; 32],
         directory: &Path,
         trusted: &GenesisPublicData<'_>,
         request: &[u8],
-    ) -> Result<Vec<u8>, AppError> {
+        nonce: [u8; 16],
+    ) -> Result<Option<Vec<u8>>, AppError> {
         if !(1..=MAX_V2_JOIN_REQUEST_PACKET_BYTES).contains(&request.len()) {
             return Err(refused());
         }
         if let RecoveredMembershipJournal::Add(journal) = &self.journal {
             if journal.request.as_slice() == request {
-                return Ok(V2GoverningJoinDeliveryData::encode(
+                require_exact_predecessors(directory, &self.predecessors)?;
+                return Ok(Some(V2GoverningJoinDeliveryData::encode(
                     &journal.response,
                     &self.prefix,
-                )?);
+                )?));
             }
         }
         let requested = blake3::hash(request);
-        let index = self
+        let Some(index) = self
             .prior_requests
             .iter()
             .position(|prior| prior.digest.as_ref() == Some(requested.as_bytes()))
-            .ok_or_else(refused)?;
+        else {
+            // Verified on every Add during the original bounded selected
+            // replay. A different request cannot consume that nonce again.
+            if self.consumed_nonces.contains(&nonce) {
+                return Err(refused());
+            }
+            require_exact_predecessors(directory, &self.predecessors)?;
+            return Ok(None);
+        };
+        require_exact_predecessors(directory, &self.predecessors)?;
         let first_proof = self.first.first_proof(trusted)?;
         if index == 0 {
             let original = self.predecessors.first().ok_or_else(refused)?;
@@ -230,10 +243,10 @@ impl RecoveredArchiveChain {
             if first.request.as_slice() != request {
                 return Err(refused());
             }
-            return Ok(V2FirstJoinDeliveryData::encode(
+            return Ok(Some(V2FirstJoinDeliveryData::encode(
                 &first.response,
                 &first_proof,
-            )?);
+            )?));
         }
         let RecoveredMembershipJournal::Add(journal) =
             self.read_later_journal(key, directory, trusted, index)?
@@ -250,10 +263,10 @@ impl RecoveredArchiveChain {
             .map(PublicStep::proof_data)
             .collect();
         let proof = V2GoverningJoinPrefixData::encode(&first_proof, &steps)?;
-        Ok(V2GoverningJoinDeliveryData::encode(
+        Ok(Some(V2GoverningJoinDeliveryData::encode(
             &journal.response,
             &proof,
-        )?)
+        )?))
     }
 
     pub(super) fn encode_member_add(
@@ -313,6 +326,21 @@ impl RecoveredArchiveChain {
         ));
         replay.verify_membership(key, &original.head, &archive.frame, trusted)
     }
+}
+
+/// A held file can change in place. A classified request uses the same
+/// archive commitments verified during capture, with one paid scratch buffer
+/// and no retained extra predecessor bodies.
+fn require_exact_predecessors(
+    directory: &Path,
+    predecessors: &[Predecessor],
+) -> Result<(), AppError> {
+    let mut buffer = Some(Zeroizing::new(Vec::with_capacity(MAX_BYTES + 1)));
+    for predecessor in predecessors {
+        let mut archive = predecessor.reread(directory, &mut buffer)?;
+        buffer = Some(std::mem::take(&mut archive.frame));
+    }
+    Ok(())
 }
 
 fn capture_predecessors(
