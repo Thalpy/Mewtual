@@ -2,15 +2,16 @@
 //! Applying those originals still goes through exact dependency fetch and
 //! the signed-action receiver. Cursor progress alone never covers a write.
 use super::dependencies::{
-    DependencyProvenance, NativeTextJoinedDependencyExchange, ReplyPayment, ScopeAuthority,
-    REPLY_FEE,
+    DependencyProvenance, NativeTextJoinedArchiveDependency, NativeTextJoinedDependencyExchange,
+    ReplyPayment, ScopeAuthority, REPLY_FEE,
 };
 use super::*;
 use crate::store::persistence::v2_member_outbox::{DispositionCode, MemberEntryStatus};
 use catcoms_net::{
-    NativeChatMemberDependencyExchange, NativeChatMemberDependencyIncoming,
-    NativeChatMemberDependencyObservation,
+    NativeChatMemberDependencyIncoming, NativeChatMemberDependencyObservation,
+    NativeChatMemberInventoryExchange,
 };
+use catcoms_replication::chat::Body;
 use catcoms_rt::{ConnectionLease, TransportError};
 use catcoms_sync::owner_v2::{
     PreparedV2ArchiveHistoryRequest, PreparedV2MemberHistoryRequest, V2ArchiveHistoryCursor,
@@ -27,9 +28,12 @@ catcoms_rt::redacted_debug! {
 // A page can wait between turns. Pay for its bounded IDs, approval, and
 // row/lease observations without retaining the departed wire buffers.
 const PARKED_PAGE_FEE: usize = 8 * 1024;
+// Archive pages also pay for the worker's bounded stack of exact signed
+// identities while it drops a child's paid ledger to ask for a parent.
+const ARCHIVE_ANCESTRY_FEE: usize = 4 * 1024;
 
 pub struct NativeTextJoinedHistoryExchange {
-    transport: NativeChatMemberDependencyExchange,
+    transport: NativeChatMemberInventoryExchange,
     request: HistoryRequest,
     source: HistoryQuery,
     wire_scope: HistoryWireScope,
@@ -62,8 +66,13 @@ enum HistoryPage {
     Archive {
         page: V2ArchiveHistoryPage,
         highest: Option<ActionId>,
+        proof: Arc<ArchivePageProof>,
     },
 }
+
+/// Identity of one opened archive page. Ancestry tickets retain this
+/// identity without retaining wire buffers or an active native command.
+pub(super) struct ArchivePageProof(());
 
 impl HistoryPage {
     fn contains(&self, action: ActionId) -> bool {
@@ -76,7 +85,7 @@ impl HistoryPage {
     fn continuation(&self) -> Option<HistoryCursor> {
         match self {
             Self::Own(page) => page.continuation().map(HistoryCursor::Own),
-            Self::Archive { page, highest } => Some(HistoryCursor::Archive {
+            Self::Archive { page, highest, .. } => Some(HistoryCursor::Archive {
                 cursor: Some(page.continuation()?),
                 after: *highest,
             }),
@@ -169,6 +178,16 @@ impl NativeTextJoinedHistoryPage {
 
     pub fn is_current_cached(&self) -> bool {
         self.query.is_current(&self.query.row)
+    }
+
+    #[cfg(feature = "native-chat-test-hooks")]
+    #[doc(hidden)]
+    pub fn current_checks_for_test(&self) -> (bool, bool, bool) {
+        (
+            self.query.row.is_current_cached(),
+            self.query.observation.is_current_cached(),
+            !self.query.signal.is_cancelled(),
+        )
     }
 
     pub fn action_at(&self, index: usize) -> Option<ActionId> {
@@ -270,6 +289,57 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         Ok(selected)
     }
 
+    /// A clean own outbox can cover an offered archive Create for this sweep.
+    /// The semantic ID proves local custody of the operation. Archive custody,
+    /// the holder's signature bytes, and delivery remain independent.
+    pub fn covers_discovered_own_create(
+        &self,
+        selection: &NativeTextJoinedRowSelection,
+        page: &NativeTextJoinedHistoryPage,
+        action: ActionId,
+        caller: &RequestCancellation,
+    ) -> Result<bool, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        if !page.query.is_current(selection) || !page.page.contains(action) {
+            return Err(Refusal::Stale);
+        }
+        if !matches!(&page.page, HistoryPage::Archive { .. }) {
+            return Ok(false);
+        }
+        let covered = self.with_member_receiver(selection, caller, |source| {
+            let Some(saved) = source.read_selected_own_history_action(selection, action) else {
+                return Ok(false);
+            };
+            let admission = source.registration.selected_data().1;
+            if saved.receipt().admission != admission
+                || saved.action().spec().realm.channel() != page.query.channel
+                || !matches!(saved.action().spec().body, Body::Create { .. })
+                || saved.status() == MemberEntryStatus::Settled(DispositionCode::Held)
+            {
+                return Ok(false);
+            }
+            let verifier = source
+                .prefix
+                .selected_member_verifier()
+                .map_err(|_| Refusal::Stale)?;
+            verifier
+                .observe_live_member(admission)
+                .map_err(|_| Refusal::Stale)?;
+            Ok(verifier
+                .admission(admission)
+                .and_then(|author| {
+                    author
+                        .admission_data()
+                        .matches_action_delegation(saved.action())
+                })
+                .is_ok())
+        })?;
+        if !page.query.is_current(selection) {
+            return Err(Refusal::Stale);
+        }
+        Ok(covered)
+    }
+
     /// Request one page from a previously approved signed contact. This
     /// captures an existing connection only and does not initiate dialing.
     pub fn prepare_history_exchange(
@@ -355,7 +425,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         use V2MemberSaveRefusal as Refusal;
         let transport = self
             .dependency_lane()?
-            .capture_request(provider)
+            .capture_inventory(provider)
             .ok_or(Refusal::Unavailable)?;
         let observation = transport.observe_route();
         let connection = transport.observe_connection();
@@ -378,9 +448,14 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     .metadata
                     .reserve_join_node(REPLY_FEE)
                     .map_err(|_| Refusal::Busy)?;
+                let ancestry_fee = if matches!(&cursor, HistoryCursor::Archive { .. }) {
+                    ARCHIVE_ANCESTRY_FEE
+                } else {
+                    0
+                };
                 let page_fee = source
                     .metadata
-                    .reserve_join_node(PARKED_PAGE_FEE)
+                    .reserve_join_node(PARKED_PAGE_FEE + ancestry_fee)
                     .map_err(|_| Refusal::Busy)?;
                 let access = source
                     .node
@@ -440,6 +515,51 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         if !page.query.is_current(selection) || !page.page.contains(action) {
             return Err(Refusal::Stale);
         }
+        let provenance = match &page.page {
+            HistoryPage::Own(_) => DependencyProvenance::ApprovedAuthor(page.query.admission),
+            HistoryPage::Archive { proof, .. } => DependencyProvenance::ArchivePage {
+                proof: proof.clone(),
+                own_author: None,
+            },
+        };
+        self.prepare_page_exact(selection, page, action, provenance, caller, rng)
+    }
+
+    /// Fetch the exact missing parent proved by a child on this archive page.
+    /// An own-outbox fallback still requires the holder's original Admission.
+    pub fn prepare_archive_parent_request(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        page: &NativeTextJoinedHistoryPage,
+        dependency: &NativeTextJoinedArchiveDependency,
+        holder_outbox: bool,
+        caller: RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextJoinedDependencyExchange, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let HistoryPage::Archive { proof, .. } = &page.page else {
+            return Err(Refusal::Stale);
+        };
+        if !Arc::ptr_eq(proof, &dependency.page) || !page.query.is_current(selection) {
+            return Err(Refusal::Stale);
+        }
+        let provenance = DependencyProvenance::ArchivePage {
+            proof: proof.clone(),
+            own_author: holder_outbox.then_some(page.query.admission),
+        };
+        self.prepare_page_exact(selection, page, dependency.parent, provenance, caller, rng)
+    }
+
+    fn prepare_page_exact(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        page: &NativeTextJoinedHistoryPage,
+        action: ActionId,
+        provenance: DependencyProvenance,
+        caller: RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextJoinedDependencyExchange, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
         let exchange = self
             .dependency_lane()?
             .capture_request(page.query.peer)
@@ -454,16 +574,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             exchange,
             selection,
             (page.query.channel, action),
-            (
-                None,
-                Some(&page.query.signal),
-                match page.page {
-                    HistoryPage::Own(_) => {
-                        DependencyProvenance::ApprovedAuthor(page.query.admission)
-                    }
-                    HistoryPage::Archive { .. } => DependencyProvenance::ArchiveRelay,
-                },
-            ),
+            (None, Some(&page.query.signal), provenance),
             caller,
             rng,
         )
@@ -504,7 +615,11 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                         return Err(Refusal::Failed);
                     }
                     let highest = page.actions().last().copied().or(*after);
-                    Ok(HistoryPage::Archive { page, highest })
+                    Ok(HistoryPage::Archive {
+                        page,
+                        highest,
+                        proof: Arc::new(ArchivePageProof(())),
+                    })
                 }
             }
         })?;
@@ -572,6 +687,25 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
 }
 
 impl<R: CryptoRngCore> ReceiverSource<'_, R> {
+    fn read_selected_own_history_action(
+        &self,
+        selection: &NativeTextJoinedRowSelection,
+        action: ActionId,
+    ) -> Option<MemberSavedOriginal> {
+        let mount = self.store.installed_member_outbox_mount().ok()??;
+        let key = member_outbox_key(self.store).ok()?;
+        // An unavailable point lookup leaves the ordinary exact-fetch path
+        // open. It supplies no evidence of either coverage or absence.
+        mount
+            .read_selected_history_action(
+                self.store,
+                selection.original.member_outbox,
+                &key,
+                action,
+            )
+            .ok()?
+    }
+
     pub(super) fn require_history_peer(
         &self,
         selection: &NativeTextJoinedRowSelection,

@@ -1,12 +1,13 @@
 //! Connected catch-up of one exact ActionId. No method may dial or sign anew.
 catcoms_rt::redacted_debug! {
+    NativeTextJoinedArchiveDependency;
     NativeTextJoinedArchiveReplay;
     NativeTextJoinedDependencyExchange;
     NativeTextJoinedDependencyResponse;
     NativeTextJoinedDependencyProvider;
 }
 
-use super::history_discovery::HistoryContactScope;
+use super::history_discovery::{ArchivePageProof, HistoryContactScope};
 use super::*;
 use crate::store::persistence::v2_member_transport::{
     LocalHistoryDependencyReplay, HISTORY_REPLAY_FEE,
@@ -28,11 +29,39 @@ use join_tcp::DependencyCaptureRefusal;
 pub(super) const REPLY_FEE: usize = OPEN_FEE + 5 * MAX_V2_DEPENDENCY_REPLY_BYTES + 16 * 1024;
 const MAX_FRAME_DEPENDENCY_DEPTH: u8 = 4;
 
-#[derive(Clone, Copy)]
 pub(super) enum DependencyProvenance {
     Direct,
     ApprovedAuthor(OwnerBodyId),
     ArchiveRelay,
+    ArchivePage {
+        proof: Arc<ArchivePageProof>,
+        own_author: Option<OwnerBodyId>,
+    },
+}
+
+impl DependencyProvenance {
+    fn requires_holder_approval(&self) -> bool {
+        matches!(self, Self::ArchiveRelay | Self::ArchivePage { .. })
+    }
+
+    fn uses_archive_wire(&self) -> bool {
+        matches!(
+            self,
+            Self::ArchiveRelay
+                | Self::ArchivePage {
+                    own_author: None,
+                    ..
+                }
+        )
+    }
+
+    fn bound_author(&self) -> Option<OwnerBodyId> {
+        match self {
+            Self::ApprovedAuthor(author) => Some(*author),
+            Self::ArchivePage { own_author, .. } => *own_author,
+            Self::Direct | Self::ArchiveRelay => None,
+        }
+    }
 }
 
 /// One fixed ActionId and original live route, ready outside the metadata slot.
@@ -63,16 +92,85 @@ pub struct NativeTextJoinedDependencyResponse {
     invocation: watch::Sender<bool>,
 }
 
+impl NativeTextJoinedDependencyResponse {
+    fn require_original_selection(
+        &self,
+        selection: &NativeTextJoinedRowSelection,
+    ) -> Result<(), V2MemberSaveRefusal> {
+        if !selection.same_original(&self.selected) || !self.is_current_cached() {
+            return Err(V2MemberSaveRefusal::Stale);
+        }
+        Ok(())
+    }
+
+    /// The exact response may wait for local staging while all of its
+    /// original leases and observations remain live.
+    pub fn is_current_cached(&self) -> bool {
+        self.selected.is_current_cached()
+            && self.observation.is_current_cached()
+            && !self.signal.is_cancelled()
+    }
+}
+
 /// One exact offered original and its paid staging ledger. It can yield
 /// between local ancestor batches without retaining a physical row borrow.
 pub struct NativeTextJoinedArchiveReplay {
     ledger: NativeTextJoinedMemberLedger,
     original: NativeTextJoinedReceivedOriginal,
     dependencies: Option<LocalHistoryDependencyReplay>,
+    archive_page: Option<Arc<ArchivePageProof>>,
     _fee: CatalogReadReservation,
 }
 
+/// One exact missing ancestor derived from a checked original on a live
+/// archive page. It retains no original, native invocation or wire payment.
+#[derive(Clone)]
+pub struct NativeTextJoinedArchiveDependency {
+    pub(super) page: Arc<ArchivePageProof>,
+    pub(super) parent: ActionId,
+    child: ActionId,
+    admission: [u8; 32],
+    original: blake3::Hash,
+}
+
+impl NativeTextJoinedArchiveDependency {
+    pub fn parent_data(&self) -> ActionId {
+        self.parent
+    }
+
+    pub fn matches_child(&self, replay: &NativeTextJoinedArchiveReplay) -> bool {
+        self.child == replay.original.action_id_data()
+            && self.admission == *replay.original.opened.admission_data().as_bytes()
+            && self.original == blake3::hash(replay.original.opened.original_data())
+            && replay
+                .archive_page
+                .as_ref()
+                .is_some_and(|page| Arc::ptr_eq(page, &self.page))
+    }
+}
+
 impl NativeTextJoinedArchiveReplay {
+    /// Only a checked original that found no selected local parent may
+    /// issue this ticket. Refusals and traversal limits carry no ActionId.
+    pub fn missing_archive_dependency(&self) -> Option<NativeTextJoinedArchiveDependency> {
+        let page = self.archive_page.as_ref()?;
+        let parent = self.dependencies.as_ref()?.exact_miss()?;
+        if !self.ledger.is_current_cached()
+            || !self
+                .original
+                .is_for_original_row_cached(&self.ledger.selection)
+        {
+            return None;
+        }
+        Some(NativeTextJoinedArchiveDependency {
+            page: page.clone(),
+            parent,
+            child: self.original.action_id_data(),
+            admission: *self.original.opened.admission_data().as_bytes(),
+            original: blake3::hash(self.original.opened.original_data()),
+        })
+    }
+
     /// The Create target to invalidate after this exact write settles.
     pub fn target_data(&self) -> ActionId {
         self.original.projection_target_data()
@@ -312,7 +410,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 if !observation.is_current_cached() {
                     return Err(Refusal::Stale);
                 }
-                let approval = if matches!(provenance, DependencyProvenance::ArchiveRelay) {
+                let approval = if provenance.requires_holder_approval() {
                     Some(source.require_history_peer(selection, provider)?.1)
                 } else {
                     None
@@ -321,7 +419,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     .metadata
                     .reserve_join_node(REPLY_FEE)
                     .map_err(|_| Refusal::Busy)?;
-                let request = if approval.is_some() {
+                let request = if provenance.uses_archive_wire() {
                     source.node.prepare_member_archive_relay_request(
                         source.prefix,
                         channel,
@@ -384,60 +482,21 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         response: NativeTextJoinedDependencyResponse,
         caller: &RequestCancellation,
     ) -> Result<Option<NativeTextJoinedReceivedOriginal>, V2MemberSaveRefusal> {
-        use V2MemberSaveRefusal as Refusal;
-        if !selection.same_original(&response.selected)
-            || response.signal.is_cancelled()
-            || !response.observation.is_current_cached()
-        {
-            return Err(Refusal::Stale);
-        }
-        self.with_member_receiver(selection, caller, |source| {
-            let response = response;
-            let fee = source
-                .metadata
-                .reserve_join_node(OPEN_FEE)
-                .map_err(|_| Refusal::Busy)?;
-            let opened = source
-                .node
-                .open_member_dependency_reply(
-                    source.prefix,
-                    response.channel,
-                    response.route,
-                    &response.request,
-                    &response.wire,
-                )
-                .map_err(|_| Refusal::Failed)?;
-            if matches!(response.provenance, DependencyProvenance::ApprovedAuthor(author)
-            if opened.as_ref().is_some_and(|original| {
-                original.admission_data().as_bytes() != author.as_bytes()
-            })) {
-                return Err(Refusal::Stale);
-            }
-            let NativeTextJoinedDependencyResponse {
-                wire,
-                observation,
-                frame_depth,
-                signal,
-                invocation,
-                ..
-            } = response;
-            drop(wire);
-            let origin = ReceiveOrigin::Dependency {
-                route: observation,
-                frame_depth,
-                signal,
-                _invocation: invocation,
-            };
-            if !origin.is_current_cached() {
-                return Err(Refusal::Stale);
-            }
-            Ok(opened.map(|opened| NativeTextJoinedReceivedOriginal {
-                opened,
-                selection: selection.clone(),
-                origin,
-                _fee: fee,
-            }))
-        })
+        self.open_exact_dependency_reply(selection, &response, caller)
+    }
+
+    fn open_exact_dependency_reply(
+        &self,
+        selection: &NativeTextJoinedRowSelection,
+        response: &NativeTextJoinedDependencyResponse,
+        caller: &RequestCancellation,
+    ) -> Result<Option<NativeTextJoinedReceivedOriginal>, V2MemberSaveRefusal> {
+        response.require_original_selection(selection)?;
+        let opened = self.with_member_receiver(selection, caller, |source| {
+            source.open_dependency_reply(selection, response)
+        })?;
+        response.require_original_selection(selection)?;
+        Ok(opened)
     }
 
     /// Open an offered original in a fresh paid staging ledger. Missing exact
@@ -448,28 +507,42 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         response: NativeTextJoinedDependencyResponse,
         caller: RequestCancellation,
     ) -> Result<Option<NativeTextJoinedArchiveReplay>, V2MemberSaveRefusal> {
+        self.prepare_parked_discovered_archive(selection, &response, caller)
+    }
+
+    /// Take one attempt at opening a retained paid response. The original
+    /// route, invitation and signal stay bound to that response on retry.
+    pub fn prepare_parked_discovered_archive(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        response: &NativeTextJoinedDependencyResponse,
+        caller: RequestCancellation,
+    ) -> Result<Option<NativeTextJoinedArchiveReplay>, V2MemberSaveRefusal> {
         use catcoms_replication::chat::ActionState;
         use V2MemberSaveRefusal as Refusal;
-        if matches!(response.provenance, DependencyProvenance::Direct) {
+        if matches!(&response.provenance, DependencyProvenance::Direct) {
             return Err(Refusal::Stale);
         }
+        response.require_original_selection(selection)?;
         let channel = response.channel;
-        let Some(original) = self.open_dependency_response(selection, response, &caller)? else {
-            return Ok(None);
+        let archive_page = match &response.provenance {
+            DependencyProvenance::ArchivePage { proof, .. } => Some(proof.clone()),
+            _ => None,
         };
-        let require_current = || {
+        let require_current = |original: &NativeTextJoinedReceivedOriginal| {
             if caller.is_cancelled() || !original.is_for_original_row_cached(selection) {
                 Err(Refusal::Stale)
             } else {
                 Ok(())
             }
         };
-        let (ledger, (dependencies, fee)) = self.prepare_member_ledger_with(
+        let Some((ledger, (original, dependencies, fee))) = self.prepare_member_ledger_with(
             selection,
             channel,
             caller.clone(),
-            |source, ledger, view| {
-                require_current()?;
+            |source| source.open_dependency_reply(selection, response),
+            |source, ledger, view, original| {
+                require_current(&original)?;
                 let verifier = source
                     .prefix
                     .selected_member_verifier()
@@ -489,14 +562,19 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     V2OrdinaryReceiveStatus::Retained(ActionState::Valid) => None,
                     V2OrdinaryReceiveStatus::Retained(_) => return Err(Refusal::Failed),
                 };
-                Ok((dependencies, fee))
+                Ok((original, dependencies, fee))
             },
-        )?;
-        require_current()?;
+        )?
+        else {
+            response.require_original_selection(selection)?;
+            return Ok(None);
+        };
+        require_current(&original)?;
         Ok(Some(NativeTextJoinedArchiveReplay {
             ledger,
             original,
             dependencies,
+            archive_page,
             _fee: fee,
         }))
     }
@@ -515,6 +593,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             ledger,
             original,
             dependencies,
+            archive_page,
             ..
         } = replay;
         let selection = &ledger.selection;
@@ -528,11 +607,23 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             }
             Ok(())
         };
-        require_current()?;
         let Some(ancestors) = dependencies.as_mut() else {
+            require_current()?;
             return Ok(true);
         };
+        // Every call owns its own miss. An early mount or authority refusal
+        // must never expose a previous traversal's result as a new ticket.
+        ancestors.clear_exact_miss();
+        require_current()?;
         let ready = self.with_member_receiver(selection, caller, |source| {
+            if archive_page.is_some()
+                && !source
+                    .store
+                    .has_mounted_shared_history()
+                    .map_err(|_| Refusal::Busy)?
+            {
+                return Err(Refusal::Unavailable);
+            }
             let verifier = source
                 .prefix
                 .selected_member_verifier()
@@ -771,6 +862,51 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
 }
 
 impl<R: CryptoRngCore> ReceiverSource<'_, R> {
+    fn open_dependency_reply(
+        &self,
+        selection: &NativeTextJoinedRowSelection,
+        response: &NativeTextJoinedDependencyResponse,
+    ) -> Result<Option<NativeTextJoinedReceivedOriginal>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        response.require_original_selection(selection)?;
+        let fee = self
+            .metadata
+            .reserve_join_node(OPEN_FEE)
+            .map_err(|_| Refusal::Busy)?;
+        let opened = self
+            .node
+            .open_member_dependency_reply(
+                self.prefix,
+                response.channel,
+                response.route,
+                &response.request,
+                &response.wire,
+            )
+            .map_err(|_| Refusal::Failed)?;
+        if response.provenance.bound_author().is_some_and(|author| {
+            opened
+                .as_ref()
+                .is_some_and(|original| original.admission_data().as_bytes() != author.as_bytes())
+        }) {
+            return Err(Refusal::Stale);
+        }
+        let origin = ReceiveOrigin::Dependency {
+            route: response.observation.clone(),
+            frame_depth: response.frame_depth,
+            signal: response.signal.clone(),
+            _invocation: response.invocation.clone(),
+        };
+        if !origin.is_current_cached() {
+            return Err(Refusal::Stale);
+        }
+        Ok(opened.map(|opened| NativeTextJoinedReceivedOriginal {
+            opened,
+            selection: selection.clone(),
+            origin,
+            _fee: fee,
+        }))
+    }
+
     fn serve_selected_archive_record(
         &self,
         channel: u128,

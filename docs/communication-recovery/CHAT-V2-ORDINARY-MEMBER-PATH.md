@@ -397,9 +397,28 @@ sweep can expire.
 The holder checks each offered original's still-open Admission and signed
 delegation against the selected prefix. Its continuation carries no raw
 archive offset or filtered ID. A fetched signed original can reference
-earlier actions. A missing ancestor defers selection until its verified
-original is available locally through recovery. The worker revisits
-deferred pages and keeps one paid ancestor traversal per row.
+earlier actions. A verified exact local miss can trigger a parent fetch
+before the next page. The recipient keeps the original page and its
+approval and connection, drops the child's staging ledger, and asks for
+only that missing ActionId. The parent must be selected locally before
+the recipient retries the child's exact signed bytes and Admission.
+An authenticated empty archive reply permits one own-outbox lookup under
+the holder's author Admission. The worker allows eight nested parents and
+24 attempts across a 45-second chain. A refusal or exhausted chain
+defers that item while other pages and peers progress.
+
+The native worker gives authenticated pages already in hand up to two
+contested exact turns before the oldest due discovery or continuation.
+Own-outbox and archive entries share the same order. An authenticated reply
+starts its first bounded local replay slice promptly, while later slices
+and idle work yield at the regular rates. Peer turns keep their existing
+500 ms start-to-start spacing and the same per-request, replay and ancestry deadlines.
+One inventory exchange can overlap one exact exchange. They use separate
+single-slot native transport allowances and the same authenticated request
+protocol. A local timeout leaves the original driver allowance
+with its own request until the driver finishes. A paid inventory reply waits
+for the original local row under the bounded replay window, so an exact
+write's local permit does not trigger a duplicate network request.
 
 Automatic discovery currently requires reciprocal approved contacts on the
 installed rows. Restoring those approvals and their connections after a

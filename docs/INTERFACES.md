@@ -19,6 +19,10 @@ Archive pages use separate authenticated request and reply domains. They
 carry sorted ActionIds and an opaque continuation pinned to the original
 approved connection and scope. Page-derived exact requests keep that
 connection and approval. The native worker schedules both sweep types.
+An archive stage can issue an opaque missing-parent ticket after an exact
+local miss. Only its original page can use the ticket. The worker drops
+the original stage before requesting the parent and compares the child's
+signed bytes and Admission before retrying it.
 [Request and cursor contract](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
 
 16 November Score/voice integration candidate: this branch combines the reviewed

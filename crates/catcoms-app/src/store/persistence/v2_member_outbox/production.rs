@@ -434,6 +434,32 @@ impl MemberOutboxMount {
         Ok(page)
     }
 
+    /// Read a selected action without opening, repairing, or changing an
+    /// outbox. An unsettled owner cannot establish local coverage.
+    pub(in crate::store) fn read_selected_history_action(
+        &self,
+        store: &ServerStore,
+        context: MemberOutboxContextId,
+        key: &[u8; 32],
+        action: ActionId,
+    ) -> Result<Option<MemberSavedOriginal>, MemberOutboxError> {
+        self.require_live(store)?;
+        let Some(cell) = self.existing_cell(context)? else {
+            return Ok(None);
+        };
+        let state = cell.try_lock()?.ok_or(MemberOutboxRefusal::Busy)?;
+        let owner = state.owner.as_ref().ok_or(MemberOutboxRefusal::Busy)?;
+        if owner.context_id() != context {
+            return Err(MemberOutboxRefusal::Foreign.into());
+        }
+        let payment = self
+            .pay(MEMBER_OUTBOX_LOOKUP_FEE)
+            .map_err(|_| MemberOutboxRefusal::Payment)?;
+        let selected = owner.lookup_action_original(key, action, payment)?;
+        self.require_live(store)?;
+        Ok(selected)
+    }
+
     pub(in crate::store) fn read_publication_debt(
         &self,
         store: &ServerStore,

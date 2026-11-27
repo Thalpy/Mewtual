@@ -805,6 +805,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
     let mut saved = None;
     let mut founder_archived = None;
     let mut founder_archive_digest = None;
+    let mut founder_archive_edit = None;
     let mut founder_reply = None;
     let mut founder_debt = None;
     if successor == Some(MountedSuccessor::MissedHistory) {
@@ -935,6 +936,76 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             .is_some());
         founder_archived = Some(original.action_id_data());
         founder_archive_digest = Some(original.original_digest_for_test());
+        if successor == Some(MountedSuccessor::OfflineDelivery) {
+            let create = original.action_id_data();
+            let edit = Body::Edit {
+                create,
+                text: "The founder edited this before retiring".into(),
+            };
+            let sign_edit = V2MemberSignRequest {
+                body: &edit,
+                parents: std::slice::from_ref(&create),
+                token: [147; 32],
+                ..founder_request()
+            };
+            assert_eq!(
+                founder_capture()
+                    .finish()
+                    .unwrap()
+                    .prepare_member_save(V2MemberSignRequest { ..sign_edit }, &fresh,)
+                    .unwrap(),
+                V2MemberSaveOutcome::Ready
+            );
+            let pending = founder_capture().finish_admission(sign_edit.token).unwrap();
+            let (custody, _) = super::admission::custody(&commit, &fresh).await;
+            assert_eq!(
+                pending.try_admit(custody).unwrap().run(),
+                MemberSaveJobReport::SavedLocal
+            );
+            let (receipt, edited) = tokio::time::timeout(Duration::from_secs(15), async {
+                let receipt = loop {
+                    let edit = founder_capture()
+                        .prepare_founder_member_publication(fresh.clone())
+                        .unwrap()
+                        .expect("the saved founder edit is owed");
+                    match edit.submit().await {
+                        Ok(Some(receipt)) => break receipt,
+                        Err(catcoms_sync::SyncError::Publication(
+                            catcoms_rt::PublishOnceError::NoPeers,
+                        )) => {
+                            SystemClock.sleep(Duration::from_millis(20)).await;
+                        }
+                        other => panic!("the edit could not reach the joined holder: {other:?}"),
+                    }
+                };
+                let Some(NativeChatMemberGossipEvent::Frame(frame)) = receiver.next().await else {
+                    panic!("the joined holder did not receive the founder edit");
+                };
+                let (edited, status) = inspect()
+                    .receive_member_frame(&mut ledger, &frame, &fresh)
+                    .unwrap();
+                assert_eq!(
+                    status,
+                    V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+                );
+                assert_eq!(edited.projection_target_data(), create);
+                (receipt, edited)
+            })
+            .await
+            .expect("the founder edit reached the holder before the next Add");
+            assert_eq!(
+                founder_capture()
+                    .checkpoint_founder_member_publication(receipt, &fresh)
+                    .unwrap(),
+                2
+            );
+            assert!(inspect()
+                .archive_received_member(&ledger, &edited, &fresh, &mut rng)
+                .unwrap()
+                .is_some());
+            founder_archive_edit =
+                Some((edited.action_id_data(), edited.original_digest_for_test()));
+        }
         drop((receiver, ledger));
         let parent = original.action_id_data();
         let reply = catcoms_replication::chat::Body::Create {
@@ -2082,8 +2153,9 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 served.unwrap();
                 let page = third_row().open_history_response(&third_selection, page.unwrap(), &fresh).unwrap();
                 assert!(page.data().is_none(), "archive offers must never look like the holder authored them");
+                let (edit, edit_digest) = founder_archive_edit.unwrap();
                 let discovered = (0..8).filter_map(|index| page.action_at(index))
-                    .find(|offered| *offered == action).expect("the holder advertised the offline author's original");
+                    .find(|offered| *offered == edit).expect("the holder advertised the offline author's edit");
                 let relay = third_row().prepare_discovered_original(
                     &third_selection, &page, discovered, fresh.clone(), &mut third_rng,
                 ).unwrap();
@@ -2094,7 +2166,54 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 let mut replay = third_row().prepare_discovered_archive(
                     &third_selection, response.unwrap(), fresh.clone(),
                 ).unwrap().unwrap();
+                assert_eq!(replay.original_digest_for_test(), edit_digest);
+                assert_eq!(
+                    third_row().advance_discovered_archive(&mut replay, &fresh, &mut third_rng),
+                    Err(V2MemberSaveRefusal::Unavailable),
+                );
+                let missing = replay.missing_archive_dependency().expect("the exact edit named an absent parent");
+                assert_eq!(missing.parent_data(), action);
+                drop(replay);
+                let another = third_row().prepare_archive_history_exchange(
+                    &third_selection, channel, peer, fresh.clone(), &mut third_rng,
+                ).unwrap();
+                let (response, served) = tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::join!(another.receive(), serve_relay(&mut provider, &mut history_rng))
+                }).await.unwrap();
+                served.unwrap();
+                let another_page = third_row().open_history_response(
+                    &third_selection, response.unwrap(), &fresh,
+                ).unwrap();
+                assert!(matches!(third_row().prepare_archive_parent_request(
+                    &third_selection, &another_page, &missing, false, fresh.clone(), &mut third_rng,
+                ), Err(V2MemberSaveRefusal::Stale)));
+                drop(another_page);
+                let relay = third_row().prepare_archive_parent_request(
+                    &third_selection, &page, &missing, false, fresh.clone(), &mut third_rng,
+                ).unwrap();
+                let (response, served) = tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::join!(relay.receive(), serve_relay(&mut provider, &mut history_rng))
+                }).await.unwrap();
+                served.unwrap();
+                let mut replay = third_row().prepare_discovered_archive(
+                    &third_selection, response.unwrap(), fresh.clone(),
+                ).unwrap().unwrap();
                 assert_eq!(replay.original_digest_for_test(), digest);
+                assert!(!missing.matches_child(&replay));
+                assert!(third_row().advance_discovered_archive(&mut replay, &fresh, &mut third_rng).unwrap());
+                assert!(third_row().select_discovered_archive(&replay, &fresh, &mut third_rng).unwrap().is_some());
+                drop(replay);
+                let relay = third_row().prepare_discovered_original(
+                    &third_selection, &page, edit, fresh.clone(), &mut third_rng,
+                ).unwrap();
+                let (response, served) = tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::join!(relay.receive(), serve_relay(&mut provider, &mut history_rng))
+                }).await.unwrap();
+                served.unwrap();
+                let mut replay = third_row().prepare_discovered_archive(
+                    &third_selection, response.unwrap(), fresh.clone(),
+                ).unwrap().unwrap();
+                assert!(missing.matches_child(&replay));
                 assert!(third_row().advance_discovered_archive(&mut replay, &fresh, &mut third_rng).unwrap());
                 assert!(third_row().select_discovered_archive(&replay, &fresh, &mut third_rng).unwrap().is_some());
             }
@@ -2519,6 +2638,38 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     let request = provider.next().await.expect("reverse history request");
                     third_row().serve_dependency_request(&third_selection, channel, request, fresh.clone(), rng)
                 };
+                // C can advertise B's exact received originals back to B.
+                // A clean own reply covers this sweep entry without treating
+                // B as having installed a received copy. Delete still needs
+                // the normal archive path in case a Create was retained there.
+                third_row()
+                    .prepare_member_contact(&third_selection, &member_contact, host, fresh.clone())
+                    .unwrap().connect(&scheduler).await.unwrap();
+                assert!((0..=256).any(|_| third_row()
+                    .maintain_archive_relay_catalogue(&third_selection, channel, &fresh).unwrap()));
+                let echo = recovered_row().prepare_archive_history_exchange(
+                    &selection, channel, author, fresh.clone(), &mut history_rng,
+                ).unwrap();
+                let (reply, served) = tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::join!(echo.receive(), serve_return(&mut provider, &mut third_rng))
+                }).await.unwrap();
+                served.unwrap();
+                let echo = recovered_row().open_history_response(
+                    &selection, reply.unwrap(), &fresh,
+                ).unwrap();
+                assert_eq!(recovered_row().covers_discovered_own_create(
+                    &selection, &echo, deepest, &fresh,
+                ), Ok(true));
+                assert_eq!(recovered_row().covers_discovered_own_create(
+                    &selection, &echo, edited.0, &fresh,
+                ), Ok(false));
+                assert_eq!(recovered_row().covers_discovered_own_create(
+                    &selection, &echo, deleted.0, &fresh,
+                ), Ok(false));
+                assert_eq!(recovered_row().selected_discovered_target(
+                    &selection, &echo, deepest, &fresh,
+                ), Ok(None));
+                drop(echo);
                 let exchange = recovered_row().prepare_history_exchange(
                     &selection, channel, author, fresh.clone(), &mut history_rng,
                 ).unwrap();
@@ -2694,7 +2845,8 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 ).unwrap().unwrap();
                 assert!(projection.with_publication(|view| matches!(
                     view, GuardedProjection::Visible { create, selected, text, .. }
-                        if *create == action && *selected == action && text == "Original founder message over TCP"
+                        if *create == action && *selected == founder_archive_edit.unwrap().0
+                            && text == "The founder edited this before retiring"
                 )).unwrap());
             }
             if let Some((deepest, _)) = chain.last() {
