@@ -641,6 +641,34 @@ work.
 Add and Remove check the same membership epoch bound as cold replay before
 covering a successor intent. Both writers can select epoch 64.
 
+## Rejoin in the original member vault
+
+Cold recovery distinguishes a selected removal of this device from an
+incomplete journal. It replays the original joined admission and requires
+the exact durable Remove selector before reporting that the device was
+removed. A missing or conflicting selector refuses restart without
+authorizing a new join.
+
+The isolated MLS donor opens the bounded original Pending provider under a
+new native device cut and creates a provider containing only its original
+signer. The next signed request uses a fresh invitation nonce, request
+token and KeyPackage. The old Welcome remains bound to its original private package. The
+Windows Sync fixture completed the replacement Welcome with the new Native
+Source and restored its sealed Outcome. The desktop still needs the
+mounted rejoin route.
+
+The retired owner prepares one authenticated namespace 9 catalog after its
+original TCP actor drains. It holds the original mount, file identities
+and reservation through retries. File names and contents are unchanged
+during preparation. Ordinary readers still refuse the new namespace.
+Production rejoin must durably select it before the new native key cut,
+hold the exact original files through selection, and verify that the new
+admission descends from the exact selected removal. The registry
+successor retains the old row and its original receipt, and selects only
+one active new row. Saved outbox originals are preserved. Pending work
+under the retired admission keeps its original scope. Physical deployment,
+crash recovery and same-vault activation remain open.
+
 ## Acceptance before enabling
 
 The Chat V2 integration workflow runs focused desktop membership checks on

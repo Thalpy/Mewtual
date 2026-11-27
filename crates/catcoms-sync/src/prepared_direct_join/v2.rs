@@ -16,8 +16,9 @@ mod governing_prefix;
 mod pending_source;
 mod received_add;
 pub use pending_source::{
-    RecoveredV2JoinedOutcome, RecoveredV2PendingJoinSource, SealedV2JoinedOutcome,
-    SealedV2PendingJoinSource, V2PendingJoinContextData,
+    NativeV2RejoinInputs, RecoveredV2JoinedOutcome, RecoveredV2PendingJoinSource,
+    SealedV2JoinedOutcome, SealedV2PendingJoinSource, SelectedRejoinRemoval,
+    V2PendingJoinContextData,
 };
 pub use received_add::{
     V2MemberAddFrameData, V2MemberAddRequestData, V2MemberTransitionFrameData,
@@ -123,6 +124,7 @@ pub struct PreparedV2JoinRequest {
     limits: DirectJoinLimits,
     welcome_entered: bool,
     native_origin: Option<NativeChatSourceObservation>,
+    rejoin_remove: Option<SelectedRejoinRemoval>,
     // A pending request moves through transport and covering futures even
     // before a completed SDK graph exists. Keep that graph out of those frames.
     completed: Option<Box<CompletedV2JoinCandidate>>,
@@ -233,6 +235,7 @@ impl PreparedV2JoinRequest {
             welcome_entered: false,
             warm_sdk_payment: None,
             native_origin: None,
+            rejoin_remove: None,
             completed: None,
             sealed_source: None,
             sealed_outcome: None,

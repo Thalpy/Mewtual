@@ -9,6 +9,8 @@ use catcoms_wire::{Decoder, Encoder};
 use zeroize::Zeroizing;
 
 const TAG: &[u8] = b"catcoms/private-native-backend-index/v3\0";
+#[cfg(test)]
+const REJOIN_INDEX_FORMAT: u16 = 4;
 const MAX_FOUNDER_BINDING: usize = 6 * 36 + 4 + 256;
 const MAX_JOINED_BINDING: usize = 10 * 36 + 4 + 256 + 8;
 // A minimum-size old2 PendingFounder may still need its full binding and
@@ -168,7 +170,8 @@ fn put_joined(output: &mut Encoder, value: &JoinedBinding) -> Result<(), AppErro
 
 impl Index {
     pub(super) fn encoded_length(&self) -> Result<usize, AppError> {
-        self.lengths_data().map(|(encoded, _)| encoded)
+        self.validate_data()?;
+        self.lengths_validated_data().map(|(encoded, _)| encoded)
     }
 
     /// Required final footprint, not just today's bytes. Birth/metadata
@@ -177,11 +180,17 @@ impl Index {
     /// from stranding a previously admitted activation or retirement.
     #[cfg(test)]
     pub(super) fn reserved_length_data(&self) -> Result<usize, AppError> {
-        self.lengths_data().map(|(_, reserved)| reserved)
+        self.validate_data()?;
+        self.lengths_validated_data().map(|(_, reserved)| reserved)
     }
 
-    fn lengths_data(&self) -> Result<(usize, usize), AppError> {
-        self.validate_data()?;
+    #[cfg(test)]
+    pub(super) fn rejoin_encoded_length(&self) -> Result<usize, AppError> {
+        self.validate_data_in(true)?;
+        self.lengths_validated_data().map(|(encoded, _)| encoded)
+    }
+
+    fn lengths_validated_data(&self) -> Result<(usize, usize), AppError> {
         let mut length = HEADER_BYTES + self.parent.map_or(0, |_| 36);
         // G1 has no parent yet; its first successor necessarily has one.
         let mut reserved = HEADER_BYTES + 36;
@@ -272,13 +281,27 @@ impl Index {
     }
 
     pub(super) fn encode_data(&self) -> Result<Zeroizing<Vec<u8>>, AppError> {
-        let length = self.encoded_length()?;
+        self.encode_validated(self.encoded_length()?, INDEX_FORMAT)
+    }
+
+    /// Test the new physical discriminator before a mounted ID9 owner is
+    /// implemented. The ordinary Index3 path still has exactly one grammar.
+    #[cfg(test)]
+    pub(super) fn encode_rejoin_data(&self) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        self.encode_validated(self.rejoin_encoded_length()?, REJOIN_INDEX_FORMAT)
+    }
+
+    fn encode_validated(
+        &self,
+        length: usize,
+        version: u16,
+    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
         let mut output = Encoder::with_capacity(length);
         // Keep the encoder outside the fallible body and always take its bytes
         // into the zeroizing holder before propagating ordinary encode errors.
         let result = (|| {
             output.put_bytes(TAG).map_err(|_| refused())?;
-            output.put_u16(INDEX_FORMAT);
+            output.put_u16(version);
             for field in [
                 self.capability.original.vault,
                 self.capability.original.root,
@@ -372,12 +395,31 @@ impl Index {
     }
 
     pub(super) fn decode_data(raw: &[u8], expected: Capability) -> Result<Self, AppError> {
+        Self::decode_for_reader(raw, expected, INDEX_FORMAT, Self::encoded_length)
+    }
+
+    #[cfg(test)]
+    pub(super) fn decode_rejoin_data(raw: &[u8], expected: Capability) -> Result<Self, AppError> {
+        Self::decode_for_reader(
+            raw,
+            expected,
+            REJOIN_INDEX_FORMAT,
+            Self::rejoin_encoded_length,
+        )
+    }
+
+    fn decode_for_reader(
+        raw: &[u8],
+        expected: Capability,
+        version: u16,
+        validate: fn(&Self) -> Result<usize, AppError>,
+    ) -> Result<Self, AppError> {
         if raw.len() > MAX_PLAIN {
             return Err(refused());
         }
         let mut input = Decoder::new(raw);
         if input.get_bytes().map_err(|_| refused())? != TAG
-            || input.get_u16().map_err(|_| refused())? != INDEX_FORMAT
+            || input.get_u16().map_err(|_| refused())? != version
             || field32(&mut input)? != expected.original.vault
             || field32(&mut input)? != expected.original.root
             || field32(&mut input)? != expected.id_data()?
@@ -496,7 +538,7 @@ impl Index {
             last_issued_id,
             rows,
         };
-        if value.encoded_length()? != raw.len() {
+        if validate(&value)? != raw.len() {
             return Err(refused());
         }
         Ok(value)

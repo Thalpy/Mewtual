@@ -34,6 +34,38 @@ impl HeaderWitness {
     }
 }
 
+fn record_path(
+    store: &ServerStore,
+    context: V2PendingJoinContextData,
+    epoch: u64,
+    conflict: bool,
+) -> Result<PathBuf, AppError> {
+    let kind = if conflict { "conflict" } else { "first" };
+    fixed(
+        store,
+        false,
+        &format!(
+            "chat-critical-namespaces.joined-member-header.{}.{epoch}.{kind}.bin",
+            hex::encode(context.original_pending),
+        ),
+    )
+}
+
+pub(super) fn require_covered_names(
+    store: &ServerStore,
+    context: V2PendingJoinContextData,
+    epoch: u64,
+    witness: Option<&HeaderWitness>,
+) -> Result<(), AppError> {
+    let path = record_path(store, context, epoch, false)?;
+    match witness {
+        Some(original) if original.path == path => original.require_current()?,
+        Some(_) => return Err(denied()),
+        None => absent(&path)?,
+    }
+    absent(&record_path(store, context, epoch, true)?)
+}
+
 pub(super) struct Scope<'a> {
     pub(super) store: &'a ServerStore,
     pub(super) key: &'a [u8; 32],
@@ -44,16 +76,7 @@ pub(super) struct Scope<'a> {
 
 impl Scope<'_> {
     fn path(&self, conflict: bool) -> Result<PathBuf, AppError> {
-        let kind = if conflict { "conflict" } else { "first" };
-        fixed(
-            self.store,
-            false,
-            &format!(
-                "chat-critical-namespaces.joined-member-header.{}.{}.{kind}.bin",
-                hex::encode(self.context.original_pending),
-                self.epoch
-            ),
-        )
+        record_path(self.store, self.context, self.epoch, conflict)
     }
 
     fn fee(&self) -> Result<CatalogReadReservation, AppError> {

@@ -881,12 +881,20 @@ fn archive_suffix_length(current: &codec::Parsed<'_>) -> Result<usize, AppError>
         (Some(1..=3), Some(payload)) => 12usize.checked_add(payload.len()).ok_or_else(refused)?,
         _ => return Err(refused()),
     };
+    let history_and_rejoin = [current.shared_history_payload, current.rejoin_payload]
+        .into_iter()
+        .flatten()
+        .try_fold(0usize, |total, bytes| {
+            total.checked_add(12)?.checked_add(bytes.len())
+        })
+        .ok_or_else(refused)?;
     archive
         .checked_add(current_layout)
         .and_then(|n| n.checked_add(governance))
         .and_then(|n| n.checked_add(member_outbox))
         .and_then(|n| n.checked_add(joined_pin))
         .and_then(|n| n.checked_add(native_registry))
+        .and_then(|n| n.checked_add(history_and_rejoin))
         .ok_or_else(refused)
 }
 
@@ -899,6 +907,8 @@ pub(super) fn preserved_entry_count(current: &codec::Parsed<'_>) -> u32 {
         + u32::from(current.member_outbox.is_some())
         + u32::from(current.joined_pin_payload.is_some())
         + u32::from(current.native_registry_payload.is_some())
+        + u32::from(current.shared_history_payload.is_some())
+        + u32::from(current.rejoin_payload.is_some())
 }
 
 /// Outer header only; payload version/tag/rows remain the actual JOIN consumer's contract.
@@ -957,6 +967,24 @@ fn append_original_archive(
             .put_u32(7)
             .put_u32(current.native_registry_version.ok_or_else(refused)?);
         output.put_bytes(payload).map_err(|_| refused())?;
+    }
+    use super::super::{rejoin_namespace, shared_history_namespace};
+    for (id, version, payload) in [
+        (
+            shared_history_namespace::ID,
+            shared_history_namespace::VERSION,
+            current.shared_history_payload,
+        ),
+        (
+            rejoin_namespace::ID,
+            rejoin_namespace::VERSION,
+            current.rejoin_payload,
+        ),
+    ] {
+        if let Some(payload) = payload {
+            output.put_u32(id).put_u32(version);
+            output.put_bytes(payload).map_err(|_| refused())?;
+        }
     }
     Ok(())
 }

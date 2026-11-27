@@ -55,6 +55,16 @@ replaced or conflicting journal files refuse startup and are preserved.
 Early torn journal recovery and the first Add remain outside this recovery
 path.
 
+A saved rejoin request commits to the exact prior Remove Header, its target
+Admission and the removal epoch. Its new prejoin provider contains only
+the old device signer and a fresh KeyPackage. Welcome validation replays
+the pinned prefix through the selected new Add and checks that the old
+Remove occurs in that prefix. The same check runs before restoring a
+sealed outcome. Ordinary first-pin paths refuse the new Pending format.
+The desktop still lacks the mounted rejoin owner that proves the original
+Remove selected on disk, preserves the old files and admits the replacement
+row. The retained coordinates alone grant no membership or write authority.
+
 Cold joined-contact recovery begins with explicit local recurring consent.
 The saved contact is tenant-bound and epoch-bound, and the current signed
 Admission and expected peer must authenticate again. An outbound route to

@@ -836,6 +836,29 @@ impl ServerStore {
         self.require_recovered_request(selected).map(|_| ())
     }
 
+    pub(in crate::store) fn require_recovered_joined_removal(
+        &self,
+        registration: NativeTextJoinedRegistrationData,
+        removal: catcoms_sync::SelectedRejoinRemoval,
+    ) -> Result<(), AppError> {
+        self.validate_mounted_governance_layout()?;
+        let slot = self.joined_pin_index.try_lock().map_err(|_| denied())?;
+        let selected = slot.as_ref().ok_or_else(denied)?;
+        selected.require(self)?;
+        let original = selected.pending.as_ref().ok_or_else(denied)?;
+        if original._pending.pending_data().1 != registration.context
+            || registration.selected.own_admission != removal.1
+        {
+            return Err(denied());
+        }
+        original
+            .welcome
+            .as_ref()
+            .ok_or_else(denied)?
+            .require_recovered_removal(self, registration.context, removal)?;
+        selected.require(self)
+    }
+
     /// Exclusive access keeps the original held index and Welcome outside
     /// mutex guards during runtime assembly.
     pub(in crate::store) fn attach_recovered_joined_node<
@@ -845,7 +868,7 @@ impl ServerStore {
         &mut self,
         inputs: &mut Option<JoinedRuntimeInputs<T, R>>,
         output: &mut Option<catcoms_sync::ClosedV2JoinedNode<T, R>>,
-    ) -> Result<(), AppError> {
+    ) -> Result<Option<catcoms_sync::SelectedRejoinRemoval>, AppError> {
         let original = self.recovered_join_outcome_data()?.ok_or_else(denied)?;
         if output.is_none() {
             let welcome = self
@@ -866,14 +889,14 @@ impl ServerStore {
         let mut slot = self.joined_pin_index.try_lock().map_err(|_| denied())?;
         let selected = slot.as_mut().ok_or_else(denied)?;
         selected.require(self)?;
-        selected
+        let removed = selected
             .pending
             .as_mut()
             .and_then(|pending| pending.welcome.as_mut())
             .ok_or_else(denied)?
             .recover_member_adds(self, context, node)?;
         selected.require(self)?;
-        Ok(())
+        Ok(removed)
     }
 }
 

@@ -3,7 +3,7 @@ use super::*;
 use crate::store::critical_namespaces::archive_current_namespace_codec::CurrentLayoutData;
 
 const FRAME: [u8; 32] = [90; 32];
-fn base() -> Index {
+pub(super) fn base() -> Index {
     let current = CurrentLayoutData {
         vault: [1; 32],
         root: [2; 32],
@@ -49,7 +49,11 @@ fn birth(kind: BirthKind) -> Birth {
     }
 }
 fn next(old: &Index) -> Index {
-    old.validate_data().unwrap();
+    next_in(old, false)
+}
+
+pub(super) fn next_in(old: &Index, rejoin: bool) -> Index {
+    old.validate_data_in(rejoin).unwrap();
     // Test-only bounded copies. Production must own the physical overlap fee;
     // no Clone/snapshot publication API is added to the actual row/index types.
     let rows = old
@@ -129,7 +133,7 @@ fn next(old: &Index) -> Index {
         rows,
     }
 }
-fn joined(index: &Index) -> Backend {
+pub(super) fn joined(index: &Index) -> Backend {
     Backend::Joined {
         birth: birth(BirthKind::Joined),
         binding: JoinedBinding {

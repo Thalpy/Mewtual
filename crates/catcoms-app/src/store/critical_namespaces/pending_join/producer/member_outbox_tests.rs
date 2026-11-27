@@ -176,6 +176,45 @@ fn schedule_toggle_and_add_preserve_five_with_and_without_four() {
 }
 
 #[test]
+fn history_namespace_join_rewrites_keep_eight_and_nine_in_order() {
+    // Test the shared JOIN encoder using opaque descriptor bytes. The
+    // separately tested native family validates the real descriptor contents.
+    let raw = catalog(&[4, 5]);
+    let mut parsed = codec::parse_all_known_for_test(&raw, &VAULT, false).unwrap();
+    let mut target = parsed.rows[0].as_ref().unwrap().metadata.clone();
+    target.revision += 1;
+    target.scheduling = codec::Scheduling::Active;
+    let history = &b"selected history descriptor"[..];
+    let rejoin = &b"same-vault rejoin descriptor"[..];
+    parsed.shared_history_payload = Some(history);
+    for nine in [None, Some(rejoin)] {
+        parsed.rejoin_payload = nine;
+        let candidate = encode_schedule(&parsed, &target, &VAULT).unwrap();
+        let original = entries(&raw);
+        let mut expected = original.into_iter().skip(1).collect::<Vec<_>>();
+        expected.push((8, 1, history.to_vec()));
+        if let Some(nine) = nine {
+            expected.push((9, 1, nine.to_vec()));
+        }
+        assert_eq!(
+            entries(&candidate).into_iter().skip(1).collect::<Vec<_>>(),
+            expected
+        );
+    }
+    let original = parsed.summary([0; 32]);
+    let mut next = parsed.summary([1; 32]);
+    next.generation = original.generation + 1;
+    next.parent = Some(original.digest);
+    next.rows[0] = Some(target);
+    codec::successor(&original, &next).unwrap();
+    next.rejoin_payload_digest = None;
+    assert!(codec::successor(&original, &next).is_err());
+    next.rejoin_payload_digest = original.rejoin_payload_digest;
+    next.shared_history_payload_digest = None;
+    assert!(codec::successor(&original, &next).is_err());
+}
+
+#[test]
 fn a_reencoding_that_loses_or_changes_five_is_not_a_successor() {
     let raw = catalog(&[5]);
     let parsed = codec::parse_all_known_for_test(&raw, &VAULT, false).unwrap();

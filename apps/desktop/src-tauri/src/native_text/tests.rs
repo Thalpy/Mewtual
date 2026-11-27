@@ -1677,7 +1677,8 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
     let root = tempfile::tempdir().unwrap();
     let founder_path = root.path().join("founder");
     let (founder, main, founder_queue) = app(founder_path.clone(), None, true);
-    let (member, window, member_queue) = app(root.path().join("member"), None, true);
+    let member_path = root.path().join("member");
+    let (member, window, member_queue) = app(member_path.clone(), None, true);
     unlock_current(&founder, &main, &founder_queue).await;
     unlock_current(&member, &window, &member_queue).await;
     let found = found_request(&main, 1, "Founder group");
@@ -1776,6 +1777,175 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
     refused(send.await.unwrap());
     if let Some(history) = &retained_history {
         check_retained_removal_history(&main, &founder_queue, &found, history).await;
+    }
+
+    // Only the authenticated selected A1 Remove explains why this row
+    // cannot be activated. An outcome with its selector removed is still
+    // ambiguous and must not be classified as an eligible retired member.
+    let state = member.state::<AppState>();
+    let close = register_vault_close(&state).await.unwrap();
+    sources::close_server_rows(&state, &SystemClock)
+        .await
+        .unwrap();
+    drop((close, state));
+    drop((window, member));
+    let removed_response = |path: std::path::PathBuf| async move {
+        let (app, main, queue) = app(path, None, true);
+        let state = app.state::<AppState>();
+        let generation = state
+            .ui_session_generation
+            .load(Ordering::SeqCst)
+            .to_string();
+        let reply = invoke(&main, &generation, SECRET);
+        run(&queue).await;
+        let tauri::ipc::InvokeResponse::Err(error) = reply.await.unwrap() else {
+            panic!("a closed original Admission must not acquire a native row");
+        };
+        assert!(state.store.lock().await.is_none());
+        error.0
+    };
+    assert_eq!(
+        removed_response(member_path.clone()).await,
+        serde_json::json!("This device was removed from this Chat V2 server."),
+    );
+    let wait_for_original_vault = || async {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                match catcoms_storage::vault::acquire_vault_session(&member_path) {
+                    Ok(session) => return drop(session),
+                    Err(catcoms_storage::StorageError::VaultBusy) => {
+                        SystemClock.sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(error) => panic!("original vault session: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("the previous native TCP owner released the vault");
+    };
+    wait_for_original_vault().await;
+    let selector = std::fs::read_dir(&member_path)
+        .unwrap()
+        .find_map(|entry| {
+            let entry = entry.unwrap();
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| {
+                    name.starts_with("chat-critical-namespaces.joined-member-selected.")
+                        && name.ends_with(".2.bin")
+                })
+                .then(|| entry.path())
+        })
+        .expect("the covered A1 removal has an original selector");
+    let parked = selector.with_extension("held-for-test");
+    std::fs::rename(&selector, &parked).unwrap();
+    assert_eq!(
+        removed_response(member_path.clone()).await,
+        serde_json::json!("Could not unlock the existing Chat V2 vault."),
+    );
+    assert!(parked.is_file() && !selector.exists());
+    std::fs::rename(parked, &selector).unwrap();
+    wait_for_original_vault().await;
+    assert_eq!(
+        removed_response(member_path.clone()).await,
+        serde_json::json!("This device was removed from this Chat V2 server."),
+    );
+
+    if !join_after_restart {
+        use catcoms_app::store::{NativeTextJoinedRecovery, NativeTextJoinedStorage};
+        wait_for_original_vault().await;
+        let catalog = member_path.join("chat-critical-namespaces.bin");
+        let before = std::fs::read(&catalog).unwrap();
+        let mut rng = OsCryptoRng;
+        let registry = Registry::default();
+        let storage = NativeTextJoinedStorage::open_for_native_startup(
+            &member_path,
+            SECRET.as_bytes(),
+            &mut rng,
+            boot::current_policy().unwrap(),
+        )
+        .unwrap();
+        let (_lifetime, signal) = tokio::sync::watch::channel(false);
+        let negative = catcoms_rt::RequestCancellation::new(signal, None);
+        let runtime = storage
+            .bind_recovered_native_runtime(OsCryptoRng, Box::new(SystemClock), &negative)
+            .map_err(|(_, error)| error)
+            .unwrap();
+        let NativeTextJoinedRecovery::Removed(mut retired) = runtime
+            .into_recovered_joined_membership(
+                (
+                    Arc::new(AtomicU64::new(1)),
+                    Arc::new(AtomicU64::new(0)),
+                    Arc::new(AtomicBool::new(false)),
+                ),
+                registry.ui_budget.clone(),
+                &registry.sources.policy(),
+                &negative,
+            )
+            .unwrap()
+        else {
+            panic!("a proven terminal row must retain retired storage only");
+        };
+        timeout(Duration::from_secs(10), async {
+            while !retired.prepare_rejoin_catalog(&mut rng).unwrap() {
+                SystemClock.sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the original transport drains before rejoin preparation");
+        struct NeverRng;
+        impl rand_core::RngCore for NeverRng {
+            fn next_u32(&mut self) -> u32 {
+                panic!("retired catalog retry drew randomness")
+            }
+            fn next_u64(&mut self) -> u64 {
+                panic!("retired catalog retry drew randomness")
+            }
+            fn fill_bytes(&mut self, _: &mut [u8]) {
+                panic!("retired catalog retry drew randomness")
+            }
+            fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand_core::Error> {
+                panic!("retired catalog retry drew randomness")
+            }
+        }
+        impl rand_core::CryptoRng for NeverRng {}
+        let proof = retired.removal_data().unwrap().unwrap();
+        assert_eq!(proof.2, 2);
+        assert_eq!(std::fs::read(&catalog).unwrap(), before);
+        assert!(!member_path
+            .join("chat-critical-namespaces.replace.tmp")
+            .exists());
+
+        let selector_bytes = std::fs::read(&selector).unwrap();
+        let selector_backup = selector.with_extension("original-retired-owner-test");
+        std::fs::rename(&selector, &selector_backup).unwrap();
+        std::fs::write(&selector, &selector_bytes).unwrap();
+        assert!(
+            retired.removal_data().is_err(),
+            "equal bytes cannot replace the same held selector"
+        );
+        assert!(retired.prepare_rejoin_catalog(&mut NeverRng).is_err());
+        std::fs::remove_file(&selector).unwrap();
+        std::fs::rename(&selector_backup, &selector).unwrap();
+
+        let file_name = selector.file_name().unwrap().to_str().unwrap();
+        let fork = file_name
+            .replace("joined-member-selected", "joined-member-header")
+            .replace(".2.bin", ".2.conflict.bin");
+        let fork = member_path.join(fork);
+        std::fs::write(&fork, b"unresolved late record").unwrap();
+        assert!(
+            retired.removal_data().is_err(),
+            "late governing evidence suspends the old proof"
+        );
+        assert_eq!(std::fs::read(&fork).unwrap(), b"unresolved late record");
+        std::fs::remove_file(fork).unwrap();
+        assert_eq!(retired.removal_data().unwrap(), Some(proof));
+        assert!(retired.prepare_rejoin_catalog(&mut NeverRng).unwrap());
+        assert_eq!(std::fs::read(&catalog).unwrap(), before);
+        drop(retired);
+        wait_for_original_vault().await;
     }
 
     // The selected Remove is already on disk. A different application

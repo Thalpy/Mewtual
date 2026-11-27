@@ -67,7 +67,6 @@ pub use native_registry::NativeTextInvitePublication;
 pub use native_registry::NativeTextJoinedRegistryRowData;
 pub use native_registry::NativeTextJoinedRequestPreparation;
 pub use native_registry::NativeTextJoinedRowSelection;
-pub use native_registry::NativeTextJoinedRuntime;
 pub use native_registry::NativeTextJoinedVaultUpgrade;
 pub use native_registry::{
     NativeCreationStateData, NativeCreationStatusData, NativeIndexPolicy, NativeIndexStore,
@@ -122,11 +121,15 @@ pub use native_registry::{
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
 };
 pub use native_registry::{NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob};
+pub use native_registry::{
+    NativeTextJoinedRecovery, NativeTextJoinedRuntime, NativeTextRemovedJoinedVault,
+};
 pub(super) mod read_pool;
 pub use read_pool::CriticalCatalogReadPool;
 use read_pool::{CatalogReadReservation, EMPTY_READ_FEE};
 pub(in crate::store) mod pending_join;
 pub(in crate::store) mod pending_join_codec;
+pub(in crate::store) mod rejoin_namespace;
 pub(in crate::store) mod shared_history_namespace;
 pub use pending_join::{
     ActivatedCheckpointJoin, CheckpointJoinExecutionPolicy, CheckpointJoinNetwork,

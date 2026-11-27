@@ -175,6 +175,10 @@ pub enum AppError {
     /// A product-layer validation error (e.g. an over-large avatar).
     #[error("{0}")]
     Invalid(String),
+    /// Cold joined replay proved a covered Remove of this exact original
+    /// Admission. This terminal result grants no new runtime or join authority.
+    #[error("This device was removed from this Chat V2 server.")]
+    ChatV2MembershipRemoved,
     /// The join did not finalize before the wall-clock deadline; e.g. an Option-C admin invite
     /// whose owner never came online to serialize the Add. The user can retry.
     #[error("the join timed out before it finalized; try again")]
