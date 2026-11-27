@@ -6,10 +6,11 @@ use crate::store::persistence::v2_member_outbox::{
 };
 use crate::store::persistence::v2_member_transport::{
     FOUNDER_RECEIVE_ACTIONS as ACTION_LIMIT, FOUNDER_RECEIVE_BYTES as ACTION_BYTES,
-    FOUNDER_RECEIVE_LEDGER_FEE as LEDGER_FEE, FOUNDER_RECEIVE_WORK as WORK_LIMIT,
+    FOUNDER_RECEIVE_LEDGER_FEE as LEDGER_FEE,
 };
 use crate::store::persistence::v2_shared_history::{
-    SharedHistoryActionQuery, SharedHistoryProjectionLease, SharedHistoryReplay, SharedHistoryScope,
+    SharedHistoryActionQuery, SharedHistoryProjectionLease, SharedHistoryReplay,
+    SharedHistoryScope, ARCHIVED_PROJECTION_WORK,
 };
 use crate::store::{
     NativeTextFounderAudit, NativeTextJoinedArchivedActions, NativeTextJoinedMemberProjection,
@@ -258,7 +259,7 @@ impl NativeTextColdFounderSource {
                     };
                     let projection_fee = pool.try_reserve(2 * MAX_ACTION_BYTES + 32 * 1024)?;
                     let projection = ledger
-                        .guarded_projection(create, WORK_LIMIT)
+                        .guarded_projection(create, ARCHIVED_PROJECTION_WORK)
                         .map_err(|_| refused())?;
                     Ok(Some(NativeTextJoinedMemberProjection::from_archive(
                         projection,

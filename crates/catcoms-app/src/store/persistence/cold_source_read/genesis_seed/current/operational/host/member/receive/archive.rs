@@ -7,6 +7,7 @@ use crate::store::persistence::v2_member_transport::{
 };
 use crate::store::persistence::v2_shared_history::{
     SharedHistoryActionPage, SharedHistoryProjectionLease, SharedHistoryReplay, SharedHistoryScope,
+    ARCHIVED_PROJECTION_WORK,
 };
 use catcoms_sync::owner_v2::SelectedV2MemberEnvelope;
 
@@ -153,7 +154,7 @@ impl<'a> FounderHistory<'a> {
             .try_reserve(2 * MAX_ACTION_BYTES + 32 * 1024)
             .map_err(|_| Refusal::Busy)?;
         let projection = ledger
-            .guarded_projection(create, WORK_LIMIT)
+            .guarded_projection(create, ARCHIVED_PROJECTION_WORK)
             .map_err(|_| Refusal::Failed)?;
         Ok(Some(FounderArchivedMessage {
             projection,

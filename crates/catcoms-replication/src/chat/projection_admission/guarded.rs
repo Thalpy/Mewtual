@@ -281,34 +281,30 @@ impl ChatLedger {
         work: &mut Work,
     ) -> Result<BTreeSet<ActionId>, ChatError> {
         let mut ancestors = BTreeSet::new();
-        // This fixed root set shares ancestor expansion, but roots are NOT previsited.
-        // A root may also be another root's ancestor, regardless of CID traversal order.
-        // Every pushed/popped edge still spends work, including duplicate edges.
-        let mut visited = BTreeSet::new();
-        for id in selected {
-            if matches!(self.entries[id].action.spec().body, Body::Create { .. }) {
-                continue;
+        let mut scheduled = BTreeSet::new();
+        let mut stack = Vec::new();
+        for &root in selected {
+            if scheduled.insert(root) {
+                stack.push(root);
             }
-            let mut stack = Vec::new();
-            for parent in &self.entries[id].action.spec().parents {
-                work.spend()?;
-                stack.push(*parent);
-            }
-            while let Some(parent) = stack.pop() {
-                work.spend()?;
-                if !visited.insert(parent) {
+            while let Some(id) = stack.pop() {
+                // The initial message scan funds roots. Every other node
+                // was scheduled by a charged incoming edge.
+                let entry = self.entries.get(&id).ok_or(ChatError::Dependency)?;
+                // A Create's reply target belongs to another message.
+                if matches!(entry.action.spec().body, Body::Create { .. }) {
                     continue;
                 }
-                if selected.contains(&parent) {
-                    ancestors.insert(parent);
-                }
-                let entry = self.entries.get(&parent).ok_or(ChatError::Dependency)?;
-                // Valid semantic ancestry was checked independently. Its body text remains
-                // untouched even if its current token is Held/absent or the ancestor is Join.
-                if !matches!(entry.action.spec().body, Body::Create { .. }) {
-                    for next in &entry.action.spec().parents {
-                        work.spend()?;
-                        stack.push(*next);
+                for &parent in &entry.action.spec().parents {
+                    work.spend()?;
+                    // Record the edge even when this parent has already been
+                    // expanded as another root. Traversal order cannot make
+                    // an ancestor survive as a second visible head.
+                    if selected.contains(&parent) {
+                        ancestors.insert(parent);
+                    }
+                    if scheduled.insert(parent) {
+                        stack.push(parent);
                     }
                 }
             }

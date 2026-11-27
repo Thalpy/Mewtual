@@ -23,6 +23,17 @@ walk. The earlier native fixture verified that both the warm and reopened
 founder saved a reply with the original removed member's ActionId.
 Three-peer incoming acceptance and wider archive retention remain open.
 
+## Render a dense set of saved revisions
+
+The selected message readers for joined members and warm and reopened
+founders now budget for all parent edges in one paid archive replay.
+Core expands each ancestor once, while an edge can still supersede an
+already expanded revision. A selected Delete takes precedence before
+the ancestor walk. The 101 focused Core projection tests passed on
+Windows, including a Create with 13 dense signed revisions and a
+deliberately insufficient budget. The App test targets also compiled.
+Targets beyond the archive replay limit still require paging support.
+
 ## Keep verified chat history visible after member removal
 
 A device can still display messages and edits it had already verified and
