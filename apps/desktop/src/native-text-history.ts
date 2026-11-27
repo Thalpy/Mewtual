@@ -233,7 +233,23 @@ export function decodeNativeOriginalPage(value: unknown, start: string, end: str
   });
   return { backend: "text-v2", scope: "own-saved-originals", next, end_exclusive: exclusive, items };
 }
-/** At most16 native requests/128 originals per batch. Empty channel pages keep
+/** One bounded page for the owner history view. The native own-outbox
+ * command supplies only this device's originals for the current channel. */
+export async function readNativeOriginalPage(
+  invoke: NativeInvoke,
+  target: NativeHistoryTarget,
+  current: () => boolean,
+  cursor: { next: string; end: string | null },
+): Promise<NativeOriginalPage | null> {
+  if (!current()) return null;
+  const raw = await invoke("get_message_page", {
+    server: target.server, channel: target.channel, expectedContext: target.context,
+    start: cursor.next, endExclusive: cursor.end, limit: 8,
+  });
+  return current() ? decodeNativeOriginalPage(raw, cursor.next, cursor.end, target.channel) : null;
+}
+
+/** At most 16 native requests/128 originals per batch. Empty channel pages keep
  * advancing the original context cursor; a finite first end is reused exactly. */
 export async function readNativeOriginals(
   invoke: NativeInvoke,
@@ -243,10 +259,8 @@ export async function readNativeOriginals(
   let next = cursor?.next ?? "0", end: string | null = cursor?.end ?? null;
   const items: NativeOriginal[] = [];
   for (let page = 0; page < 16; page++) {
-    if (!current()) return null;
-    const raw = await invoke("get_message_page", { server: target.server, channel: target.channel, expectedContext: target.context, start: next, endExclusive: end, limit: 8 });
-    if (!current()) return null;
-    const result = decodeNativeOriginalPage(raw, next, end, target.channel);
+    const result = await readNativeOriginalPage(invoke, target, current, { next, end });
+    if (!result || !current()) return null;
     next = result.next; end = result.end_exclusive; items.push(...result.items);
     if (next === end) break;
   }
