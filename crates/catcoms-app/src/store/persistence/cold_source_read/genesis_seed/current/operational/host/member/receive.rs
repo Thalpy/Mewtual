@@ -3,9 +3,10 @@ use super::*;
 use crate::store::persistence::v2_member_transport::{
     first_founder_missing, prepare_founder_dependency_exchange, prepare_founder_dependency_reply,
     project_founder_member, FounderReceiveOperation, FounderReceiveOutcome, FounderReceiveSession,
-    NativeTextFounderFrameOutcome, NativeTextFounderReceived, FOUNDER_DEPENDENCY_REPLY_FEE,
-    FOUNDER_RECEIVE_ACTIONS as ACTION_LIMIT, FOUNDER_RECEIVE_BYTES as ACTION_BYTES,
-    FOUNDER_RECEIVE_LEDGER_FEE as LEDGER_FEE, FOUNDER_RECEIVE_WORK as WORK_LIMIT,
+    NativeTextFounderAudit, NativeTextFounderFrameOutcome, NativeTextFounderReceived,
+    FOUNDER_DEPENDENCY_REPLY_FEE, FOUNDER_RECEIVE_ACTIONS as ACTION_LIMIT,
+    FOUNDER_RECEIVE_BYTES as ACTION_BYTES, FOUNDER_RECEIVE_LEDGER_FEE as LEDGER_FEE,
+    FOUNDER_RECEIVE_WORK as WORK_LIMIT,
 };
 use crate::store::persistence::v2_shared_history::SharedHistoryActionQuery;
 use catcoms_replication::chat::{ActionState, V2OrdinaryReceiveStatus};
@@ -388,6 +389,31 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                 check_governed_member(&self.owner, governed, &lane.domain, verifier, store)
                     .map_err(|_| Refusal::Stale)?;
                 Ok(FounderReceiveOutcome::ArchiveMessage(result))
+            }
+            FounderReceiveOperation::Audit(query) => {
+                let (_, observation) = self
+                    .owner
+                    .prepare_governed_member_subscription(store, verifier, channel)
+                    .map_err(|_| Refusal::Stale)?;
+                let signal = observation.constrain(caller.clone());
+                let history = FounderHistory::new(
+                    store,
+                    verifier,
+                    self.owner
+                        .borrow_current()
+                        .map_err(|_| Refusal::Unavailable)?,
+                    channel,
+                    lane.admission,
+                    lane.outbox_context(),
+                )?;
+                let page = store
+                    .selected_shared_history_audit_page(history.scope, query, &signal)
+                    .map_err(|_| Refusal::Failed)?;
+                check_governed_member(&self.owner, governed, &lane.domain, verifier, store)
+                    .map_err(|_| Refusal::Stale)?;
+                Ok(FounderReceiveOutcome::Audit(NativeTextFounderAudit::new(
+                    page, signal,
+                )))
             }
         }
     }

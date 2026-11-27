@@ -3,13 +3,16 @@
 use super::*;
 use catcoms_app::store::{
     NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,
-    NativeTextJoinedDependencyExchange, NativeTextJoinedHistoryPage,
+    NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyResponse,
+    NativeTextJoinedHistoryPage,
 };
 use catcoms_replication::chat::ActionId;
+use catcoms_rt::TransportError;
 use std::collections::VecDeque;
 use std::time::Duration;
 
 const TURN: Duration = Duration::from_millis(500);
+const REPLAY_TURN: Duration = Duration::from_millis(100);
 const REQUEST: Duration = Duration::from_secs(3);
 const PAGES_PER_SLICE: u8 = 4;
 const RETRY_MS: u64 = 5_000;
@@ -17,14 +20,26 @@ const RESCAN_MS: u64 = 30_000;
 const REPLAY_MS: u64 = 15_000;
 const MAX_ARCHIVE_SWEEP_PAGES: u16 = 256;
 const MAX_ARCHIVE_CONTINUATION_FAILURES: u8 = 3;
+const INITIAL_PAGE_RETRY_LIMIT: u8 = 3;
 const MAX_ARCHIVE_ANCESTORS: usize = 8;
 const MAX_ARCHIVE_ANCESTRY_REQUESTS: u8 = 24;
 const ARCHIVE_ANCESTRY_MS: u64 = 45_000;
+const EXACT_ENTRY_MS: u64 = 15_000;
 
 struct ParkedOriginal {
     action: ActionId,
-    replay: NativeTextJoinedArchiveReplay,
+    work: ParkedWork,
     deadline: u64,
+}
+
+/// One paid lane either holds the exact wire response pending local
+/// admission or a staged original. Busy cannot start another wire request.
+enum ParkedWork {
+    Reply {
+        response: Box<NativeTextJoinedDependencyResponse>,
+        expected: Option<NativeTextJoinedArchiveDependency>,
+    },
+    Replay(Box<NativeTextJoinedArchiveReplay>),
 }
 
 #[derive(Clone)]
@@ -108,6 +123,9 @@ struct PeerSweep {
     pages: u8,
     total_pages: u16,
     continuation_failures: u8,
+    initial_page_failures: u8,
+    exact_retry: bool,
+    exact_deadline: Option<u64>,
     ancestry: Option<ArchiveAncestry>,
     due: u64,
 }
@@ -123,6 +141,9 @@ impl PeerSweep {
             pages: 0,
             total_pages: 0,
             continuation_failures: 0,
+            initial_page_failures: 0,
+            exact_retry: false,
+            exact_deadline: None,
             ancestry: None,
             due: 0,
         }
@@ -135,11 +156,16 @@ impl PeerSweep {
         self.pages = 0;
         self.total_pages = 0;
         self.continuation_failures = 0;
+        self.initial_page_failures = 0;
+        self.exact_retry = false;
+        self.exact_deadline = None;
         self.ancestry = None;
         self.due = SystemClock.monotonic_ms().saturating_add(delay);
     }
 
     fn finish_original(&mut self, covered: bool) {
+        self.exact_retry = false;
+        self.exact_deadline = None;
         if let Some(ancestry) = self.ancestry.as_mut().filter(|_| covered) {
             ancestry.stack.pop();
             if !ancestry.stack.is_empty() {
@@ -152,6 +178,8 @@ impl PeerSweep {
     }
 
     fn missing_original(&mut self, action: ActionId, proof: NativeTextJoinedArchiveDependency) {
+        self.exact_retry = false;
+        self.exact_deadline = None;
         let ancestry = self
             .ancestry
             .get_or_insert_with(|| ArchiveAncestry::new(action));
@@ -163,6 +191,8 @@ impl PeerSweep {
     /// Retry only an authenticated empty archive result against the
     /// holder's separate own-outbox authority.
     fn holder_archive_empty(&mut self) {
+        self.exact_retry = false;
+        self.exact_deadline = None;
         match self
             .ancestry
             .as_mut()
@@ -186,11 +216,16 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
     let mut pending_cursor = 0;
     let mut replay: Option<(PeerSweep, ParkedOriginal)> = None;
     let mut catalogue_due = 0;
+    let mut peer_due = 0;
     loop {
+        // A checked original gets a short local turn while its selected
+        // route is still live. A stalled admission still waits at most TURN
+        // and a peer without outstanding originals uses the regular pace.
+        let delay = if replay.is_some() { REPLAY_TURN } else { TURN };
         tokio::select! {
             biased;
             _ = scope.cancelled() => return,
-            _ = SystemClock.sleep(TURN) => {}
+            _ = SystemClock.sleep(delay) => {}
         }
         let state = app.state::<AppState>();
         if let Some((mut sweep, parked)) = replay.take() {
@@ -198,12 +233,20 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
             if let Some(outcome) = resume_entry(&state, source, &mut parked).await {
                 let notice = match outcome {
                     ReplayOutcome::Missing(action, proof) => {
+                        #[cfg(test)]
+                        eprintln!("chat history worker found a missing exact ancestor");
                         sweep.missing_original(action, proof);
                         None
                     }
                     ReplayOutcome::Selected(target) => {
+                        #[cfg(test)]
+                        eprintln!("chat history worker selected an exact original");
                         sweep.finish_original(true);
                         Some(target)
+                    }
+                    ReplayOutcome::Empty => {
+                        sweep.holder_archive_empty();
+                        None
                     }
                     ReplayOutcome::Deferred(notice) => {
                         sweep.finish_original(false);
@@ -216,9 +259,12 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
                 }
             } else if let Some(parked) = parked {
                 replay = Some((sweep, parked));
+                // Exact fetches are serialized on this row. Keep making
+                // bounded local progress on the paid original instead of
+                // waiting for unrelated inventory or catalogue work. The
+                // replay's original deadline bounds contention here.
+                continue;
             }
-            // One paid continuation per row. Resume one batch and leave room
-            // for inventory and reconciliation work while it is parked.
         }
         if let Some(target) = reconcile_archive_change(&state, source, &mut pending_cursor).await {
             source.notify_received(app, &state, Some(target)).await;
@@ -226,15 +272,30 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
         let Some(candidates) = row.history_peer_candidates() else {
             continue;
         };
-        peers.retain(|sweep| candidates.contains(&sweep.peer));
+        peers.retain(|sweep| {
+            let approved = candidates.contains(&sweep.peer);
+            #[cfg(test)]
+            if !approved && sweep.page.is_some() {
+                eprintln!("chat history worker dropped a page when its peer approval disappeared");
+            }
+            approved
+        });
         let now = SystemClock.monotonic_ms();
+        if now < peer_due {
+            continue;
+        }
         if !candidates.is_empty() && catalogue_due <= now {
             let channel = source.channel();
-            let updated = with_row(&state, source, move |original, row, _, scope| {
-                original.maintain_archive_relay_catalogue(&row, channel, &scope)
-            })
+            let updated = with_row_until(
+                &state,
+                source,
+                Some(local_turn_deadline()),
+                move |original, row, _, scope| {
+                    original.maintain_archive_relay_catalogue(&row, channel, &scope)
+                },
+            )
             .await;
-            let delay = if matches!(updated, Some(Ok(false))) {
+            let delay = if matches!(updated, None | Some(Ok(false))) {
                 0
             } else {
                 RETRY_MS
@@ -243,13 +304,9 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
         }
         for peer in candidates {
             for archive in [false, true] {
-                let parked = replay
-                    .as_ref()
-                    .is_some_and(|(sweep, _)| sweep.peer == peer && sweep.archive == archive);
-                if !parked
-                    && !peers
-                        .iter()
-                        .any(|sweep| sweep.peer == peer && sweep.archive == archive)
+                if !peers
+                    .iter()
+                    .any(|sweep| sweep.peer == peer && sweep.archive == archive)
                 {
                     peers.push_back(PeerSweep::new(peer, archive));
                 }
@@ -259,9 +316,11 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
         let Some(index) = peers.iter().position(|sweep| sweep.due <= now) else {
             continue;
         };
+        // Local replay can wake early without increasing peer request cadence.
+        peer_due = now.saturating_add(TURN.as_millis() as u64);
         let mut sweep = peers.remove(index).expect("selected due history peer");
         let mut parked = None;
-        let _ = turn(&state, source, &mut sweep, replay.is_none(), &mut parked).await;
+        let _ = turn(&state, source, &mut sweep, &mut parked).await;
         if let Some(parked) = parked {
             replay = Some((sweep, parked));
         } else {
@@ -284,12 +343,17 @@ async fn reconcile_archive_change(
     *cursor = (index + 1) % pending.len();
     let change = pending[index]?;
     let channel = source.channel();
-    with_row(state, source, move |original, row, local, scope| {
-        let selected = original
-            .selected_archive_target_data(&row, channel, change.action, &scope)
-            .ok()?;
-        local.reconcile_archive_change(change, selected)
-    })
+    with_row_until(
+        state,
+        source,
+        Some(local_turn_deadline()),
+        move |original, row, local, scope| {
+            let selected = original
+                .selected_archive_target_data(&row, channel, change.action, &scope)
+                .ok()?;
+            local.reconcile_archive_change(change, selected)
+        },
+    )
     .await
     .flatten()
 }
@@ -298,29 +362,35 @@ async fn turn(
     state: &AppState,
     source: &Arc<Source>,
     sweep: &mut PeerSweep,
-    allow_fetch: bool,
     parked: &mut Option<ParkedOriginal>,
 ) -> Option<()> {
     let page = sweep.page.clone();
     if let Some(page) = &page {
         if !page.is_current_cached() {
+            #[cfg(test)]
+            eprintln!(
+                "chat history worker dropped an expired page (row, route, authority): {:?}",
+                page.current_checks_for_test()
+            );
             sweep.rescan_after(RETRY_MS);
             return None;
         }
         if let Some(action) = page.action_at(sweep.next_entry) {
-            if !allow_fetch {
+            let now = SystemClock.monotonic_ms();
+            let mut deadline = *sweep
+                .exact_deadline
+                .get_or_insert_with(|| now.saturating_add(EXACT_ENTRY_MS));
+            if now >= deadline {
+                sweep.finish_original(false);
                 return None;
             }
-            let mut deadline = None;
             let planned = if let Some(ancestry) = &mut sweep.ancestry {
-                if ancestry.requests == MAX_ARCHIVE_ANCESTRY_REQUESTS
-                    || SystemClock.monotonic_ms() >= ancestry.deadline
-                {
+                if ancestry.requests == MAX_ARCHIVE_ANCESTRY_REQUESTS || now >= ancestry.deadline {
                     sweep.finish_original(false);
                     return None;
                 }
                 ancestry.requests += 1;
-                deadline = Some(ancestry.deadline);
+                deadline = deadline.min(ancestry.deadline);
                 ancestry.stack.last().expect("active original").clone()
             } else {
                 PlannedOriginal {
@@ -328,10 +398,35 @@ async fn turn(
                     expected: None,
                 }
             };
-            match fetch_entry(state, source, page.clone(), planned, deadline, parked).await {
+            #[cfg(test)]
+            eprintln!(
+                "chat history worker preparing {} entry {}",
+                if sweep.archive {
+                    "archive"
+                } else {
+                    "own-outbox"
+                },
+                sweep.next_entry,
+            );
+            match fetch_entry(state, source, page.clone(), planned, Some(deadline), parked).await {
                 Some(EntryResult::Covered) => sweep.finish_original(true),
                 Some(EntryResult::Empty) => sweep.holder_archive_empty(),
                 Some(EntryResult::Deferred) => sweep.finish_original(false),
+                Some(EntryResult::TryAgain) if !sweep.exact_retry => {
+                    sweep.exact_retry = true;
+                    sweep.due = SystemClock
+                        .monotonic_ms()
+                        .saturating_add(TURN.as_millis() as u64);
+                }
+                Some(EntryResult::TryAgain) => sweep.finish_original(false),
+                Some(EntryResult::LocallyBusy) => {
+                    // No wire attempt entered the driver. Local admission
+                    // can retry within the same original deadline.
+                    if let Some(ancestry) = &mut sweep.ancestry {
+                        ancestry.requests -= 1;
+                    }
+                    sweep.due = now.saturating_add(TURN.as_millis() as u64);
+                }
                 None => {}
             }
             return None;
@@ -351,15 +446,22 @@ async fn turn(
     let peer = sweep.peer;
     let archive = sweep.archive;
     let channel = source.channel();
-    let request = with_row(state, source, move |original, row, _, scope| match page {
-        Some(page) => original.prepare_history_continuation(&row, &page, scope, &mut OsCryptoRng),
-        None if archive => original
-            .prepare_archive_history_exchange(&row, channel, peer, scope, &mut OsCryptoRng)
-            .map(Some),
-        None => original
-            .prepare_history_exchange(&row, channel, peer, scope, &mut OsCryptoRng)
-            .map(Some),
-    })
+    let request = with_row_until(
+        state,
+        source,
+        Some(local_turn_deadline()),
+        move |original, row, _, scope| match page {
+            Some(page) => {
+                original.prepare_history_continuation(&row, &page, scope, &mut OsCryptoRng)
+            }
+            None if archive => original
+                .prepare_archive_history_exchange(&row, channel, peer, scope, &mut OsCryptoRng)
+                .map(Some),
+            None => original
+                .prepare_history_exchange(&row, channel, peer, scope, &mut OsCryptoRng)
+                .map(Some),
+        },
+    )
     .await?;
     let exchange = match request {
         Ok(Some(exchange)) => exchange,
@@ -377,6 +479,12 @@ async fn turn(
         }
     };
     let requested = tokio::time::timeout(REQUEST, exchange.receive()).await;
+    if matches!(&requested, Ok(Err(TransportError::Busy))) {
+        sweep.due = SystemClock
+            .monotonic_ms()
+            .saturating_add(TURN.as_millis() as u64);
+        return None;
+    }
     let Ok(Ok(reply)) = requested else {
         #[cfg(test)]
         eprintln!("chat history worker page request stopped: {requested:?}");
@@ -391,30 +499,50 @@ async fn turn(
                 return None;
             }
         }
-        let delay = if sweep.archive && sweep.total_pages == 0 {
-            RESCAN_MS
+        let delay = if sweep.total_pages == 0 {
+            // An archive may still be building its catalogue. A member with
+            // no local outbox also cannot prove an empty selected page.
+            // Give both a few quick retries before the normal rescan.
+            sweep.initial_page_failures =
+                (sweep.initial_page_failures + 1).min(INITIAL_PAGE_RETRY_LIMIT);
+            if sweep.initial_page_failures == INITIAL_PAGE_RETRY_LIMIT {
+                RESCAN_MS
+            } else {
+                RETRY_MS
+            }
         } else {
             RETRY_MS
         };
         sweep.due = SystemClock.monotonic_ms().saturating_add(delay);
         return None;
     };
-    let page = with_row(state, source, move |original, row, _, scope| {
-        original.open_history_response(&row, reply, &scope)
-    })
+    let page = with_row_until(
+        state,
+        source,
+        parked_deadline,
+        move |original, row, _, scope| original.open_history_response(&row, reply, &scope),
+    )
     .await?;
     match page {
         Ok(page) => {
             #[cfg(test)]
             eprintln!(
-                "chat history worker opened a page with {:?} entries",
-                page.data().map(|data| data.entries().len())
+                "chat history worker opened {} page with {} entries",
+                if sweep.archive {
+                    "an archive"
+                } else {
+                    "an own-outbox"
+                },
+                (0..8)
+                    .filter(|index| page.action_at(*index).is_some())
+                    .count()
             );
             sweep.page = Some(Arc::new(page));
             sweep.next_entry = 0;
             sweep.pages += 1;
             sweep.total_pages = sweep.total_pages.saturating_add(1);
             sweep.continuation_failures = 0;
+            sweep.initial_page_failures = 0;
         }
         Err(V2MemberSaveRefusal::Busy) => {}
         Err(failure) => {
@@ -436,6 +564,8 @@ enum EntryResult {
     Covered,
     Empty,
     Deferred,
+    TryAgain,
+    LocallyBusy,
 }
 
 async fn fetch_entry(
@@ -450,7 +580,7 @@ async fn fetch_entry(
     let request = planned.request.clone();
     let channel = source.channel();
     let check_local = planned.expected.is_none();
-    let fetch = with_row_until(
+    let Some(fetch) = with_row_until(
         state,
         source,
         ancestry_deadline,
@@ -467,6 +597,16 @@ async fn fetch_entry(
             };
             if local.is_some() && page.is_current_cached() {
                 return Ok(Fetch::Covered);
+            }
+            // Own Create already projects from the same durable outbox.
+            // Edits and deletes must still reach an older received copy,
+            // and targeted replay must check the exact signed digest.
+            if check_local && matches!(&request, ExactRequest::Offered(_)) {
+                match original.covers_discovered_own_create(&row, &page, action, &scope) {
+                    Ok(true) => return Ok(Fetch::Covered),
+                    Ok(false) | Err(V2MemberSaveRefusal::Busy) => {}
+                    Err(error) => return Err(error),
+                }
             }
             match request {
                 ExactRequest::Offered(action) => original.prepare_discovered_original(
@@ -491,11 +631,14 @@ async fn fetch_entry(
             .map(Fetch::Request)
         },
     )
-    .await?;
+    .await
+    else {
+        return Some(EntryResult::LocallyBusy);
+    };
     let exchange = match fetch {
         Ok(Fetch::Covered) => return Some(EntryResult::Covered),
         Ok(Fetch::Request(exchange)) => exchange,
-        Err(V2MemberSaveRefusal::Busy) => return None,
+        Err(V2MemberSaveRefusal::Busy) => return Some(EntryResult::LocallyBusy),
         Err(failure) => {
             #[cfg(test)]
             eprintln!("chat history worker could not prepare exact fetch: {failure:?}");
@@ -508,51 +651,55 @@ async fn fetch_entry(
         return Some(EntryResult::Deferred);
     }
     let requested = tokio::time::timeout(request_time, exchange.receive()).await;
+    if matches!(&requested, Ok(Err(TransportError::Busy))) {
+        return Some(EntryResult::LocallyBusy);
+    }
+    #[cfg(test)]
+    let probe = state
+        .native_text
+        .join_history_reply_probe
+        .lock()
+        .unwrap()
+        .clone()
+        .filter(|probe| probe.action == action);
+    #[cfg(test)]
+    if let Some(probe) = &probe {
+        probe.attempts.fetch_add(1, Ordering::SeqCst);
+    }
     let Ok(Ok(reply)) = requested else {
         #[cfg(test)]
         eprintln!("chat history worker exact request stopped: {requested:?}");
-        return Some(EntryResult::Deferred);
+        return Some(EntryResult::TryAgain);
     };
-    let stage = with_row_until(
-        state,
-        source,
-        ancestry_deadline,
-        move |original, row, _, scope| original.prepare_discovered_archive(&row, reply, scope),
-    )
-    .await?;
-    let replay = match stage {
-        Ok(Some(stage)) => stage,
-        Ok(None) => return Some(EntryResult::Empty),
-        Err(V2MemberSaveRefusal::Busy) => return None,
-        other => {
-            #[cfg(test)]
-            eprintln!(
-                "chat history worker could not stage exact original: {:?}",
-                other.as_ref().err()
-            );
-            let _ = other;
-            return Some(EntryResult::Deferred);
-        }
-    };
-    if planned
-        .expected
-        .as_ref()
-        .is_some_and(|expected| !expected.matches_child(&replay))
-    {
-        return Some(EntryResult::Deferred);
-    }
     let deadline = SystemClock.monotonic_ms().saturating_add(REPLAY_MS);
     *parked = Some(ParkedOriginal {
         action,
-        replay,
+        work: ParkedWork::Reply {
+            response: Box::new(reply),
+            expected: planned.expected,
+        },
         deadline: ancestry_deadline.map_or(deadline, |earlier| earlier.min(deadline)),
     });
-    None
+    #[cfg(test)]
+    if let Some(probe) = probe {
+        probe.edge.wait_once().await;
+    }
+    // Preserve the usual fast path. If local admission is busy this leaves
+    // the paid reply parked instead of asking the peer for the same bytes.
+    match resume_entry(state, source, parked).await {
+        Some(ReplayOutcome::Empty) => Some(EntryResult::Empty),
+        Some(ReplayOutcome::Deferred(_)) => Some(EntryResult::Deferred),
+        Some(ReplayOutcome::Missing(..) | ReplayOutcome::Selected(..)) => {
+            unreachable!("opening a reply cannot select an archive record")
+        }
+        None => None,
+    }
 }
 
 enum ReplayOutcome {
     Missing(ActionId, NativeTextJoinedArchiveDependency),
     Selected(ActionId),
+    Empty,
     Deferred(Option<ActionId>),
 }
 
@@ -561,11 +708,11 @@ async fn resume_entry(
     source: &Arc<Source>,
     parked: &mut Option<ParkedOriginal>,
 ) -> Option<ReplayOutcome> {
-    let remaining = parked
-        .as_ref()?
-        .deadline
-        .saturating_sub(SystemClock.monotonic_ms());
-    if remaining == 0 {
+    let original = parked.as_ref()?;
+    let remaining = original.deadline.saturating_sub(SystemClock.monotonic_ms());
+    if remaining == 0
+        || matches!(&original.work, ParkedWork::Reply { response, .. } if !response.is_current_cached())
+    {
         *parked = None;
         return Some(ReplayOutcome::Deferred(None));
     }
@@ -573,17 +720,23 @@ async fn resume_entry(
     // preserve it while foreground history or signing uses this row.
     let admitted = tokio::time::timeout(Duration::from_millis(remaining).min(TURN), async {
         let permit = source.member_work.foreground(source.negative()).await?;
-        let (original, _) = source.capture_joined(state).await?;
-        Some((permit, original))
+        let (original, row) = source.capture_joined(state).await?;
+        Some((permit, original, row))
     })
     .await;
-    let (permit, original) = match admitted {
+    let (permit, original, row) = match admitted {
         Ok(value) => value?,
         Err(_) if remaining <= TURN.as_millis() as u64 => {
             *parked = None;
             return Some(ReplayOutcome::Deferred(None));
         }
-        Err(_) => return None,
+        Err(_) => {
+            #[cfg(test)]
+            if matches!(&original.work, ParkedWork::Reply { .. }) {
+                state.native_text.join_history_staging_wait.notify_one();
+            }
+            return None;
+        }
     };
     let mut work = parked.take()?;
     let source = source.clone();
@@ -594,14 +747,42 @@ async fn resume_entry(
         }
         let scope = source.negative();
         let local = source.member_work();
-        let target = work.replay.target_data();
+        if let ParkedWork::Reply { response, expected } = &work.work {
+            let replay =
+                match original.prepare_parked_discovered_archive(&row, response, scope.clone()) {
+                    Ok(Some(replay)) => replay,
+                    Ok(None) => return (work, Some(ReplayOutcome::Empty)),
+                    Err(V2MemberSaveRefusal::Busy) => return (work, None),
+                    Err(failure) => {
+                        #[cfg(test)]
+                        eprintln!(
+                            "chat history worker could not stage exact original: {failure:?}"
+                        );
+                        let _ = failure;
+                        return (work, Some(ReplayOutcome::Deferred(None)));
+                    }
+                };
+            if expected
+                .as_ref()
+                .is_some_and(|proof| !proof.matches_child(&replay))
+            {
+                return (work, Some(ReplayOutcome::Deferred(None)));
+            }
+            // The wire buffer retires now. The stage owns a negative of that
+            // exact route and the invocation needed until archive selection.
+            work.work = ParkedWork::Replay(Box::new(replay));
+            return (work, None);
+        }
+        let ParkedWork::Replay(replay) = &mut work.work else {
+            unreachable!("the exact response was staged");
+        };
+        let target = replay.target_data();
         let action = work.action;
-        let ready = original.advance_discovered_archive(&mut work.replay, &scope, &mut OsCryptoRng);
+        let ready = original.advance_discovered_archive(replay, &scope, &mut OsCryptoRng);
         match ready {
             Ok(false) | Err(V2MemberSaveRefusal::Busy) => return (work, None),
             Err(V2MemberSaveRefusal::Unavailable) => {
-                let missing = work
-                    .replay
+                let missing = replay
                     .missing_archive_dependency()
                     .map(|proof| ReplayOutcome::Missing(action, proof));
                 return (work, Some(missing.unwrap_or(ReplayOutcome::Deferred(None))));
@@ -619,22 +800,21 @@ async fn resume_entry(
             // the existing debts and make room for the later sweep.
             return (work, Some(ReplayOutcome::Deferred(None)));
         }
-        let result =
-            match original.select_discovered_archive(&work.replay, &scope, &mut OsCryptoRng) {
-                Ok(Some(_)) => {
-                    local.note_archive_change(action, target, true);
-                    ReplayOutcome::Selected(target)
-                }
-                other => {
-                    #[cfg(test)]
-                    eprintln!(
-                        "chat history worker selection was incomplete: {:?}",
-                        other.as_ref().err()
-                    );
-                    let _ = other;
-                    ReplayOutcome::Deferred(Some(target))
-                }
-            };
+        let result = match original.select_discovered_archive(replay, &scope, &mut OsCryptoRng) {
+            Ok(Some(_)) => {
+                local.note_archive_change(action, target, true);
+                ReplayOutcome::Selected(target)
+            }
+            other => {
+                #[cfg(test)]
+                eprintln!(
+                    "chat history worker selection was incomplete: {:?}",
+                    other.as_ref().err()
+                );
+                let _ = other;
+                ReplayOutcome::Deferred(Some(target))
+            }
+        };
         (work, Some(result))
     })
     .await;
@@ -647,25 +827,16 @@ async fn resume_entry(
     result
 }
 
-async fn with_row<T: Send + 'static>(
-    state: &AppState,
-    source: &Arc<Source>,
-    perform: impl FnOnce(
-            NativeTextJoinedSelectionPreparation<OsCryptoRng>,
-            NativeTextJoinedRowSelection,
-            &server_table::NativeMemberWork,
-            RequestCancellation,
-        ) -> T
-        + Send
-        + 'static,
-) -> Option<T> {
-    with_row_until(state, source, None, perform).await
-}
-
 fn time_remaining(deadline: Option<u64>, maximum: Duration) -> Duration {
     deadline.map_or(maximum, |end| {
         Duration::from_millis(end.saturating_sub(SystemClock.monotonic_ms())).min(maximum)
     })
+}
+
+fn local_turn_deadline() -> u64 {
+    SystemClock
+        .monotonic_ms()
+        .saturating_add(TURN.as_millis() as u64)
 }
 
 async fn with_row_until<T: Send + 'static>(

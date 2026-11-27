@@ -144,6 +144,20 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     assert!(disk
         .action_page(&KEY, creates(None, 3), &session, pay())
         .is_err());
+    let (_owner, negative) = tokio::sync::watch::channel(false);
+    let caller = catcoms_rt::RequestCancellation::new(negative, None);
+    assert!(disk
+        .selected_audit_page(
+            &KEY,
+            SharedHistoryActionQuery {
+                target: Some(first.id()),
+                after: None,
+                limit: 8
+            },
+            &session,
+            &caller,
+        )
+        .is_err());
     assert!(SharedHistoryRelayIndex::start(
         &disk,
         &session,
@@ -366,6 +380,119 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
         .read(&KEY, expected.action, &session, pay())
         .unwrap()
         .is_some());
+}
+
+#[test]
+fn selected_shared_history_audit_reopens_exact_create_edits_and_delete_in_bounded_pages() {
+    let scope = SharedHistoryScope {
+        vault: [43; 32],
+        group: [44; 16],
+        profile: OwnerFactId::from_bytes([45; 32]),
+        tenure: OwnerTenureId::from_bytes([46; 32]),
+        creation: [47; 32],
+        channel: 48,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("received");
+    std::fs::create_dir(&path).unwrap();
+    let session = acquire_vault_session(directory.path()).unwrap();
+    let pool = CriticalCatalogReadPool::new(2 * DISK_FEE + 8 * SHARED_HISTORY_RECORD_FEE).unwrap();
+    let owner = || {
+        SharedHistoryDisk::from_held(
+            HeldDirectory::open(path.clone()).unwrap(),
+            scope,
+            SharedHistoryDiskQuota::new(16, 16 * (SELECTOR_BYTES + MAX_SHARED_HISTORY_BUNDLE))
+                .unwrap(),
+            pool.clone(),
+            &KEY,
+        )
+        .unwrap()
+    };
+    let disk = owner();
+    let mut rng = ChaCha20Rng::seed_from_u64(49);
+    let admission = OwnerFactId::from_bytes([50; 32]);
+    let first = original(&scope, 51);
+    let create = first.id();
+    let mut previous = create;
+    let mut actions = vec![first];
+    for revision in 1u8..=9 {
+        let mut spec = actions[0].spec().clone();
+        spec.nonce = [revision; 16];
+        spec.presented_ms = u64::from(revision);
+        spec.parents = vec![previous];
+        spec.body = if revision == 9 {
+            Body::Delete { create }
+        } else {
+            Body::Edit {
+                create,
+                text: format!("Revision {revision}"),
+            }
+        };
+        let action = SignedAction::sign(&DeviceKeypair::from_seed(&[1; 32]), spec).unwrap();
+        previous = action.id();
+        actions.push(action);
+    }
+    for action in actions.iter().chain([&original(&scope, 52)]) {
+        let (selected, bundle) = encode(&scope, action, admission, &mut rng);
+        disk.prepare_save(
+            &KEY,
+            selected,
+            &bundle,
+            &mut rng,
+            &session,
+            pool.try_reserve(DISK_FEE).unwrap(),
+        )
+        .unwrap()
+        .commit(&disk, &KEY)
+        .unwrap();
+    }
+    drop(disk);
+
+    let disk = owner();
+    let (_owner, negative) = tokio::sync::watch::channel(false);
+    let caller = catcoms_rt::RequestCancellation::new(negative, None);
+    let query = |after, limit| SharedHistoryActionQuery {
+        target: Some(create),
+        after,
+        limit,
+    };
+    assert!(disk
+        .selected_audit_page(&KEY, query(None, 9), &session, &caller)
+        .is_err());
+    actions.sort_unstable_by_key(SignedAction::id);
+    let first_page = disk
+        .selected_audit_page(&KEY, query(None, 8), &session, &caller)
+        .unwrap();
+    assert_eq!(first_page.next, Some(actions[7].id()));
+    let next_page = disk
+        .selected_audit_page(&KEY, query(first_page.next, 8), &session, &caller)
+        .unwrap();
+    assert!(next_page.next.is_none());
+    assert_eq!(first_page.records.len(), 8);
+    assert_eq!(next_page.records.len(), 2);
+    for ((saved_admission, saved), expected) in first_page
+        .records
+        .iter()
+        .chain(&next_page.records)
+        .zip(&actions)
+    {
+        assert_eq!(*saved_admission, admission);
+        assert_eq!(saved.original_bytes(), expected.encode());
+        assert_eq!(saved.action().signer(), expected.signer());
+    }
+    drop((first_page, next_page, disk));
+
+    let disk = owner();
+    let selected = disk
+        .read(&KEY, create, &session, pool.try_reserve(DISK_FEE).unwrap())
+        .unwrap()
+        .unwrap()
+        .selected;
+    std::fs::write(disk.bundle_path(selected.manifest), b"incomplete").unwrap();
+    let after = (create > actions[7].id()).then(|| actions[7].id());
+    assert!(disk
+        .selected_audit_page(&KEY, query(after, 8), &session, &caller)
+        .is_err());
 }
 
 #[test]

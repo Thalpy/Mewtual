@@ -292,6 +292,59 @@ impl SharedHistoryDisk {
         })
     }
 
+    /// Open the exact originals in one selected page. No WAL recovery and
+    /// no disk, session or revision guard leaves this method.
+    pub(in crate::store::persistence) fn selected_audit_page(
+        &self,
+        key: &[u8; 32],
+        query: SharedHistoryActionQuery,
+        session: &VaultSessionGuard,
+        caller: &catcoms_rt::RequestCancellation,
+    ) -> Result<SelectedSharedHistoryAuditPage, AppError> {
+        let target = query.target;
+        if !(1..=8).contains(&query.limit) || caller.is_cancelled() {
+            return Err(refused());
+        }
+        let page = self.action_page(key, query, session, self.pool.try_reserve(DISK_FEE)?)?;
+        // The scan fee funds sequential I/O and decode scratch. The second
+        // invoice funds the canonical bytes and parsed action kept per item.
+        let payment = self
+            .pool
+            .try_reserve(16 * 1024 + page.actions.len() * SHARED_HISTORY_RECORD_FEE)?;
+        let _lease = session.retain_for_physical_work();
+        page.observation.with_publication(|| {
+            let mut records = Vec::with_capacity(page.actions.len());
+            for action in &page.actions {
+                if caller.is_cancelled() {
+                    return Err(refused());
+                }
+                let (_, admission, original) =
+                    self.read_selected(key, *action)?.ok_or_else(refused)?;
+                let signed = original.action();
+                let body_target = signed.spec().body.create();
+                let matches = match target {
+                    Some(target) => body_target.unwrap_or(signed.id()) == target,
+                    None => body_target.is_none(),
+                };
+                if !matches {
+                    return Err(refused());
+                }
+                records.push((admission, original));
+            }
+            if caller.is_cancelled()
+                || observe(&self.directory.child(WAL_NAME))? == Presence::Present
+            {
+                return Err(refused());
+            }
+            self.directory.require()?;
+            Ok(SelectedSharedHistoryAuditPage {
+                next: page.actions.last().copied().filter(|_| page.more),
+                records,
+                _payment: payment,
+            })
+        })?
+    }
+
     fn recover_locked(&self, key: &[u8; 32]) -> Result<Option<SelectedHistoryRecord>, AppError> {
         let path = self.directory.child(WAL_NAME);
         if observe(&path)? == Presence::Absent {
@@ -563,6 +616,15 @@ pub(in crate::store) struct SharedHistoryActionPage {
     pub(in crate::store) actions: Vec<ActionId>,
     pub(in crate::store) more: bool,
     pub(in crate::store) observation: SharedHistoryObservation,
+    _payment: CatalogReadReservation,
+}
+
+/// Owned, paid data from one selected archive snapshot. The continuation is
+/// ordered by opaque ActionId and makes no claim of chronology or completeness
+/// across later archive selections.
+pub(in crate::store) struct SelectedSharedHistoryAuditPage {
+    pub(in crate::store) next: Option<ActionId>,
+    pub(in crate::store) records: Vec<(OwnerFactId, AssembledActionOriginal)>,
     _payment: CatalogReadReservation,
 }
 

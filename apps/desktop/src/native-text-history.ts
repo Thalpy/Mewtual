@@ -11,6 +11,11 @@ export type NativeReceivedTarget = { server: number; channel: string; context: s
 export type NativeReceived = { action: string; text: string; certainty: "provisional" | "proven" };
 export type NativeOwnRevision = { revision: string; text: string; status: NativeOriginal["status"] };
 export type NativeOwnMessage = { scanning: boolean; item: NativeOwnRevision | null };
+export type NativeAuditRecord = {
+  action: string; signer: string; admission: string; original_digest: string;
+  presented_ms: string; parents: string[]; body: NativeOriginal["body"];
+};
+export type NativeAuditPage = { items: NativeAuditRecord[] | null; next: string | null };
 const fail = (): never => { throw new Error("Saved messages could not be read. Try again."); };
 const object = (value: unknown): Record<string, unknown> => { if (!value || typeof value !== "object" || Array.isArray(value)) return fail(); return value as Record<string, unknown>; };
 function fields(value: Record<string, unknown>, expected: string[]) { if (Object.keys(value).length !== expected.length || expected.some(key => !Object.hasOwn(value, key))) fail(); }
@@ -22,6 +27,26 @@ function text(value: unknown): string {
   for(let i=0;i<value.length;i++){const unit=value.charCodeAt(i);if(unit>=0xd800&&unit<=0xdbff){const next=value.charCodeAt(++i);if(!(next>=0xdc00&&next<=0xdfff))return fail();}else if(unit>=0xdc00&&unit<=0xdfff)return fail();}
   if(encoder.encode(value).length>65536)return fail();
   return value;
+}
+
+function decodeBody(raw: unknown): NativeOriginal["body"] {
+  const body = object(raw);
+  switch (body.kind) {
+    case "create": {
+      fields(body, ["kind", "text", "reply_to"]);
+      const value = text(body.text);
+      if (!value) return fail();
+      return { kind: "create", text: value, reply_to: body.reply_to === null ? null : hex(body.reply_to) };
+    }
+    case "edit":
+      fields(body, ["kind", "create", "text"]);
+      return { kind: "edit", create: hex(body.create), text: text(body.text) };
+    case "delete":
+    case "join":
+      fields(body, ["kind", "create"]);
+      return { kind: body.kind, create: hex(body.create) };
+    default: return fail();
+  }
 }
 
 export function decodeNativeReceivedNotice(value: unknown): NativeReceivedTarget {
@@ -56,6 +81,48 @@ export function decodeNativeReceived(
 
 type NativeHistoryTarget = { server: number; channel: string; context: string };
 type NativeInvoke = (command: string, args: Record<string, unknown>) => Promise<unknown>;
+
+export async function readNativeAudit(
+  invoke: NativeInvoke,
+  target: NativeHistoryTarget,
+  action: string | null,
+  after: string | null,
+  current: () => boolean,
+): Promise<NativeAuditPage | null> {
+  if (!current()) return null;
+  const raw = await invoke("get_message_page", {
+    server: target.server, channel: target.channel, expectedContext: target.context,
+    auditAction: action, auditAfter: after, limit: 8,
+  });
+  if (!current()) return null;
+  const result = object(raw);
+  fields(result, ["backend", "scope", "target", "next", "items"]);
+  if (result.backend !== "text-v2" || result.scope !== "selected-shared-history-audit"
+    || result.target !== action) return fail();
+  const next = result.next === null ? null : hex(result.next);
+  if (result.items === null) {
+    if (next !== null) return fail();
+    return { items: null, next };
+  }
+  if (!Array.isArray(result.items) || result.items.length > 8) return fail();
+  let previous = after;
+  const items = result.items.map((raw): NativeAuditRecord => {
+    const row = object(raw);
+    fields(row, ["action", "signer", "admission", "original_digest", "presented_ms", "parents", "body"]);
+    const id = hex(row.action);
+    const body = decodeBody(row.body);
+    if ((previous !== null && id <= previous)
+      || (action === null && body.kind !== "create")
+      || (action !== null && action !== (body.kind === "create" ? id : body.create))
+      || !Array.isArray(row.parents) || row.parents.length > 64) return fail();
+    previous = id;
+    return { action: id, body, signer: hex(row.signer), admission: hex(row.admission),
+      original_digest: hex(row.original_digest), presented_ms: decimal(row.presented_ms),
+      parents: row.parents.map(hex) };
+  });
+  if (next !== null && (items.length !== 8 || next !== previous)) return fail();
+  return { items, next };
+}
 
 export function decodeNativeOwnMessage(value: unknown, target: string): NativeOwnMessage {
   const result = object(value);
@@ -160,11 +227,7 @@ export function decodeNativeOriginalPage(value: unknown, start: string, end: str
     if (actualChannel !== channel || BigInt(ordinal) < BigInt(start) || BigInt(ordinal) >= BigInt(next) || (previous !== null && BigInt(ordinal) <= previous)
       || typeof row.status !== "string" || !["pending", "submitted", "held"].includes(row.status)) return fail();
     previous = BigInt(ordinal);
-    const body = object(row.body); let parsed: NativeOriginal["body"];
-    if (body.kind === "create") { fields(body, ["kind", "text", "reply_to"]); const value = text(body.text); if (!value) return fail(); parsed = { kind: "create", text: value, reply_to: body.reply_to === null ? null : hex(body.reply_to) }; }
-    else if (body.kind === "edit") { fields(body, ["kind", "create", "text"]); parsed = { kind: "edit", create: hex(body.create), text: text(body.text) }; }
-    else if (body.kind === "delete" || body.kind === "join") { fields(body, ["kind", "create"]); parsed = { kind: body.kind, create: hex(body.create) }; }
-    else return fail();
+    const parsed = decodeBody(row.body);
     return { ordinal, action: hex(row.action), signer: hex(row.signer), channel: actualChannel, presented_ms,
       status: row.status as NativeOriginal["status"], body: parsed };
   });

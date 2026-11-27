@@ -29,6 +29,12 @@ impl AdmissionBarrier {
     }
 }
 
+pub(super) struct HistoryReplyProbe {
+    pub(super) action: catcoms_replication::chat::ActionId,
+    pub(super) edge: Arc<AdmissionBarrier>,
+    pub(super) attempts: std::sync::atomic::AtomicUsize,
+}
+
 fn existing_backend(invoke: tauri::ipc::Invoke<MockRuntime>) -> bool {
     invoke.resolver.reject("existing backend");
     true
@@ -1293,13 +1299,13 @@ async fn command_value_after_busy(
     busy: &str,
     input: serde_json::Value,
 ) -> serde_json::Value {
-    match command_response_after_busy(window, queue, command, busy, input).await {
+    match command_after_busy(window, queue, command, busy, input).await {
         tauri::ipc::InvokeResponse::Ok(body) => body.deserialize().unwrap(),
         tauri::ipc::InvokeResponse::Err(error) => panic!("{command} refused: {error:?}"),
     }
 }
 
-async fn command_response_after_busy(
+async fn command_after_busy(
     window: &tauri::WebviewWindow<MockRuntime>,
     queue: &Queue,
     command: &str,
@@ -1316,12 +1322,12 @@ async fn command_response_after_busy(
             work.await;
         }
         match reply.await.unwrap() {
-            tauri::ipc::InvokeResponse::Err(ref error)
+            tauri::ipc::InvokeResponse::Err(error)
                 if error.0.as_str() == Some(busy) && SystemClock.monotonic_ms() < retry_until =>
             {
                 SystemClock.sleep(Duration::from_millis(25)).await;
             }
-            response => return response,
+            result => return result,
         }
     }
 }
@@ -1696,7 +1702,7 @@ async fn native_text_membership_selected_eviction_notifies_the_original_joined_r
 
     let (reopened, main, queue) = app(founder_path, None, true);
     unlock_current(&reopened, &main, &queue).await;
-    let invalid = command_response_after_busy(
+    let invalid = command_after_busy(
         &main,
         &queue,
         "mint_invite_fresh",
@@ -2080,28 +2086,42 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
     let (archive_notice, mut notices) = tokio::sync::mpsc::channel(8);
     let expected_context = new_row["context"].clone();
     let expected_target = parent.to_owned();
-    let expected_reply = reply_id.to_owned();
     let expected_deepest = deepest_reply.clone();
     let expected_offline = offline_message.clone();
     let notice_listener = newcomer.listen_any("chat-v2-received", move |event| {
         let change: serde_json::Value = serde_json::from_str(event.payload()).unwrap();
-        if change["context"] == expected_context
-            && (change["action"] == expected_target
-                || change["action"] == expected_reply
-                || change["action"] == expected_deepest
-                || change["action"] == expected_offline)
-        {
-            let _ = archive_notice.try_send(());
+        if change["context"] == expected_context {
+            let affected = &change["action"];
+            let index = if *affected == expected_target {
+                0
+            } else if *affected == expected_deepest {
+                1
+            } else if *affected == expected_offline {
+                2
+            } else {
+                return;
+            };
+            let _ = archive_notice.try_send(index);
         }
     });
     // Let the ordinary joined workers start, but keep incoming gossip parked.
     // Only the automatic history worker can cover these targets in the archive.
     let parked_live = AdmissionBarrier::new();
+    let paid_reply = Arc::new(HistoryReplyProbe {
+        action,
+        edge: AdmissionBarrier::new(),
+        attempts: std::sync::atomic::AtomicUsize::new(0),
+    });
     *new_state
         .native_text
         .join_history_receive_edge
         .lock()
         .unwrap() = Some(parked_live.clone());
+    *new_state
+        .native_text
+        .join_history_reply_probe
+        .lock()
+        .unwrap() = Some(paid_reply.clone());
     startup.release.notify_one();
     timeout(Duration::from_secs(15), new_task)
         .await
@@ -2112,44 +2132,60 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
         .unwrap();
     let newcomer_work = joined_work(&new_state, id).await;
     let newcomer_scope = keep_session::current(&new_state, generation).unwrap();
-    let mut progress = (false, false, false, false);
-    timeout(Duration::from_secs(45), async {
-        // Exercise the same archive invalidations used by the renderer.
-        // Tight physical reads could compete with the worker being tested.
+    let recovery_deadline = SystemClock.monotonic_ms().saturating_add(45_000);
+    timeout(Duration::from_secs(35), paid_reply.edge.arrived.notified())
+        .await
+        .expect("an exact reply reached the receiver before local staging");
+    let original_attempts = paid_reply.attempts.load(Ordering::SeqCst);
+    assert!(original_attempts > 0);
+    let held = newcomer_work
+        .foreground(newcomer_scope.clone())
+        .await
+        .unwrap();
+    paid_reply.edge.release.notify_one();
+    timeout(
+        Duration::from_secs(5),
+        new_state.native_text.join_history_staging_wait.notified(),
+    )
+    .await
+    .expect("the receiver retained the paid reply across a real local admission timeout");
+    drop(held);
+    let reply = ActionId::from_bytes(membership::decode_exact_hex(&deepest_reply).unwrap());
+    let expected = [
+        (delete, action),
+        (reply, reply),
+        (offline_edit_id, offline_id),
+        (offline_delete, offline_id),
+    ];
+    let mut progress = [false; 4];
+    timeout(Duration::from_millis(recovery_deadline.saturating_sub(SystemClock.monotonic_ms())), async {
+        // Inspect only the affected target after an invalidation. An infrequent
+        // fallback covers coalesced notices without queuing reads ahead of writes.
         loop {
-            tokio::select! {
+            let affected = tokio::select! {
                 notice = notices.recv() => {
-                    notice.expect("the archive invalidation listener must stay installed");
+                    Some(notice.expect("the archive invalidation listener must stay installed"))
                 }
-                _ = SystemClock.sleep(Duration::from_secs(1)) => {}
+                _ = SystemClock.sleep(Duration::from_secs(4)) => None,
+            };
+            for (index, ((signed, target), covered)) in expected.iter().zip(&mut progress).enumerate() {
+                if *covered || affected.is_some_and(|value| value != index.min(2)) {
+                    continue;
+                }
+                let permit = newcomer_work
+                    .foreground(newcomer_scope.clone())
+                    .await
+                    .expect("the selected receiver must remain live");
+                let (prepared, selection, channel, scope) =
+                    capture_joined_worker(&new_state, id, generation).await;
+                let (signed, target) = (*signed, *target);
+                *covered = tauri::async_runtime::spawn_blocking(move || {
+                    let _permit = permit;
+                    prepared.selected_archive_target_data(&selection, channel, signed, &scope)
+                        .is_ok_and(|selected| selected == Some(target))
+                }).await.unwrap();
             }
-            let _permit = newcomer_work
-                .foreground(newcomer_scope.clone())
-                .await
-                .expect("the selected receiver must remain live");
-            let (prepared, selection, channel, scope) =
-                capture_joined_worker(&new_state, id, generation).await;
-            let covered = prepared
-                .archived_message_projection(&selection, channel, action, scope, &mut OsCryptoRng)
-                .ok()
-                .flatten()
-                .is_some_and(|projection| projection.archived_includes(delete));
-            let reply = ActionId::from_bytes(membership::decode_exact_hex(&deepest_reply).unwrap());
-            let (prepared, selection, channel, scope) =
-                capture_joined_worker(&new_state, id, generation).await;
-            let has_reply = prepared
-                .selected_archive_target_data(&selection, channel, reply, &scope)
-                .is_ok_and(|target| target == Some(reply));
-            let (prepared, selection, channel, scope) =
-                capture_joined_worker(&new_state, id, generation).await;
-            let has_edit = prepared.selected_archive_target_data(&selection, channel, offline_edit_id, &scope)
-                .is_ok_and(|target| target == Some(offline_id));
-            let (prepared, selection, channel, scope) =
-                capture_joined_worker(&new_state, id, generation).await;
-            let has_delete = prepared.selected_archive_target_data(&selection, channel, offline_delete, &scope)
-                .is_ok_and(|target| target == Some(offline_id));
-            progress = (covered, has_reply, has_edit, has_delete);
-            if covered && has_reply && has_edit && has_delete {
+            if progress.iter().all(|covered| *covered) {
                 break;
             }
         }
@@ -2157,8 +2193,18 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
     .await
     .unwrap_or_else(|_| panic!(
         "automatic history before gossip: own Delete {}, deepest reply {}, carried Edit {}, carried Delete {}",
-        progress.0, progress.1, progress.2, progress.3,
+        progress[0], progress[1], progress[2], progress[3],
     ));
+    assert_eq!(
+        paid_reply.attempts.load(Ordering::SeqCst),
+        original_attempts,
+        "local staging contention must not request the same signed parent again"
+    );
+    *new_state
+        .native_text
+        .join_history_reply_probe
+        .lock()
+        .unwrap() = None;
     newcomer.unlisten(notice_listener);
     let reply_view = command_value_after_busy(
         &new_window,
@@ -2640,25 +2686,29 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let empty_archive = serde_json::json!({
         "backend":"text-v2","scope":"received-archive-index","available":true,"ids":[],"more":false,
     });
-    let probe = invite_command(
+    let probe = command_value_after_busy(
         &joiner_window,
+        &joiner_queue,
         "get_message_page",
+        history::BUSY,
         archive_request(
             &original,
             serde_json::json!({"archiveAfter":null,"limit":8}),
         ),
-    );
-    run(&joiner_queue).await;
-    assert_eq!(found_value(probe.await.unwrap()), empty_archive);
+    )
+    .await;
+    assert_eq!(probe, empty_archive);
     let missing = hex::encode([249; 32]);
-    let probe = invite_command(
+    let probe = command_value_after_busy(
         &joiner_window,
+        &joiner_queue,
         "get_message_page",
+        history::BUSY,
         archive_request(&original, serde_json::json!({"archivedAction":missing})),
-    );
-    run(&joiner_queue).await;
+    )
+    .await;
     assert_eq!(
-        found_value(probe.await.unwrap()),
+        probe,
         serde_json::json!({"backend":"text-v2","scope":"received-archive","item":null})
     );
     let work = joined_work(&state, id).await;
@@ -2673,26 +2723,33 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         work.note_archive_change(delete, target, false);
         work.note_archive_change(edit, target, true);
     }
-    let probe = invite_command(
+    let probe = command_after_busy(
         &joiner_window,
+        &joiner_queue,
         "get_message_page",
+        history::BUSY,
         archive_request(&original, serde_json::json!({"archivedAction":missing})),
-    );
-    run(&joiner_queue).await;
-    refused(probe.await.unwrap());
+    )
+    .await;
+    let tauri::ipc::InvokeResponse::Err(error) = probe else {
+        panic!("the archive replied before its outstanding deletion settled");
+    };
+    assert_eq!(error.0, "A received change is waiting to be saved.");
     {
         let _permit = work.foreground(scope).await.unwrap();
         work.note_archive_change(delete, target, true);
     }
     drop(work);
-    let probe = invite_command(
+    let probe = command_value_after_busy(
         &joiner_window,
+        &joiner_queue,
         "get_message_page",
+        history::BUSY,
         archive_request(&original, serde_json::json!({"archivedAction":missing})),
-    );
-    run(&joiner_queue).await;
+    )
+    .await;
     assert_eq!(
-        found_value(probe.await.unwrap()),
+        probe,
         serde_json::json!({"backend":"text-v2","scope":"received-archive","item":null})
     );
     let probe = invite_command(
@@ -2773,31 +2830,72 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         }
     }).await.expect("the native founder received the member's original over TCP and the joined outbox checkpointed");
 
-    let page = invite_command(
+    let page = command_value_after_busy(
         &founder_window,
+        &founder_queue,
         "get_message_page",
+        history::BUSY,
         archive_request(&found, serde_json::json!({"archiveAfter":null,"limit":8})),
-    );
-    run(&founder_queue).await;
+    )
+    .await;
     assert_eq!(
-        found_value(page.await.unwrap()),
+        page,
         serde_json::json!({
             "backend":"text-v2","scope":"received-archive-index","available":true,
             "ids":[member_action],"more":false,
         })
     );
-    let archived = invite_command(
+    let archived = command_value_after_busy(
         &founder_window,
+        &founder_queue,
         "get_message_page",
+        history::BUSY,
         archive_request(&found, serde_json::json!({"archivedAction":member_action})),
-    );
-    run(&founder_queue).await;
+    )
+    .await;
     assert_eq!(
-        found_value(archived.await.unwrap()),
+        archived,
         serde_json::json!({
             "backend":"text-v2","scope":"received-archive",
             "item":{"action":member_action,"text":member_text,"certainty":"provisional"},
         })
+    );
+    let audit = |row: &serde_json::Value, target| {
+        archive_request(
+            row,
+            serde_json::json!({"auditAction":target,"auditAfter":null,"limit":8}),
+        )
+    };
+    let warm_audit = command_value_after_busy(
+        &founder_window,
+        &founder_queue,
+        "get_message_page",
+        history::BUSY,
+        audit(&found, None),
+    )
+    .await;
+    assert_eq!(warm_audit["scope"], "selected-shared-history-audit");
+    assert!(warm_audit["target"].is_null());
+    assert_eq!(warm_audit["items"].as_array().unwrap().len(), 1);
+    assert_eq!(warm_audit["items"][0]["action"], member_action);
+    assert_eq!(warm_audit["items"][0]["body"]["text"], member_text);
+    for field in ["signer", "admission", "original_digest"] {
+        assert_eq!(warm_audit["items"][0][field].as_str().unwrap().len(), 64);
+    }
+    let denied = command_after_busy(
+        &joiner_window,
+        &joiner_queue,
+        "get_message_page",
+        history::BUSY,
+        audit(&original, Some(member_action)),
+    )
+    .await;
+    let tauri::ipc::InvokeResponse::Err(error) = denied else {
+        panic!("a joined row returned the founder's retained records");
+    };
+    assert_eq!(
+        error.0,
+        "Only the server owner can inspect retained records."
     );
 
     // The saved native row can be reported after the actual founder retires.
@@ -2939,32 +3037,36 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let fixed_page = native_history_request(&window, &restored[0], "0", Some("2"), 8);
     run(&queue).await;
     assert_eq!(found_value(fixed_page.await.unwrap()), history);
-    let probe = invite_command(
+    let probe = command_value_after_busy(
         &window,
+        &queue,
         "get_message_page",
+        history::BUSY,
         archive_request(
             &restored[0],
             serde_json::json!({"archiveAfter":null,"limit":8}),
         ),
-    );
-    run(&queue).await;
+    )
+    .await;
     assert_eq!(
-        found_value(probe.await.unwrap()),
+        probe,
         serde_json::json!({
             "backend":"text-v2","scope":"received-archive-index","available":true,"ids":[founder_action],"more":false,
         })
     );
-    let probe = invite_command(
+    let probe = command_value_after_busy(
         &window,
+        &queue,
         "get_message_page",
+        history::BUSY,
         archive_request(
             &restored[0],
             serde_json::json!({"archivedAction":founder_action}),
         ),
-    );
-    run(&queue).await;
+    )
+    .await;
     assert_eq!(
-        found_value(probe.await.unwrap()),
+        probe,
         serde_json::json!({
             "backend":"text-v2","scope":"received-archive",
             "item":{"action":founder_action,"text":founder_text,"certainty":"provisional"},
@@ -2995,18 +3097,29 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
             "restored founder {field}"
         );
     }
-    let probe = invite_command(
+    let archived = command_value_after_busy(
         &founder_window,
+        &founder_queue,
         "get_message_page",
+        history::BUSY,
         archive_request(
             founder_row,
             serde_json::json!({ "archivedAction": member_action }),
         ),
-    );
-    run(&founder_queue).await;
-    let archived = found_value(probe.await.unwrap());
+    )
+    .await;
     assert_eq!(archived["item"]["action"], member_action);
     assert_eq!(archived["item"]["text"], member_text);
+    let cold_audit = command_value_after_busy(
+        &founder_window,
+        &founder_queue,
+        "get_message_page",
+        history::BUSY,
+        audit(founder_row, Some(member_action)),
+    )
+    .await;
+    assert_eq!(cold_audit["target"], member_action);
+    assert_eq!(cold_audit["items"], warm_audit["items"]);
     let page = native_history_request(&founder_window, founder_row, "0", None, 8);
     run(&founder_queue).await;
     let own = found_value(page.await.unwrap());
@@ -3099,16 +3212,26 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     ] {
         let received = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                let probe = invite_command(
+                let reply = command_after_busy(
                     window,
+                    queue,
                     "get_message_page",
+                    history::BUSY,
                     archive_request(row, serde_json::json!({"archivedAction":action})),
-                );
-                run(queue).await;
-                if let tauri::ipc::InvokeResponse::Ok(body) = probe.await.unwrap() {
-                    let value = body.deserialize::<serde_json::Value>().unwrap();
-                    if &value["item"]["action"] == action {
-                        break value;
+                )
+                .await;
+                match reply {
+                    tauri::ipc::InvokeResponse::Ok(body) => {
+                        let value = body.deserialize::<serde_json::Value>().unwrap();
+                        if !value["item"].is_null() {
+                            assert_eq!(&value["item"]["action"], action);
+                            break value;
+                        }
+                    }
+                    tauri::ipc::InvokeResponse::Err(error)
+                        if error.0 == "A received change is waiting to be saved." => {}
+                    tauri::ipc::InvokeResponse::Err(error) => {
+                        panic!("the waiting archive read refused: {error:?}")
                     }
                 }
                 SystemClock.sleep(Duration::from_millis(50)).await;
@@ -3235,6 +3358,39 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
         .unwrap();
     assert_joined_publication_stopped(recovered_publication).await;
     drop(close);
+    // Changing only the original founder source must withhold the prepared
+    // audit even though the UI generation and table entry still match.
+    let edge = AdmissionBarrier::new();
+    *state.native_text.text_reply_edge.lock().unwrap() = Some(edge.clone());
+    let late = invite_command(
+        &founder_window,
+        "get_message_page",
+        audit(founder_row, Some(member_action)),
+    );
+    let task = tokio::spawn(founder_queue.lock().unwrap().pop().unwrap());
+    timeout(Duration::from_secs(10), edge.arrived.notified())
+        .await
+        .expect("an authorized audit held its exact records before native publication");
+    let generation = state.ui_session_generation.load(Ordering::SeqCst);
+    {
+        let table = state.servers.lock().await;
+        let row = table
+            .native(&founder_row["server"].as_u64().unwrap())
+            .unwrap();
+        row.data()
+            .selection
+            .founder()
+            .unwrap()
+            .close_original_cached();
+    }
+    edge.release.notify_one();
+    task.await.unwrap();
+    refused(late.await.unwrap());
+    assert_eq!(
+        state.ui_session_generation.load(Ordering::SeqCst),
+        generation
+    );
+    *state.native_text.text_reply_edge.lock().unwrap() = None;
     let close = register_vault_close(&state).await.unwrap();
     sources::close_server_rows(&state, &SystemClock)
         .await

@@ -11,6 +11,9 @@ while the author is offline and still has an open Admission.
 The desktop also sweeps a holder's archive inventory. Each holder builds its
 bounded index locally and offers eligible IDs from a snapshot over the
 original approved connection.
+A separate founder-only read opens exact selected originals from this
+archive without recovering an in-flight archive write. It returns a paid
+page with the original runtime already restored. [Audit interface](INTERFACES.md).
 [Ordinary member path](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
 
 16 November Score/voice integration candidate: this branch combines the reviewed

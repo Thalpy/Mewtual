@@ -44,9 +44,24 @@ export const nativeTextFlowExpression = String.raw`(async () => {
         && intent.channel === send.args.channel && intent.expectedContext === send.args.expectedContext && intent.text === send.args.text;
     } catch { return false; }
   });
+  const members = root.querySelector('button[aria-controls="native-member-list"]');
+  if (members.getAttribute('aria-expanded') === 'false') members.click();
+  const namedButton = (scope, label) => [...(scope?.querySelectorAll('button') ?? [])]
+    .find(button => button.textContent.trim() === label);
+  const memberList = () => document.querySelector('#native-member-list');
+  await wait(() => namedButton(memberList(), 'Chat history'), 'owner audit entry');
+  namedButton(memberList(), 'Chat history').click();
+  const audit = () => document.querySelector('dialog[open][aria-labelledby="native-audit-title"]');
+  await wait(() => namedButton(audit(), 'View changes'), 'saved history index');
+  namedButton(audit(), 'View changes').click();
+  await wait(() => audit()?.textContent.includes('A retained edit from the same device.'), 'saved revision');
+  const ownerAudit = audit().textContent.includes('Signed record details')
+    && calls.filter(call => call.command === 'get_message_page' && 'auditAction' in call.args).length === 2;
+  namedButton(audit(), 'Close').click();
   return { localScope, saved: !!send && /^[a-f0-9]{64}$/.test(send.args.retryToken),
     sealedFirst,
     composerRetired: composer.value === '', noLegacy: !calls.some(call => call.command === 'durable_send_context'),
+    ownerAudit,
     noUnavailableControls: !document.querySelector('.dm-circle,.inbox-circle,.orbit-btn,.join-channel,[title="Server settings"]'),
     noOverflow: document.documentElement.scrollWidth <= innerWidth };
 })()`;

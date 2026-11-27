@@ -265,7 +265,10 @@ impl NativeChatMemberDependencyExchange {
             .upgrade()
             .ok_or(TransportError::Closed)?
             .try_acquire_owned()
-            .map_err(|_| TransportError::NoResponse)?;
+            .map_err(|error| match error {
+                tokio::sync::TryAcquireError::Closed => TransportError::Closed,
+                tokio::sync::TryAcquireError::NoPermits => TransportError::Busy,
+            })?;
         let commands = self.commands.upgrade().ok_or(TransportError::Closed)?;
         let mut cancel = caller
             .with_authority(authority)
@@ -283,7 +286,7 @@ impl NativeChatMemberDependencyExchange {
             })
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Closed(_) => TransportError::Closed,
-                mpsc::error::TrySendError::Full(_) => TransportError::NoResponse,
+                mpsc::error::TrySendError::Full(_) => TransportError::Busy,
             })?;
         drop(commands);
         tokio::select! {
@@ -445,6 +448,58 @@ mod tests {
                 caller: candidate.clone(),
             });
             let mut requests = provider_lane.try_attach(authority.clone()).unwrap();
+            let held_route = source.capture_request(target).unwrap();
+            let held_scope = scope.clone();
+            let held_waiter =
+                tokio::spawn(async move { held_route.request(b"held original", held_scope).await });
+            let held = requests.next().await.unwrap();
+            assert_eq!(held.current_data().unwrap().1, b"held original");
+            held_waiter.abort();
+            assert!(held_waiter.await.unwrap_err().is_cancelled());
+            // Losing the observer doesn't refund a lower request. A
+            // locally busy retry is distinguishable from remote refusal.
+            assert!(matches!(
+                source
+                    .capture_request(target)
+                    .unwrap()
+                    .request(b"held original", scope.clone())
+                    .await,
+                Err(TransportError::Busy)
+            ));
+            held.respond(
+                Bytes::from_static(b"old reply"),
+                authority.clone(),
+                Arc::new(()),
+            )
+            .unwrap();
+            let repeat = async {
+                loop {
+                    match source
+                        .capture_request(target)
+                        .unwrap()
+                        .request(b"held original", scope.clone())
+                        .await
+                    {
+                        Err(TransportError::Busy) => {
+                            SystemClock.sleep(Duration::from_millis(10)).await
+                        }
+                        result => break result,
+                    }
+                }
+            };
+            let serve_repeat = async {
+                let retry = requests.next().await.unwrap();
+                assert_eq!(retry.current_data().unwrap().1, b"held original");
+                retry
+                    .respond(
+                        Bytes::from_static(b"retry reply"),
+                        authority.clone(),
+                        Arc::new(()),
+                    )
+                    .unwrap();
+            };
+            let (retry, ()) = tokio::join!(repeat, serve_repeat);
+            assert_eq!(retry.unwrap().as_ref(), b"retry reply");
             for marker in [[7], [8]] {
                 let route = if marker == [7] {
                     source.capture_frame_request(&frame.observe())
