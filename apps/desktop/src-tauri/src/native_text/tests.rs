@@ -2234,6 +2234,36 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
             }
         }
         impl rand_core::CryptoRng for NeverRng {}
+        struct RevokeAfterJournal<'a> {
+            path: &'a Path,
+            signal: &'a tokio::sync::watch::Sender<bool>,
+        }
+        impl RevokeAfterJournal<'_> {
+            fn before_draw(&self) {
+                if self.path.is_file() {
+                    self.signal.send_replace(true);
+                }
+            }
+        }
+        impl rand_core::RngCore for RevokeAfterJournal<'_> {
+            fn next_u32(&mut self) -> u32 {
+                self.before_draw();
+                OsCryptoRng.next_u32()
+            }
+            fn next_u64(&mut self) -> u64 {
+                self.before_draw();
+                OsCryptoRng.next_u64()
+            }
+            fn fill_bytes(&mut self, dest: &mut [u8]) {
+                self.before_draw();
+                OsCryptoRng.fill_bytes(dest);
+            }
+            fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+                self.before_draw();
+                OsCryptoRng.try_fill_bytes(dest)
+            }
+        }
+        impl rand_core::CryptoRng for RevokeAfterJournal<'_> {}
         let proof = retired.removal_data().unwrap().unwrap();
         assert!(retired.cover_selected_rejoin_catalog().is_err());
         assert_eq!(proof.2, 2);
@@ -2402,11 +2432,25 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
             assert!(!stage.exists());
         }
         #[derive(Debug)]
-        struct FirstStageOnly(PathBuf);
+        struct FirstStageOnly {
+            path: PathBuf,
+            revoked: AtomicBool,
+        }
+        impl FirstStageOnly {
+            fn new(path: PathBuf) -> Self {
+                Self {
+                    path,
+                    revoked: AtomicBool::new(false),
+                }
+            }
+        }
         #[async_trait::async_trait]
         impl catcoms_rt::RequestAuthority for FirstStageOnly {
             fn authorized(&self) -> bool {
-                !self.0.exists()
+                if self.path.is_file() {
+                    self.revoked.store(true, Ordering::SeqCst);
+                }
+                !self.revoked.load(Ordering::SeqCst)
             }
             async fn revoked(&self) {
                 std::future::pending::<()>().await;
@@ -2416,7 +2460,7 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
         // refuses the independent rename as soon as the actual name exists.
         let cancelled_after_stage = caller
             .clone()
-            .with_authority(Arc::new(FirstStageOnly(stage.clone())));
+            .with_authority(Arc::new(FirstStageOnly::new(stage.clone())));
         assert!(retired
             .select_rejoin_catalog_for_invite(
                 &catalog_ui,
@@ -2582,10 +2626,34 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
             .finish()
             .unwrap();
         let ui = retired.admit_rejoin_ui(&mut candidate).unwrap();
-        let saved = retired
-            .cover_rejoin_pending(&ui, inputs, &caller, &mut OsCryptoRng)
-            .unwrap()
-            .unwrap();
+        let saved = if scenario == MembershipAfterRemove::RejoinActive {
+            let before_key = caller
+                .clone()
+                .with_authority(Arc::new(FirstStageOnly::new(attempt.clone())));
+            assert!(retired
+                .cover_rejoin_pending(&ui, inputs, &before_key, &mut OsCryptoRng)
+                .is_err());
+            assert!(before_key.is_cancelled() && !attempt.exists() && !pending.exists());
+
+            let (revoke, signal) = tokio::sync::watch::channel(false);
+            let original = catcoms_rt::RequestCancellation::new(signal, None);
+            let mut rng = RevokeAfterJournal {
+                path: &attempt,
+                signal: &revoke,
+            };
+            // The first draw after the synced Attempt follows successful
+            // JoinerDevice entry. The original signed Pending must survive,
+            // while this invocation can no longer receive a receipt.
+            assert!(retired
+                .cover_rejoin_pending(&ui, inputs, &original, &mut rng)
+                .is_err());
+            assert!(original.is_cancelled() && pending.is_file());
+            retired.cover_rejoin_pending(&ui, inputs, &caller, &mut NeverRng)
+        } else {
+            retired.cover_rejoin_pending(&ui, inputs, &caller, &mut OsCryptoRng)
+        }
+        .unwrap()
+        .unwrap();
         assert_ne!(saved.request_digest, [0; 32]);
         let attempt_bytes = std::fs::read(&attempt).unwrap();
         let pending_bytes = std::fs::read(&pending).unwrap();
@@ -2762,10 +2830,46 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                         | MembershipAfterRemove::RejoinIndex
                         | MembershipAfterRemove::RejoinActive
                 ) {
-                    let NativeTextRejoinWelcomeStatus::Covered(result) = reopened
-                        .cover_rejoin_welcome(&local_ui, invitation, &caller, &mut OsCryptoRng)
-                        .unwrap()
-                    else {
+                    let result = if scenario == MembershipAfterRemove::RejoinActive {
+                        let (revoke, signal) = tokio::sync::watch::channel(false);
+                        let original = catcoms_rt::RequestCancellation::new(signal, None);
+                        let entry =
+                            member_path.join("chat-critical-namespaces.rejoin-welcome-attempt.bin");
+                        let outcome =
+                            member_path.join("chat-critical-namespaces.rejoin-outcome.bin");
+                        let before_sdk = caller
+                            .clone()
+                            .with_authority(Arc::new(FirstStageOnly::new(entry.clone())));
+                        assert!(reopened
+                            .cover_rejoin_welcome(
+                                &local_ui,
+                                invitation,
+                                &before_sdk,
+                                &mut OsCryptoRng
+                            )
+                            .is_err());
+                        assert!(before_sdk.is_cancelled() && !entry.exists() && !outcome.exists());
+                        let mut rng = RevokeAfterJournal {
+                            path: &entry,
+                            signal: &revoke,
+                        };
+                        // Outcome sealing is the first draw after the synced
+                        // entry and successful Welcome SDK call.
+                        assert!(reopened
+                            .cover_rejoin_welcome(&local_ui, invitation, &original, &mut rng)
+                            .is_err());
+                        assert!(original.is_cancelled());
+                        assert!(outcome.is_file());
+                        reopened.cover_rejoin_welcome(&local_ui, invitation, &caller, &mut NeverRng)
+                    } else {
+                        reopened.cover_rejoin_welcome(
+                            &local_ui,
+                            invitation,
+                            &caller,
+                            &mut OsCryptoRng,
+                        )
+                    };
+                    let NativeTextRejoinWelcomeStatus::Covered(result) = result.unwrap() else {
                         panic!("the exact covered delivery enters one Welcome");
                     };
                     assert_eq!(result.request_digest, receipt.request_digest);

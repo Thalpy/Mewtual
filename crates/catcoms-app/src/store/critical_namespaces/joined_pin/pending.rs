@@ -450,7 +450,7 @@ impl RecoveredPinnedPending {
         (invite, token, now_ms): (&SignedInviteBindingData, [u8; 32], u64),
         removal: catcoms_sync::SelectedRejoinRemoval,
         limits: DirectJoinLimits,
-        native: NativeV2JoinKeyEntry<'_>,
+        (native, caller_current): (NativeV2JoinKeyEntry<'_>, impl FnOnce() -> bool),
     ) -> Result<Result<PreparedV2JoinRequest, catcoms_sync::NativeV2RejoinFailure>, AppError> {
         let fields = Self::open_fields(key, layout, raw)?;
         let original = RecoveredV2PendingJoinSource::open(
@@ -483,6 +483,7 @@ impl RecoveredPinnedPending {
                 limits,
             },
             native,
+            caller_current,
         ))
     }
 

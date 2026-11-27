@@ -117,6 +117,14 @@ same UI generation and invocation must separately admit the Stage
 write and the rename. A warm response after a possible rename requires
 an authenticated cold confirmation. It cannot publish an active row.
 
+A warm retired writer can discard only its own held exact unentered
+Attempt or SDK Attempt, with every subsequent role absent. It covers
+the unlink on the held original parent and proves the name absent
+before reuse. Cold ambiguous entry preserves the files. A successful
+key operation can finish its own Pending or Outcome under its actual
+retained entry permit after revocation. The old caller receives no
+receipt and cannot start transport, prefix selection or publication.
+
 Cold founder startup can complete a fully staged later Add only after vault
 authentication and replay under the original pin. It retains and rechecks
 the named parent, archive, stage and each journal record against their
