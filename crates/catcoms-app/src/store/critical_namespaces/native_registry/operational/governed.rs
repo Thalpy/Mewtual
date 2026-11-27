@@ -31,7 +31,8 @@ pub use founder_recovery::{
     NativeTextColdFounderSource,
 };
 pub use runtime::{
-    NativeTextJoinedRecovery, NativeTextJoinedRuntime, NativeTextRemovedJoinedVault,
+    NativeTextJoinedRecovery, NativeTextJoinedRuntime, NativeTextRejoinDelivery,
+    NativeTextRejoinExchange, NativeTextRemovedJoinedVault,
 };
 use std::sync::atomic::{AtomicBool, AtomicU64};
 

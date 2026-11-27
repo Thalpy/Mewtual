@@ -1510,20 +1510,38 @@ async fn native_text_founder_frame_capture_survives_transient_row_contention() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_membership_selected_eviction_notifies_the_original_joined_row() {
-    native_text_membership_removal_reopen(false, false).await;
+    native_text_membership_removal_reopen(MembershipAfterRemove::Retired).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_recovered_founder_admits_a_fresh_join_after_selected_remove() {
-    native_text_membership_removal_reopen(true, false).await;
+    native_text_membership_removal_reopen(MembershipAfterRemove::NewMember).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_cold_founder_finishes_a_complete_staged_add() {
-    native_text_membership_removal_reopen(true, true).await;
+    native_text_membership_removal_reopen(MembershipAfterRemove::StagedAdd).await;
 }
 
-async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_staged_add: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_rejoin_exchange_uses_the_cold_original_pending_over_tcp() {
+    native_text_membership_removal_reopen(MembershipAfterRemove::RejoinExchange).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MembershipAfterRemove {
+    Retired,
+    NewMember,
+    StagedAdd,
+    RejoinExchange,
+}
+
+async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) {
+    let join_after_restart = matches!(
+        scenario,
+        MembershipAfterRemove::NewMember | MembershipAfterRemove::StagedAdd
+    );
+    let repair_staged_add = scenario == MembershipAfterRemove::StagedAdd;
     use catcoms_app::store::NativeTextInvitePacketData;
     use tauri::Listener;
 
@@ -2063,7 +2081,85 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
         assert_eq!(std::fs::read(&attempt).unwrap(), attempt_bytes);
         assert_eq!(std::fs::read(&catalog).unwrap(), bytes);
         assert_eq!(std::fs::read(&selector).unwrap(), selector_bytes);
-        std::fs::write(&pending, pending_bytes).unwrap();
+        std::fs::write(&pending, &pending_bytes).unwrap();
+        if scenario == MembershipAfterRemove::RejoinExchange {
+            let admit = |owner: &catcoms_app::store::NativeTextRemovedJoinedVault, generation| {
+                let mut prepared = owner
+                    .prepare_rejoin_ui(generation, ui_budget.prepare().unwrap())
+                    .finish()
+                    .unwrap();
+                owner.admit_rejoin_ui(&mut prepared).unwrap()
+            };
+            let held = pending.with_extension("exchange-foreign-for-test");
+            std::fs::rename(&pending, &held).unwrap();
+            std::fs::write(&pending, &pending_bytes).unwrap();
+            assert!(reopened
+                .prepare_rejoin_exchange(
+                    admit(&reopened, 2),
+                    &replacement,
+                    [95; 32],
+                    caller.clone()
+                )
+                .is_err());
+            std::fs::remove_file(&pending).unwrap();
+            std::fs::rename(&held, &pending).unwrap();
+
+            let scheduler = catcoms_discovery::EndpointDialScheduler::new(Default::default());
+            let host = std::net::Ipv4Addr::LOCALHOST.into();
+            let old = reopened
+                .prepare_rejoin_exchange(
+                    admit(&reopened, 2),
+                    &replacement,
+                    [95; 32],
+                    caller.clone(),
+                )
+                .unwrap()
+                .expect("the original A1 listener drained");
+            lock.store(true, Ordering::SeqCst);
+            generation.store(3, Ordering::SeqCst);
+            authorized.store(3, Ordering::SeqCst);
+            lock.store(false, Ordering::SeqCst);
+            assert!(old
+                .connect_approved_host(&replacement, host, &scheduler)
+                .await
+                .is_err());
+            drop(old);
+
+            let exchange = reopened
+                .prepare_rejoin_exchange(
+                    admit(&reopened, 3),
+                    &replacement,
+                    [95; 32],
+                    caller.clone(),
+                )
+                .unwrap()
+                .unwrap();
+            exchange
+                .connect_approved_host(&replacement, host, &scheduler)
+                .await
+                .unwrap();
+            let delivery = timeout(Duration::from_secs(45), exchange.receive())
+                .await
+                .expect("the original founder answers A2 over its TCP listener")
+                .unwrap();
+            assert_eq!(delivery.request_digest_data(), saved.request_digest);
+            assert!(delivery.is_for_original_cached(&reopened));
+            assert_eq!(reopened.removal_data().unwrap(), Some(proof));
+            assert_eq!(std::fs::read(&catalog).unwrap(), bytes);
+            assert_eq!(std::fs::read(&pending).unwrap(), pending_bytes);
+
+            lock.store(true, Ordering::SeqCst);
+            assert!(!delivery.is_for_original_cached(&reopened));
+            drop((delivery, ui, candidate, reopened));
+            wait_for_original_vault().await;
+            let founder_state = founder.state::<AppState>();
+            let close = register_vault_close(&founder_state).await.unwrap();
+            sources::close_server_rows(&founder_state, &SystemClock)
+                .await
+                .unwrap();
+            drop((close, founder_state));
+            return;
+        }
         drop((ui, candidate, reopened));
         wait_for_original_vault().await;
     }

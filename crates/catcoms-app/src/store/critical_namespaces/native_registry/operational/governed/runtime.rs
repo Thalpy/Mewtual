@@ -9,7 +9,7 @@ use super::super::native_ui::{
 };
 use super::*;
 use crate::store::persistence::governance_layout::joined::{
-    rejoin::{RejoinCatalogPreparation, WarmRejoinPending},
+    rejoin::{RejoinCatalogPreparation, RejoinPendingOwner},
     JoinedRuntimeInputs,
 };
 use crate::store::NativeTextJoinedRegistrationData;
@@ -17,6 +17,9 @@ use catcoms_replication::chat::{owner_facts::OwnerFactId, owner_header::OwnerHea
 use catcoms_sync::{ClosedV2JoinedNode, SelectedRejoinRemoval, MAX_V2_FIRST_ADD_PROOF_BYTES};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use zeroize::Zeroizing;
+
+mod rejoin_exchange;
+pub use rejoin_exchange::{NativeTextRejoinDelivery, NativeTextRejoinExchange};
 
 enum RecoveredJoinedMembership {
     Active(OwnerHeaderId, OwnerFactId, u64),
@@ -62,7 +65,8 @@ pub struct NativeTextRemovedJoinedVault {
     removal: SelectedRejoinRemoval,
     tcp_drain: catcoms_net::NativeTcpDrain,
     rejoin_catalog: Option<Box<RejoinCatalogPreparation>>,
-    rejoin_pending: Option<Box<WarmRejoinPending>>,
+    rejoin_pending: Option<RejoinPendingOwner>,
+    rejoin_tcp: Option<Arc<join_tcp::Transport>>,
 }
 
 catcoms_rt::redacted_debug! {
@@ -613,6 +617,7 @@ impl<R: CryptoRngCore> NativeTextJoinedRuntime<catcoms_net::MeshService, R> {
                 tcp_drain,
                 rejoin_catalog: None,
                 rejoin_pending: None,
+                rejoin_tcp: None,
             };
             if negative.is_cancelled() {
                 return Err(refused());

@@ -15,7 +15,7 @@ const REJOIN_STAGE: &str = "chat-critical-namespaces.rejoin.stage";
 
 mod pending;
 pub use pending::NativeTextRejoinPendingReceipt;
-pub(in crate::store) use pending::{RejoinKeyEntry, WarmRejoinPending};
+pub(in crate::store) use pending::{PreparedRejoinTransport, RejoinKeyEntry, RejoinPendingOwner};
 
 /// The exact native inventory can outlive the handler scratch that checked
 /// A1. Its buffers and files always retire before its dedicated invoice.
