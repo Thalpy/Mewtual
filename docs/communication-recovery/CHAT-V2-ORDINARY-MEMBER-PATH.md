@@ -411,8 +411,14 @@ The native worker gives authenticated pages already in hand up to two
 contested exact turns before the oldest due discovery or continuation.
 Own-outbox and archive entries share the same order. An authenticated reply
 starts its first bounded local replay slice promptly, while later slices
-and idle work yield at the regular rates. Peer requests keep their existing
-500 ms spacing and the same per-request, replay and ancestry deadlines.
+and idle work yield at the regular rates. Peer turns keep their existing
+500 ms start-to-start spacing and the same per-request, replay and ancestry deadlines.
+One inventory exchange can overlap one exact exchange. They use separate
+single-slot native transport allowances and the same authenticated request
+protocol. A local timeout leaves the original driver allowance
+with its own request until the driver finishes. A paid inventory reply waits
+for the original local row under the bounded replay window, so an exact
+write's local permit does not trigger a duplicate network request.
 
 Automatic discovery currently requires reciprocal approved contacts on the
 installed rows. Restoring those approvals and their connections after a
