@@ -349,6 +349,18 @@ impl Physical {
         store.prepare_retired_rejoin_catalog(data, removal, original, rng)
     }
 
+    pub(super) fn require_fresh_rejoin_invite(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+        removal: catcoms_sync::SelectedRejoinRemoval,
+        invite: &catcoms_replication::chat::join_bindings::SignedInviteBindingData,
+        now_ms: u64,
+    ) -> Result<(), AppError> {
+        self.with_registered_native_join(data, |store, _| {
+            store.require_fresh_rejoin_invite(data, removal, invite, now_ms)
+        })
+    }
+
     pub(super) fn require_original_rejoin_catalog(
         &self,
         data: crate::store::NativeTextJoinedRegistrationData,
@@ -379,6 +391,7 @@ impl Physical {
             .is_some())
     }
 
+    #[cfg(any(test, feature = "native-chat-test-hooks"))]
     pub(super) fn stage_retired_rejoin_catalog(
         &self,
         prepared: &mut crate::store::persistence::governance_layout::joined::rejoin::RejoinCatalogPreparation,
@@ -386,17 +399,18 @@ impl Physical {
         let cell = self.cell.try_lock().map_err(|_| refused())?;
         cell.require_idle()?;
         self.handler.require_idle_cached()?;
-        prepared.stage_catalog(self.current()?.checked_store()?)
+        prepared.stage_catalog(self.current()?.checked_store()?, &|| Ok(()))
     }
 
     pub(super) fn select_retired_rejoin_catalog(
         &self,
         prepared: &mut crate::store::persistence::governance_layout::joined::rejoin::RejoinCatalogPreparation,
+        admit: &impl Fn() -> Result<(), AppError>,
     ) -> Result<(), AppError> {
         let cell = self.cell.try_lock().map_err(|_| refused())?;
         cell.require_idle()?;
         self.handler.require_idle_cached()?;
-        prepared.select_catalog(self.current()?.checked_store()?)
+        prepared.select_catalog(self.current()?.checked_store()?, admit)
     }
 
     pub(super) fn cover_selected_rejoin_catalog(

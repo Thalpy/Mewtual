@@ -135,6 +135,25 @@ impl NativeTextRemovedJoinedVault {
         })
     }
 
+    /// Authenticate this original retired mount without attaching a
+    /// transport, handing out a current row or entering a device key.
+    /// Finish the paid metadata work outside any native guards.
+    pub fn prepare_native_authentication(
+        &self,
+        credit: crate::store::NativeUiInvocationMetadata,
+    ) -> crate::store::NativeTextVaultAuthentication {
+        crate::store::NativeTextVaultAuthentication::capture(&self.ui, Some(&self.index), credit)
+    }
+
+    /// Check the exact retired mount. A live native facade, old active row
+    /// or different reopen's authentication cannot supply this match.
+    pub fn matches_native_authentication_cached(
+        &self,
+        check: &crate::store::NativeTextVaultAuthenticationCheck,
+    ) -> bool {
+        check.matches_ui_mount(&self.ui.observe_mount())
+    }
+
     /// Capture the original retired vault's paid UI generation. The
     /// candidate must be finished outside native or Store guards.
     pub fn prepare_rejoin_ui(
@@ -155,6 +174,59 @@ impl NativeTextRemovedJoinedVault {
     /// waiting for any admitted rejoin operation to leave.
     pub fn begin_rejoin_ui_retirement(&self, through: u64) -> Result<UiRetirement, AppError> {
         self.ui.begin_retirement(through)
+    }
+
+    /// Check a fresh signed invite against the retired original before
+    /// catalog work. Each file transaction admits the exact UI generation
+    /// separately; its caller retains the native drain through the write.
+    /// The caller reopens this vault after selection before any key work.
+    pub fn select_rejoin_catalog_for_invite(
+        &mut self,
+        ui: &UiCapture,
+        invite: &crate::store::NativeTextInvitePacketData<'_>,
+        now_ms: u64,
+        caller: &RequestCancellation,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<bool, AppError> {
+        if !self.transport.is_drained() {
+            return Ok(false);
+        }
+        self.ui.require_capture(ui)?;
+        if caller.is_cancelled() || !self.ui.is_current_cached(ui) {
+            return Err(refused());
+        }
+        if self
+            .rejoin_catalog
+            .as_ref()
+            .is_some_and(|prepared| prepared.selection_started_cached())
+        {
+            return Err(AppError::ChatV2RejoinCatalogReopen);
+        }
+        self.index.require_fresh_rejoin_invite(
+            self.registration,
+            self.removal,
+            invite.binding(),
+            now_ms,
+        )?;
+        if !self.prepare_rejoin_catalog(rng)? {
+            return Ok(false);
+        }
+        let authority = &self.ui;
+        let admit = || {
+            if caller.is_cancelled() || !authority.is_current_cached(ui) {
+                return Err(refused());
+            }
+            Ok(())
+        };
+        let prepared = self.rejoin_catalog.as_mut().ok_or_else(refused)?;
+        if let Err(error) = self.index.select_retired_rejoin_catalog(prepared, &admit) {
+            return Err(if prepared.selection_started_cached() {
+                AppError::ChatV2RejoinCatalogReopen
+            } else {
+                error
+            });
+        }
+        Ok(true)
     }
 
     /// Recheck the exact registry, original Welcome files and selected
@@ -197,6 +269,7 @@ impl NativeTextRemovedJoinedVault {
     /// Cover a local rejoin catalog candidate on disk. Current, the selected
     /// membership and the native index remain unchanged. The next opener can
     /// authenticate and reuse this exact complete candidate.
+    #[cfg(any(test, feature = "native-chat-test-hooks"))]
     pub fn stage_rejoin_catalog(&mut self, rng: &mut dyn CryptoRngCore) -> Result<bool, AppError> {
         if !self.prepare_rejoin_catalog(rng)? {
             return Ok(false);
@@ -262,6 +335,7 @@ impl NativeTextRemovedJoinedVault {
     /// Publish and cover the original Stage as Current. The old mount never
     /// becomes an A2 source. On success or after a restart, use the native
     /// cold opener to acquire the selected catalog in a fresh mount.
+    #[cfg(any(test, feature = "native-chat-test-hooks"))]
     pub fn select_rejoin_catalog(&mut self, rng: &mut dyn CryptoRngCore) -> Result<bool, AppError> {
         if !self.transport.is_drained() {
             return Ok(false);
@@ -270,7 +344,8 @@ impl NativeTextRemovedJoinedVault {
             return Ok(false);
         }
         let prepared = self.rejoin_catalog.as_mut().ok_or_else(refused)?;
-        self.index.select_retired_rejoin_catalog(prepared)?;
+        self.index
+            .select_retired_rejoin_catalog(prepared, &|| Ok(()))?;
         Ok(true)
     }
 }

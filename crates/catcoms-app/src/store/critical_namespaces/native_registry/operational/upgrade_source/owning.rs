@@ -503,6 +503,17 @@ impl Store {
             .require_recovered_native_join_removal(data, removal)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn require_fresh_rejoin_invite(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+        removal: catcoms_sync::SelectedRejoinRemoval,
+        invite: &catcoms_replication::chat::join_bindings::SignedInviteBindingData,
+        now_ms: u64,
+    ) -> Result<(), AppError> {
+        self.physical
+            .require_fresh_rejoin_invite(data, removal, invite, now_ms)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn prepare_retired_rejoin_catalog(
         &self,
         data: crate::store::NativeTextJoinedRegistrationData,
@@ -532,6 +543,7 @@ impl Store {
         self.physical.rejoin_catalog_selected()
     }
 
+    #[cfg(any(test, feature = "native-chat-test-hooks"))]
     pub(in crate::store::critical_namespaces::native_registry) fn stage_retired_rejoin_catalog(
         &self,
         prepared: &mut crate::store::persistence::governance_layout::joined::rejoin::RejoinCatalogPreparation,
@@ -705,8 +717,9 @@ impl Store {
     pub(in crate::store::critical_namespaces::native_registry) fn select_retired_rejoin_catalog(
         &self,
         prepared: &mut crate::store::persistence::governance_layout::joined::rejoin::RejoinCatalogPreparation,
+        admit: &impl Fn() -> Result<(), AppError>,
     ) -> Result<(), AppError> {
-        self.physical.select_retired_rejoin_catalog(prepared)
+        self.physical.select_retired_rejoin_catalog(prepared, admit)
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn prepare_recovered_native_join_tcp(

@@ -2320,6 +2320,20 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
 
         // Select the same complete Stage through the production writer.
         // The old mount retains only its historical proof after the rename.
+        let replacement = command_value_after_busy(
+            &main,
+            &founder_queue,
+            "mint_invite_fresh",
+            invite_mint::BUSY,
+            serde_json::json!({"server": found["server"], "expectedContext": found["context"]}),
+        )
+        .await;
+        let replacement_bytes = hex::decode(replacement.as_str().unwrap()).unwrap();
+        let replacement = NativeTextInvitePacketData::decode(&replacement_bytes).unwrap();
+        let now = replacement.binding().spec_data().expires_at_ms - 1;
+        let catalog_lock = Arc::new(AtomicBool::new(false));
+        let catalog_generation = Arc::new(AtomicU64::new(1));
+        let catalog_authorized = Arc::new(AtomicU64::new(1));
         std::fs::write(&stage, &bytes).unwrap();
         let mut retired = open_retired();
         timeout(Duration::from_secs(10), async {
@@ -2335,8 +2349,127 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
         assert_eq!(std::fs::read(&catalog).unwrap(), before);
         assert_eq!(std::fs::read(&stage).unwrap(), bytes);
         std::fs::remove_file(conflict).unwrap();
+        drop(retired);
+        wait_for_original_vault().await;
+        std::fs::remove_file(&stage).unwrap();
+        let (mut retired, catalog_budget) = open_retired_with_ui(
+            (
+                catalog_generation.clone(),
+                catalog_authorized.clone(),
+                catalog_lock.clone(),
+            ),
+            false,
+        );
+        timeout(Duration::from_secs(10), async {
+            while retired.removal_data().unwrap().is_none() {
+                SystemClock.sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
 
-        assert!(retired.select_rejoin_catalog(&mut NeverRng).unwrap());
+        assert!(retired
+            .prepare_native_authentication(catalog_budget.prepare().unwrap())
+            .verify(b"wrong retired vault secret")
+            .is_err());
+        let authentication = retired
+            .prepare_native_authentication(catalog_budget.prepare().unwrap())
+            .verify(SECRET.as_bytes())
+            .unwrap();
+        assert!(retired.matches_native_authentication_cached(&authentication));
+        let mut catalog_capture = retired
+            .prepare_rejoin_ui(1, catalog_budget.prepare().unwrap())
+            .finish()
+            .unwrap();
+        let catalog_ui = retired.admit_rejoin_ui(&mut catalog_capture).unwrap();
+        let (_invocation, signal) = tokio::sync::watch::channel(false);
+        let caller = catcoms_rt::RequestCancellation::new(signal, None);
+        let first_packet = hex::decode(invite.as_str().unwrap()).unwrap();
+        let first_packet = NativeTextInvitePacketData::decode(&first_packet).unwrap();
+        for (packet, time) in [(&first_packet, 0), (&replacement, u64::MAX)] {
+            assert!(
+                retired
+                    .select_rejoin_catalog_for_invite(
+                        &catalog_ui,
+                        packet,
+                        time,
+                        &caller,
+                        &mut NeverRng,
+                    )
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(&catalog).unwrap(), before);
+            assert!(!stage.exists());
+        }
+        #[derive(Debug)]
+        struct FirstStageOnly(PathBuf);
+        #[async_trait::async_trait]
+        impl catcoms_rt::RequestAuthority for FirstStageOnly {
+            fn authorized(&self) -> bool {
+                !self.0.exists()
+            }
+            async fn revoked(&self) {
+                std::future::pending::<()>().await;
+            }
+        }
+        // The original caller can create and sync Stage. Its authority
+        // refuses the independent rename as soon as the actual name exists.
+        let cancelled_after_stage = caller
+            .clone()
+            .with_authority(Arc::new(FirstStageOnly(stage.clone())));
+        assert!(retired
+            .select_rejoin_catalog_for_invite(
+                &catalog_ui,
+                &replacement,
+                now,
+                &cancelled_after_stage,
+                &mut rng,
+            )
+            .is_err());
+        let bytes = std::fs::read(&stage).unwrap();
+        assert_eq!(std::fs::read(&catalog).unwrap(), before);
+        assert_ne!(bytes, before);
+        catalog_lock.store(true, Ordering::SeqCst);
+        assert!(retired
+            .select_rejoin_catalog_for_invite(
+                &catalog_ui,
+                &replacement,
+                now,
+                &caller,
+                &mut NeverRng,
+            )
+            .is_err());
+        catalog_generation.store(2, Ordering::SeqCst);
+        catalog_authorized.store(2, Ordering::SeqCst);
+        catalog_lock.store(false, Ordering::SeqCst);
+        assert!(retired
+            .select_rejoin_catalog_for_invite(
+                &catalog_ui,
+                &replacement,
+                now,
+                &caller,
+                &mut NeverRng,
+            )
+            .is_err());
+        assert_eq!(std::fs::read(&catalog).unwrap(), before);
+        let mut next_capture = retired
+            .prepare_rejoin_ui(2, catalog_budget.prepare().unwrap())
+            .finish()
+            .unwrap();
+        let next_ui = retired.admit_rejoin_ui(&mut next_capture).unwrap();
+        assert!(retired
+            .select_rejoin_catalog_for_invite(&next_ui, &replacement, now, &caller, &mut NeverRng,)
+            .unwrap());
+        assert!(matches!(
+            retired.select_rejoin_catalog_for_invite(
+                &next_ui,
+                &replacement,
+                now,
+                &caller,
+                &mut NeverRng,
+            ),
+            Err(catcoms_app::AppError::ChatV2RejoinCatalogReopen)
+        ));
         assert!(retired.select_rejoin_catalog(&mut NeverRng).unwrap());
         assert_eq!(std::fs::read(&catalog).unwrap(), bytes);
         assert!(!stage.exists());
@@ -2348,7 +2481,7 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
             catcoms_storage::vault::acquire_vault_session(&member_path),
             Err(catcoms_storage::StorageError::VaultBusy)
         ));
-        drop(retired);
+        drop((next_ui, next_capture, catalog_ui, catalog_capture, retired));
         wait_for_original_vault().await;
 
         for relative in [
@@ -2376,6 +2509,8 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
             std::fs::remove_file(conflict).unwrap();
         }
         let reopened = open_retired();
+        assert!(!reopened.matches_native_authentication_cached(&authentication));
+        drop(authentication);
         timeout(Duration::from_secs(10), async {
             loop {
                 if let Some(covered) = reopened.cover_selected_rejoin_catalog().unwrap() {
@@ -2403,17 +2538,6 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
         drop(reopened);
         wait_for_original_vault().await;
 
-        let replacement = command_value_after_busy(
-            &main,
-            &founder_queue,
-            "mint_invite_fresh",
-            invite_mint::BUSY,
-            serde_json::json!({"server": found["server"], "expectedContext": found["context"]}),
-        )
-        .await;
-        let replacement_bytes = hex::decode(replacement.as_str().unwrap()).unwrap();
-        let replacement = NativeTextInvitePacketData::decode(&replacement_bytes).unwrap();
-        let now = replacement.binding().spec_data().expires_at_ms - 1;
         let generation = Arc::new(AtomicU64::new(1));
         let authorized = Arc::new(AtomicU64::new(1));
         let lock = Arc::new(AtomicBool::new(false));

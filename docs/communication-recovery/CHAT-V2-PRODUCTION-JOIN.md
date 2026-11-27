@@ -689,6 +689,15 @@ before a replacement index exists without binding the old port.
 Starting rejoin from the renderer,
 further same-device successors and physical acceptance remain open.
 
+Selecting the rejoin catalog for a new invite checks the original
+retired vault, the signed anchor and policy, a new nonce, invite
+freshness and the current UI generation. Writing the Stage and
+renaming it to Current check that generation separately. The Stage is
+synced before the rename, including a cold retry with complete bytes.
+If the rename may have happened, an authenticated reopen confirms the
+same catalog. The Pending and Welcome cuts still require their own
+authorization.
+
 ## Acceptance before enabling
 
 The Chat V2 integration workflow runs focused desktop membership checks on

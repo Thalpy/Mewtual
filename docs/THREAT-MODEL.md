@@ -110,6 +110,13 @@ A1, idle or founder owner. This check detects partial rollback that
 leaves those records. A coherent rollback of the whole vault is
 outside this proof.
 
+Before the first rejoin catalog write, the retired owner authenticates
+the new invite against the sealed original donor. The old nonce, a
+different anchor or policy, and an expired fresh invite refuse. The
+same UI generation and invocation must separately admit the Stage
+write and the rename. A warm response after a possible rename requires
+an authenticated cold confirmation. It cannot publish an active row.
+
 Cold founder startup can complete a fully staged later Add only after vault
 authentication and replay under the original pin. It retains and rechecks
 the named parent, archive, stage and each journal record against their
