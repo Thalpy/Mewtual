@@ -939,6 +939,27 @@ impl ServerStore {
         selected.require_with_rejoin_catalog(self, rejoin_catalog)
     }
 
+    /// Read a routing hint from this mounted original. It cannot select a
+    /// retired membership or take the affine Welcome graph.
+    pub(in crate::store) fn has_recovered_terminal_candidate(
+        &self,
+        registration: NativeTextJoinedRegistrationData,
+    ) -> Result<bool, AppError> {
+        let (_, own, epoch) = registration.selected_data();
+        let slot = self.joined_pin_index.try_lock().map_err(|_| denied())?;
+        let selected = slot.as_ref().ok_or_else(denied)?;
+        selected.require(self)?;
+        let pending = selected.pending.as_ref().ok_or_else(denied)?;
+        if pending._pending.pending_data().1 != registration.context {
+            return Err(denied());
+        }
+        pending
+            .welcome
+            .as_ref()
+            .ok_or_else(denied)?
+            .has_terminal_candidate(self, registration.context, (own, epoch))
+    }
+
     /// Exclusive access keeps the original held index and Welcome outside
     /// mutex guards during runtime assembly.
     pub(in crate::store) fn attach_recovered_joined_node<

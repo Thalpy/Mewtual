@@ -58,6 +58,20 @@ pub enum NativeTextJoinedRecovery<R: CryptoRngCore> {
     Removed(NativeTextRemovedJoinedVault),
 }
 
+enum RetiredTransport {
+    NeverStarted,
+    Draining(catcoms_net::NativeTcpDrain),
+}
+
+impl RetiredTransport {
+    fn is_drained(&self) -> bool {
+        match self {
+            Self::NeverStarted => true,
+            Self::Draining(drain) => drain.is_drained(),
+        }
+    }
+}
+
 /// Exclusive retired membership storage. The recorded labels are historical
 /// data. A rejoin writer must recheck the held Remove at its own commit edge.
 pub struct NativeTextRemovedJoinedVault {
@@ -66,7 +80,7 @@ pub struct NativeTextRemovedJoinedVault {
     index: upgrade_source::owning::Store,
     registration: NativeTextJoinedRegistrationData,
     removal: SelectedRejoinRemoval,
-    tcp_drain: catcoms_net::NativeTcpDrain,
+    transport: RetiredTransport,
     rejoin_catalog: Option<Box<RejoinCatalogPreparation>>,
     rejoin_pending: Option<RejoinPendingOwner>,
     rejoin_tcp: Option<Arc<join_tcp::Transport>>,
@@ -91,6 +105,36 @@ impl Drop for NativeTextRemovedJoinedVault {
 }
 
 impl NativeTextRemovedJoinedVault {
+    fn from_recovered_removal(
+        index: upgrade_source::owning::Store,
+        (registration, removal, transport): (
+            NativeTextJoinedRegistrationData,
+            SelectedRejoinRemoval,
+            RetiredTransport,
+        ),
+        session: (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
+        ui_budget: crate::store::NativeUiInvocationBudget,
+    ) -> Result<Self, AppError> {
+        index.require_recovered_native_join_removal(registration, removal)?;
+        let ui = UiAdmissionOwner::new(session.0, session.1, session.2, ui_budget)?;
+        let key_source = ui.retired_key_source()?;
+        Ok(Self {
+            ui,
+            key_source,
+            index,
+            registration,
+            removal,
+            transport,
+            rejoin_catalog: None,
+            rejoin_pending: None,
+            rejoin_tcp: None,
+            rejoin_received: None,
+            rejoin_welcome: None,
+            rejoin_prefix: None,
+            rejoin_index: None,
+        })
+    }
+
     /// Capture the original retired vault's paid UI generation. The
     /// candidate must be finished outside native or Store guards.
     pub fn prepare_rejoin_ui(
@@ -117,7 +161,7 @@ impl NativeTextRemovedJoinedVault {
     /// terminal cut before lending the historical coordinates. None means the
     /// original TCP actor still has a task or key to retire.
     pub fn removal_data(&self) -> Result<Option<SelectedRejoinRemoval>, AppError> {
-        if !self.tcp_drain.is_drained() {
+        if !self.transport.is_drained() {
             return Ok(None);
         }
         self.index
@@ -132,7 +176,7 @@ impl NativeTextRemovedJoinedVault {
         &mut self,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<bool, AppError> {
-        if !self.tcp_drain.is_drained() {
+        if !self.transport.is_drained() {
             return Ok(false);
         }
         if let Some(existing) = self.rejoin_catalog.as_ref() {
@@ -172,7 +216,7 @@ impl NativeTextRemovedJoinedVault {
         negative: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Option<crate::store::NativeTextRejoinPendingReceipt>, AppError> {
-        if !self.tcp_drain.is_drained() {
+        if !self.transport.is_drained() {
             return Ok(None);
         }
         let command = self.ui.require_capture(ui)?;
@@ -207,7 +251,7 @@ impl NativeTextRemovedJoinedVault {
     /// Confirm the covered ID9 fingerprint from a fresh terminal mount. None
     /// means the original recovered TCP transport has yet to finish retiring.
     pub fn cover_selected_rejoin_catalog(&self) -> Result<Option<[u8; 32]>, AppError> {
-        if !self.tcp_drain.is_drained() {
+        if !self.transport.is_drained() {
             return Ok(None);
         }
         self.index
@@ -219,7 +263,7 @@ impl NativeTextRemovedJoinedVault {
     /// becomes an A2 source. On success or after a restart, use the native
     /// cold opener to acquire the selected catalog in a fresh mount.
     pub fn select_rejoin_catalog(&mut self, rng: &mut dyn CryptoRngCore) -> Result<bool, AppError> {
-        if !self.tcp_drain.is_drained() {
+        if !self.transport.is_drained() {
             return Ok(false);
         }
         if self.rejoin_catalog.is_none() && !self.prepare_rejoin_catalog(rng)? {
@@ -612,26 +656,12 @@ impl<R: CryptoRngCore> NativeTextJoinedRuntime<catcoms_net::MeshService, R> {
             if negative.is_cancelled() {
                 return Err(refused());
             }
-            self.storage
-                .index
-                .require_recovered_native_join_removal(receipt, removal)?;
-            let ui = UiAdmissionOwner::new(session.0, session.1, session.2, ui_budget)?;
-            let key_source = ui.retired_key_source()?;
-            let original = NativeTextRemovedJoinedVault {
-                ui,
-                key_source,
-                index: self.storage.index,
-                registration: receipt,
-                removal,
-                tcp_drain,
-                rejoin_catalog: None,
-                rejoin_pending: None,
-                rejoin_tcp: None,
-                rejoin_received: None,
-                rejoin_welcome: None,
-                rejoin_prefix: None,
-                rejoin_index: None,
-            };
+            let original = NativeTextRemovedJoinedVault::from_recovered_removal(
+                self.storage.index,
+                (receipt, removal, RetiredTransport::Draining(tcp_drain)),
+                session,
+                ui_budget,
+            )?;
             if negative.is_cancelled() {
                 return Err(refused());
             }
@@ -651,13 +681,13 @@ impl NativeTextJoinedStorage {
     /// Recover a registered native member on authenticated startup. A
     /// present replacement index must match the original terminal proof.
     pub fn into_native_startup_sources<R: CryptoRngCore>(
-        mut self,
+        self,
         session: (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
         ui_budget: crate::store::NativeUiInvocationBudget,
         policy: &crate::store::NativeTextSourcePolicy,
         negative: &RequestCancellation,
-        (first_rng, first_clock): (R, Box<dyn catcoms_rt::Clock + Send>),
-        (mut replacement_rng, replacement_clock): (R, Box<dyn catcoms_rt::Clock + Send>),
+        first: (R, Box<dyn catcoms_rt::Clock + Send>),
+        active: (R, Box<dyn catcoms_rt::Clock + Send>),
     ) -> Result<
         (
             crate::store::NativeTextVault,
@@ -665,23 +695,53 @@ impl NativeTextJoinedStorage {
         ),
         AppError,
     > {
-        if !self.index.has_rejoin_index()? {
-            return self
-                .bind_recovered_native_runtime(first_rng, first_clock, negative)
-                .map_err(|(_, error)| error)?
-                .into_recovered_native_sources(session, ui_budget, policy, negative);
+        match self
+            .into_native_startup_membership(session, ui_budget, policy, negative, first, active)?
+        {
+            NativeTextJoinedRecovery::Active(vault, sources) => Ok((vault, sources)),
+            NativeTextJoinedRecovery::Removed(_) => Err(AppError::ChatV2MembershipRemoved),
         }
+    }
+
+    /// Classify the original membership journal before binding TCP, then
+    /// replay on the selected transport. The retired case owns the original
+    /// vault without a Source. Partial rejoin data cannot reopen active A1.
+    pub fn into_native_startup_membership<R: CryptoRngCore>(
+        mut self,
+        session: (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
+        ui_budget: crate::store::NativeUiInvocationBudget,
+        policy: &crate::store::NativeTextSourcePolicy,
+        negative: &RequestCancellation,
+        (first_rng, first_clock): (R, Box<dyn catcoms_rt::Clock + Send>),
+        (mut active_rng, active_clock): (R, Box<dyn catcoms_rt::Clock + Send>),
+    ) -> Result<NativeTextJoinedRecovery<R>, AppError> {
         if self.pending.is_some()
+            || self.recovered_tcp.is_some()
             || self.row_count_data()? != 1
-            || !self.index.rejoin_catalog_selected()?
             || negative.is_cancelled()
         {
+            return Err(refused());
+        }
+        let indexed_rejoin = self.index.has_rejoin_index()?;
+        let selected_rejoin = self.index.rejoin_catalog_selected()?;
+        if indexed_rejoin && !selected_rejoin {
             return Err(refused());
         }
         let first = self
             .recovered_join_registration_data()?
             .ok_or_else(refused)?;
         self.index.require_registered_native_join(first)?;
+        if !selected_rejoin
+            && !self.index.has_rejoin_evidence()?
+            && !self.index.has_recovered_terminal_candidate(first)?
+        {
+            // A continuing row lends its affine Welcome graph only once,
+            // directly to the original registered TCP runtime.
+            return self
+                .bind_recovered_native_runtime(first_rng, first_clock, negative)
+                .map_err(|(_, error)| error)?
+                .into_recovered_joined_membership(session, ui_budget, policy, negative);
+        }
         let (_, fee) = self.index.joined_exchange_resources(
             runtime_invoice::<catcoms_rt::MemNetwork, R>() + 16 * 1024,
         )?;
@@ -696,26 +756,38 @@ impl NativeTextJoinedStorage {
             .ok_or_else(refused)?;
         let first_node = node.as_ref().ok_or_else(refused)?;
         if first_node.original_join_data() != first.selected_data()
-            || removal.1 != first.selected_data().1
+            || first_node.local_peer_data() != first.transport_data().0
             || negative.is_cancelled()
         {
             return Err(refused());
         }
         drop((node, inputs, fee));
+        if removal.1 != first.selected_data().1 || removal.2 <= first.selected_data().2 {
+            return Err(refused());
+        }
+        if !indexed_rejoin {
+            let retired = NativeTextRemovedJoinedVault::from_recovered_removal(
+                self.index,
+                (first, removal, RetiredTransport::NeverStarted),
+                session,
+                ui_budget,
+            )?;
+            if negative.is_cancelled() {
+                return Err(refused());
+            }
+            return Ok(NativeTextJoinedRecovery::Removed(retired));
+        }
         let replacement = self
             .index
-            .recover_installed_rejoin(first, removal, negative, &mut replacement_rng)?
+            .recover_installed_rejoin(first, removal, negative, &mut active_rng)?
             .ok_or_else(refused)?;
-        match attach_recovered_rejoin(
+        attach_recovered_rejoin(
             self.index,
             replacement,
-            (replacement_rng, replacement_clock),
+            (active_rng, active_clock),
             (session, ui_budget, policy),
             negative,
-        )? {
-            NativeTextJoinedRecovery::Active(vault, sources) => Ok((vault, sources)),
-            NativeTextJoinedRecovery::Removed(_) => Err(refused()),
-        }
+        )
     }
 }
 type NativeRejoinSession<'a> = (

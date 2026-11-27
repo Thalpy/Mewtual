@@ -95,6 +95,45 @@ fn reserve(store: &ServerStore) -> Result<CatalogReadReservation, AppError> {
 }
 
 impl MemberAdds {
+    /// Choose whether startup must stay offline. An authenticated local
+    /// journal record can indicate a potential self-Remove but cannot prove
+    /// membership or issue authority. The one real graph replay does that.
+    pub(super) fn has_terminal_candidate(
+        store: &ServerStore,
+        context: V2PendingJoinContextData,
+        welcome: &[u8],
+        (own, epoch): (OwnerFactId, u64),
+    ) -> Result<bool, AppError> {
+        let _fee = reserve(store)?;
+        let key = Zeroizing::new(store.keys.db_key()?);
+        let mut predecessor = None::<OpenedArchiveObject>;
+        let mut gap = false;
+        for next in epoch.checked_add(1).ok_or_else(denied)?..=MAX_EPOCH {
+            let path = path(store, context, next)?;
+            let Some(file) = read(&path, codec::MEMBER_ADD_FRAME)? else {
+                // An orphaned selector is uncertainty, even if no later
+                // bodies survived. Never bind the old transport in this case.
+                absent(&selection_path(store, context, next)?)?;
+                gap = true;
+                continue;
+            };
+            if gap {
+                return Err(denied());
+            }
+            let latest = predecessor
+                .as_ref()
+                .map_or(welcome, |entry| entry.1.as_slice());
+            let record = codec::open_member_add(&key, context, latest, &file.1)?;
+            let frame = V2MemberTransitionFrameData::decode(&record.delivery)?;
+            exact_held(&path, &file.0, session_id(&file.0).map_err(io)?, &file.1)?;
+            if frame.removal_admission_data()? == Some(own) {
+                return Ok(true);
+            }
+            predecessor = Some(file);
+        }
+        Ok(false)
+    }
+
     fn require_original(&self) -> Result<(), AppError> {
         for covered in &self.covered {
             let (file, raw) = &covered.file;

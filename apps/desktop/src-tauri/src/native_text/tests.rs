@@ -2119,6 +2119,23 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
     assert!(parked.is_file() && !selector.exists());
     std::fs::rename(parked, &selector).unwrap();
     wait_for_original_vault().await;
+    let body = selector.with_file_name(
+        selector
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .replace("joined-member-selected", "joined-member-add"),
+    );
+    let parked_body = body.with_extension("held-for-test");
+    std::fs::rename(&body, &parked_body).unwrap();
+    assert_eq!(
+        removed_response(member_path.clone()).await,
+        serde_json::json!("Could not unlock the existing Chat V2 vault."),
+    );
+    assert!(parked_body.is_file() && selector.is_file() && !body.exists());
+    std::fs::rename(parked_body, body).unwrap();
+    wait_for_original_vault().await;
     assert_eq!(
         removed_response(member_path.clone()).await,
         serde_json::json!("This device was removed from this Chat V2 server."),
@@ -2130,7 +2147,7 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
         let catalog = member_path.join("chat-critical-namespaces.bin");
         let before = std::fs::read(&catalog).unwrap();
         let old_port = std::cell::Cell::new(0);
-        let open_retired_with_ui = |atoms| {
+        let open_retired_with_ui = |atoms, inspect_index| {
             let mut rng = OsCryptoRng;
             let registry = Registry::default();
             let storage = NativeTextJoinedStorage::open_for_native_startup(
@@ -2140,32 +2157,56 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                 boot::current_policy().unwrap(),
             )
             .unwrap();
-            old_port.set(storage.recovered_join_transport_data().unwrap().unwrap().1);
+            let retired_port = storage.recovered_join_transport_data().unwrap().unwrap().1;
+            old_port.set(retired_port);
             let (_lifetime, signal) = tokio::sync::watch::channel(false);
             let negative = catcoms_rt::RequestCancellation::new(signal, None);
-            let runtime = storage
-                .bind_recovered_native_runtime(OsCryptoRng, Box::new(SystemClock), &negative)
-                .map_err(|(_, error)| error)
-                .unwrap();
-            let NativeTextJoinedRecovery::Removed(retired) = runtime
-                .into_recovered_joined_membership(
-                    atoms,
-                    registry.ui_budget.clone(),
-                    &registry.sources.policy(),
-                    &negative,
-                )
-                .unwrap()
-            else {
+            let recovered = if inspect_index {
+                // This fixture must inspect a covered Index4 from the retired
+                // writer. Ordinary startup selects its replacement instead.
+                storage
+                    .bind_recovered_native_runtime(OsCryptoRng, Box::new(SystemClock), &negative)
+                    .map_err(|(_, error)| error)
+                    .unwrap()
+                    .into_recovered_joined_membership(
+                        atoms,
+                        registry.ui_budget.clone(),
+                        &registry.sources.policy(),
+                        &negative,
+                    )
+                    .unwrap()
+            } else {
+                let _unavailable_old_port = std::net::TcpListener::bind(("0.0.0.0", retired_port))
+                    .expect("an unrelated listener can own the retired A1 port");
+                storage
+                    .into_native_startup_membership(
+                        atoms,
+                        registry.ui_budget.clone(),
+                        &registry.sources.policy(),
+                        &negative,
+                        (OsCryptoRng, Box::new(SystemClock)),
+                        (OsCryptoRng, Box::new(SystemClock)),
+                    )
+                    .unwrap()
+            };
+            let NativeTextJoinedRecovery::Removed(retired) = recovered else {
                 panic!("a proven terminal row must retain retired storage only");
             };
+            assert!(
+                inspect_index || retired.removal_data().unwrap().is_some(),
+                "offline replay must never wait on the unavailable A1 TCP actor"
+            );
             (retired, registry.ui_budget.clone())
         };
         let open_retired = || {
-            open_retired_with_ui((
-                Arc::new(AtomicU64::new(1)),
-                Arc::new(AtomicU64::new(0)),
-                Arc::new(AtomicBool::new(false)),
-            ))
+            open_retired_with_ui(
+                (
+                    Arc::new(AtomicU64::new(1)),
+                    Arc::new(AtomicU64::new(0)),
+                    Arc::new(AtomicBool::new(false)),
+                ),
+                false,
+            )
             .0
         };
         let mut retired = open_retired();
@@ -2376,7 +2417,8 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
         let generation = Arc::new(AtomicU64::new(1));
         let authorized = Arc::new(AtomicU64::new(1));
         let lock = Arc::new(AtomicBool::new(false));
-        let open = || open_retired_with_ui((generation.clone(), authorized.clone(), lock.clone()));
+        let atoms = || (generation.clone(), authorized.clone(), lock.clone());
+        let open = || open_retired_with_ui(atoms(), false);
         let (mut retired, ui_budget) = open();
         timeout(Duration::from_secs(10), async {
             while retired.removal_data().unwrap().is_none() {
@@ -2692,7 +2734,7 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                 drop((local_ui, ui, candidate, reopened));
                 wait_for_original_vault().await;
 
-                let (mut cold, ui_budget) = open();
+                let (mut cold, ui_budget) = open_retired_with_ui(atoms(), covered_index.is_some());
                 timeout(Duration::from_secs(10), async {
                     while cold.removal_data().unwrap().is_none() {
                         SystemClock.sleep(Duration::from_millis(10)).await;
