@@ -267,6 +267,9 @@ impl PreparedPinnedPending {
         identity: ([u8; 32], Option<JoinedTransportReservation>),
         rng: &mut impl CryptoRngCore,
     ) -> Result<Self, AppError> {
+        if source.rejoin_remove_data().is_some() {
+            return Err(refused());
+        }
         let (original_pending, transport) = identity;
         let packet =
             V2JoinRequestPacketData::decode(source.request_bytes_data()).map_err(|_| refused())?;
@@ -401,6 +404,9 @@ impl RecoveredPinnedPending {
             limits,
         )
         .map_err(|_| refused())?;
+        if pending.rejoin_remove_data().is_some() {
+            return Err(refused());
+        }
         Ok(Self {
             original: fields.original,
             candidate: fields.candidate,
@@ -425,6 +431,9 @@ impl RecoveredPinnedPending {
             .sealed
             .restore_native_pre_welcome(key, fields.context, &fields.accepted, limits, native)
             .map_err(|_| refused())?;
+        if source.rejoin_remove_data().is_some() {
+            return Err(refused());
+        }
         Ok(PreparedPinnedPending {
             source,
             context: fields.context,

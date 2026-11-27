@@ -27,7 +27,6 @@ pub use operational::NativeTextFounderDependencyProvider;
 pub use operational::NativeTextInvitePublication;
 pub use operational::NativeTextJoinedRequestPreparation;
 pub use operational::NativeTextJoinedRowSelection;
-pub use operational::NativeTextJoinedRuntime;
 pub use operational::NativeTextJoinedVaultUpgrade;
 pub use operational::{
     NativeCreationStateData, NativeCreationStatusData, NativeIndexPolicy, NativeIndexStore,
@@ -80,6 +79,9 @@ pub use operational::{
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
 };
 pub use operational::{NativeTextJoinedMemberFinalPreparation, NativeTextJoinedMemberSaveJob};
+pub use operational::{
+    NativeTextJoinedRecovery, NativeTextJoinedRuntime, NativeTextRemovedJoinedVault,
+};
 pub use preparation::{
     NativeRegistryInstallation, NativeRegistryPolicy, NativeRegistryPreparationPolicy,
     NativeRegistryStore, PreparedNativeRegistryMigration,

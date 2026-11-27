@@ -40,7 +40,7 @@ impl NativeRowBudget {
 }
 const FAILED: &str = "Vault startup did not complete. Its files have been kept.";
 
-fn current_policy() -> Result<V2CurrentLayoutPolicy, catcoms_app::AppError> {
+pub(super) fn current_policy() -> Result<V2CurrentLayoutPolicy, catcoms_app::AppError> {
     // Independent logical accounts, not allocated heaps or available disk.
     // Execution configuration is needed by the subsequent actual founder path;
     // DATA grammar alone must never be mistaken for permission to execute it.
@@ -179,7 +179,12 @@ impl Bootstrap {
                                         &source_policy,
                                         &negative,
                                     )
-                                    .map_err(|_| EXISTING)?;
+                                    .map_err(|error| match error {
+                                        catcoms_app::AppError::ChatV2MembershipRemoved => {
+                                            "This device was removed from this Chat V2 server."
+                                        }
+                                        _ => EXISTING,
+                                    })?;
                                 super::sources::ReadyBundle::recovered(
                                     vault,
                                     sources,

@@ -18,9 +18,10 @@ type RecoveredFounderInput = (
     crate::store::RetainedBootstrapSourceData,
     (catcoms_rt::PeerId, u16),
 );
+#[cfg(test)]
+use crate::store::critical_namespaces::shared_history_namespace::Opening;
 use crate::store::critical_namespaces::{
     native_registry::preparation::NativeRegistryHandler, pending_join_codec as grammar,
-    shared_history_namespace::Opening,
 };
 use crate::store::persistence::governance_layout::joined::{
     AcceptedFirstJoin, JoinedPendingIo, JoinedPinOpening,
@@ -482,6 +483,58 @@ impl Store {
         self.physical.require_registered_native_join(data)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn require_recovered_native_join_removal(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+        removal: catcoms_sync::SelectedRejoinRemoval,
+    ) -> Result<(), AppError> {
+        self.physical
+            .require_recovered_native_join_removal(data, removal)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_retired_rejoin_catalog(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+        removal: catcoms_sync::SelectedRejoinRemoval,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<
+        crate::store::persistence::governance_layout::joined::rejoin::RejoinCatalogPreparation,
+        AppError,
+    > {
+        self.physical
+            .prepare_retired_rejoin_catalog(data, removal, rng)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn require_original_rejoin_catalog(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+        removal: catcoms_sync::SelectedRejoinRemoval,
+        prepared: &crate::store::persistence::governance_layout::joined::rejoin::RejoinCatalogPreparation,
+    ) -> Result<(), AppError> {
+        self.physical
+            .require_original_rejoin_catalog(data, removal, prepared)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn rejoin_catalog_selected(
+        &self,
+    ) -> Result<bool, AppError> {
+        self.physical.rejoin_catalog_selected()
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn stage_retired_rejoin_catalog(
+        &self,
+        prepared: &mut crate::store::persistence::governance_layout::joined::rejoin::RejoinCatalogPreparation,
+    ) -> Result<(), AppError> {
+        self.physical.stage_retired_rejoin_catalog(prepared)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn select_retired_rejoin_catalog(
+        &self,
+        prepared: &mut crate::store::persistence::governance_layout::joined::rejoin::RejoinCatalogPreparation,
+    ) -> Result<(), AppError> {
+        self.physical.select_retired_rejoin_catalog(prepared)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn prepare_recovered_native_join_tcp(
         &self,
         data: &crate::store::NativeTextJoinedRegistrationData,
@@ -541,7 +594,7 @@ impl Store {
             crate::store::persistence::governance_layout::joined::JoinedRuntimeInputs<T, R>,
         >,
         output: &mut Option<catcoms_sync::ClosedV2JoinedNode<T, R>>,
-    ) -> Result<(), AppError> {
+    ) -> Result<Option<catcoms_sync::SelectedRejoinRemoval>, AppError> {
         let physical = Arc::get_mut(&mut self.physical).ok_or_else(refused)?;
         physical.attach_recovered_joined_node(inputs, output)
     }
@@ -728,9 +781,7 @@ impl Store {
             ColdOpening::SelectedSharedHistory => {
                 handler = handler.with_shared_history_layout(Opening::Required)
             }
-            ColdOpening::NativeStartup => {
-                handler = handler.with_shared_history_layout(Opening::Optional)
-            }
+            ColdOpening::NativeStartup => handler = handler.with_rejoin_startup(),
             _ => {}
         }
         let physical = physical::Physical::allocate(handler.clone());
@@ -752,6 +803,12 @@ impl Store {
             .expect("unexposed original governed physical")
             .install(current);
         let count = value.row_count_data()?;
+        if matches!(opening, ColdOpening::NativeStartup)
+            && value.physical.rejoin_catalog_selected()?
+            && count != 1
+        {
+            return Err(refused());
+        }
         let joined = match (opening, count) {
             (ColdOpening::IdleJoined, 0) => JoinedPinOpening::Idle,
             (ColdOpening::NativeStartup, 0) => JoinedPinOpening::NativeWithoutRow,

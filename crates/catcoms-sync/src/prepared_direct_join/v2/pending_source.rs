@@ -1,5 +1,6 @@
 //! Seal the original private KeyPackage provider under the exact joined pin.
 catcoms_rt::redacted_debug! {
+    NativeV2RejoinInputs<'_>;
     V2PendingJoinContextData;
     SealedV2PendingJoinSource;
     RecoveredV2PendingJoinSource;
@@ -9,10 +10,12 @@ use super::*;
 
 const TAG: &[u8] = b"catcoms/private-chat-v2-pending-join-source/v1\0";
 const VERSION: u16 = 1;
+const REJOIN_VERSION: u16 = 2;
+const REMOVE_BYTES: usize = 2 * 36 + 8;
 const KEY_DOMAIN: &str = "catcoms/private-chat-v2-pending-join-source-key/v1";
 const MAX_MASTER: usize = 512 * 1024;
-const MAX_PLAIN: usize =
-    4 + TAG.len() + 2 + 4 * 36 + 8 + MAX_V2_JOIN_REQUEST_PACKET_BYTES + MAX_MASTER;
+const FIXED_BYTES: usize = 4 + TAG.len() + 2 + 4 * 36 + 8;
+const MAX_PLAIN: usize = FIXED_BYTES + REMOVE_BYTES + MAX_V2_JOIN_REQUEST_PACKET_BYTES + MAX_MASTER;
 
 mod joined_outcome;
 pub use joined_outcome::{RecoveredV2JoinedOutcome, SealedV2JoinedOutcome};
@@ -37,6 +40,38 @@ impl V2PendingJoinContextData {
         }
         Ok(())
     }
+}
+
+/// The precise terminal candidate already checked by the mounted owner.
+pub type SelectedRejoinRemoval = (
+    catcoms_replication::chat::owner_header::OwnerHeaderId,
+    catcoms_replication::chat::owner_facts::OwnerFactId,
+    u64,
+);
+
+fn require_removal_coordinates(removed: SelectedRejoinRemoval) -> Result<(), SyncError> {
+    if removed.0.as_bytes() == &[0; 32]
+        || removed.1.as_bytes() == &[0; 32]
+        || !(2..MAX_V2_GOVERNING_JOIN_STEPS as u64).contains(&removed.2)
+    {
+        return Err(SyncError::JoinRejected);
+    }
+    Ok(())
+}
+
+/// Coordinates supplied by the mounted rejoin owner after proving that
+/// the original Admission was removed. Its storage and membership evidence
+/// must stay current until the new Pending is durable.
+pub struct NativeV2RejoinInputs<'a> {
+    pub previous_invite: &'a SignedInviteBindingData,
+    pub previous_context: V2PendingJoinContextData,
+    pub previous_request: &'a [u8],
+    pub previous_signer: [u8; 32],
+    pub previous_remove: SelectedRejoinRemoval,
+    pub invite: &'a SignedInviteBindingData,
+    pub token: [u8; 32],
+    pub now_ms: u64,
+    pub limits: DirectJoinLimits,
 }
 
 pub struct SealedV2PendingJoinSource {
@@ -89,6 +124,64 @@ impl SealedV2PendingJoinSource {
         Ok(original)
     }
 
+    /// Build a fresh request from only the original signing identity.
+    /// This uses the new Source's JoinerDevice cut and returns a private
+    /// request that can complete only its own KeyPackage and Welcome. The
+    /// App owner must separately prove the selected Remove and fenced
+    /// namespace before entry and prove ancestry before publishing A2.
+    pub fn prepare_native_rejoin(
+        &self,
+        key: &[u8; 32],
+        input: NativeV2RejoinInputs<'_>,
+        mut native: NativeV2JoinKeyEntry<'_>,
+    ) -> Result<PreparedV2JoinRequest, SyncError> {
+        let NativeV2RejoinInputs {
+            previous_invite,
+            previous_context,
+            previous_request,
+            previous_signer,
+            previous_remove,
+            invite,
+            token,
+            now_ms,
+            limits,
+        } = input;
+        previous_context.validate()?;
+        require_removal_coordinates(previous_remove)?;
+        let old = previous_invite.spec_data();
+        require_first_invite(&old.anchor, invite, token, now_ms)?;
+        let packet = V2JoinRequestPacketData::decode(previous_request)?;
+        let old_request = packet.request.spec_data();
+        if packet.invite.encode() != previous_invite.encode()
+            || previous_request.len() > limits.exchange
+            || old_request.joiner != previous_signer
+            || old_request.request_token == token
+            || old.nonce == invite.spec_data().nonce
+            || old.policy != invite.spec_data().policy
+        {
+            return Err(SyncError::JoinRejected);
+        }
+
+        native.enter(NativeChatKeyPurpose::JoinerDevice)?;
+        let original = self.decode_source(key, previous_context, previous_invite, limits)?;
+        if original.request_bytes_data() != previous_request {
+            return Err(SyncError::JoinRejected);
+        }
+        // The caller funds the bounded decrypt/restore overlap and the
+        // named 32 KiB one-signer SDK challenge before issuing the cut.
+        let isolated = catcoms_mls::persist::restore_join_signer_only_bounded(
+            &original.master,
+            &previous_signer,
+            (limits.provider, limits.backing),
+        )?;
+        drop(original);
+        let mut request =
+            PreparedV2JoinRequest::prepare(isolated, &old.anchor, invite, token, now_ms, limits)?;
+        request.native_origin = Some(native.original.clone());
+        request.rejoin_remove = Some(previous_remove);
+        Ok(request)
+    }
+
     fn decode_source(
         &self,
         key: &[u8; 32],
@@ -101,14 +194,42 @@ impl SealedV2PendingJoinSource {
         let plain = Zeroizing::new(unseal(&key, &self.blob).map_err(|_| SyncError::Malformed)?);
         let mut d = Decoder::new(&plain);
         let malformed = |_| SyncError::Malformed;
-        if d.get_bytes().map_err(malformed)? != TAG || d.get_u16().map_err(malformed)? != VERSION {
+        if d.get_bytes().map_err(malformed)? != TAG {
             return Err(SyncError::Malformed);
         }
+        let version = d.get_u16().map_err(malformed)?;
         for value in expected.fields() {
             if d.get_bytes().map_err(malformed)? != value {
                 return Err(SyncError::JoinRejected);
             }
         }
+        let rejoin_remove = match version {
+            VERSION => None,
+            REJOIN_VERSION => {
+                use catcoms_replication::chat::{
+                    owner_facts::OwnerFactId, owner_header::OwnerHeaderId,
+                };
+                let head = d
+                    .get_bytes()
+                    .map_err(malformed)?
+                    .try_into()
+                    .map_err(|_| SyncError::Malformed)?;
+                let admission = d
+                    .get_bytes()
+                    .map_err(malformed)?
+                    .try_into()
+                    .map_err(|_| SyncError::Malformed)?;
+                let epoch = d.get_u64().map_err(malformed)?;
+                let selected = (
+                    OwnerHeaderId::from_bytes(head),
+                    OwnerFactId::from_bytes(admission),
+                    epoch,
+                );
+                require_removal_coordinates(selected)?;
+                Some(selected)
+            }
+            _ => return Err(SyncError::Malformed),
+        };
         let request = d.get_bytes().map_err(malformed)?;
         let master = d.get_bytes().map_err(malformed)?;
         d.finish().map_err(malformed)?;
@@ -131,6 +252,7 @@ impl SealedV2PendingJoinSource {
             welcome_entered: false,
             warm_sdk_payment: None,
             native_origin: None,
+            rejoin_remove,
             completed: None,
             sealed_source: None,
             sealed_outcome: None,
@@ -142,6 +264,11 @@ impl SealedV2PendingJoinSource {
 }
 
 impl PreparedV2JoinRequest {
+    /// The original Remove this request must prove in every Welcome.
+    pub fn rejoin_remove_data(&self) -> Option<SelectedRejoinRemoval> {
+        self.rejoin_remove
+    }
+
     /// Freeze one exact ciphertext before any local Welcome SDK entry. Only
     /// the mounted journal can authorize a later resume from these bytes.
     pub fn seal_pending_source(
@@ -162,15 +289,25 @@ impl PreparedV2JoinRequest {
             {
                 return Err(SyncError::Malformed);
             }
-            let length = MAX_PLAIN - MAX_V2_JOIN_REQUEST_PACKET_BYTES - MAX_MASTER
+            let length = FIXED_BYTES
                 + self.request.len()
-                + self.master.len();
+                + self.master.len()
+                + self.rejoin_remove.map_or(0, |_| REMOVE_BYTES);
             let malformed = |_| SyncError::Malformed;
             let mut e = Encoder::with_capacity(length);
             e.put_bytes(TAG).map_err(malformed)?;
-            e.put_u16(VERSION);
+            e.put_u16(if self.rejoin_remove.is_some() {
+                REJOIN_VERSION
+            } else {
+                VERSION
+            });
             for field in expected.fields() {
                 e.put_bytes(field).map_err(malformed)?;
+            }
+            if let Some((head, admission, epoch)) = self.rejoin_remove {
+                e.put_bytes(head.as_bytes()).map_err(malformed)?;
+                e.put_bytes(admission.as_bytes()).map_err(malformed)?;
+                e.put_u64(epoch);
             }
             e.put_bytes(&self.request).map_err(malformed)?;
             let mut plain = Zeroizing::new(e.finish());
@@ -196,6 +333,7 @@ pub struct RecoveredV2PendingJoinSource {
     request: Bytes,
     limits: DirectJoinLimits,
     outcome_parent: [u8; 32],
+    rejoin_remove: Option<SelectedRejoinRemoval>,
 }
 
 impl RecoveredV2PendingJoinSource {
@@ -211,6 +349,7 @@ impl RecoveredV2PendingJoinSource {
             request: original.request,
             limits,
             outcome_parent: joined_outcome::parent_data(sealed),
+            rejoin_remove: original.rejoin_remove,
         })
     }
 
@@ -218,12 +357,26 @@ impl RecoveredV2PendingJoinSource {
         &self.request
     }
 
+    /// Terminal coordinates committed with this exact Pending. The physical
+    /// rejoin owner must compare them with its replayed removal.
+    pub fn rejoin_remove_data(&self) -> Option<SelectedRejoinRemoval> {
+        self.rejoin_remove
+    }
+
     pub fn validate_first_join_delivery_data(&self, bytes: &[u8]) -> Result<(), SyncError> {
+        if self.rejoin_remove.is_some() {
+            return Err(SyncError::JoinRejected);
+        }
         super::welcome::validate_delivery_data(&self.request, self.limits, bytes)
     }
 
     pub fn validate_pinned_join_delivery_data(&self, bytes: &[u8]) -> Result<(), SyncError> {
-        super::welcome::validate_pinned_delivery_data(&self.request, self.limits, bytes)
+        super::welcome::validate_pinned_delivery_data(
+            &self.request,
+            self.limits,
+            bytes,
+            self.rejoin_remove,
+        )
     }
 }
 

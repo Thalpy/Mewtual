@@ -641,6 +641,43 @@ work.
 Add and Remove check the same membership epoch bound as cold replay before
 covering a successor intent. Both writers can select epoch 64.
 
+## Rejoin in the original member vault
+
+Cold recovery distinguishes a selected removal of this device from an
+incomplete journal. It replays the original joined admission and requires
+the exact durable Remove selector before reporting that the device was
+removed. A missing or conflicting selector refuses restart without
+authorizing a new join.
+
+The isolated MLS donor opens the bounded original Pending provider under a
+new native device cut and creates a provider containing only its original
+signer. The next signed request uses a fresh invitation nonce, request
+token and KeyPackage. The old Welcome remains bound to its original private package. The
+Windows Sync fixture completed the replacement Welcome with the new Native
+Source and restored its sealed Outcome. The desktop still needs the
+mounted rejoin route.
+
+The retired owner prepares one authenticated namespace 9 catalog after its
+original TCP actor drains. It holds the original mount, file identities
+and reservation through retries. Staging writes only the private rejoin
+candidate. A cold retired owner can authenticate and reuse the complete
+candidate, and a partial file is preserved for recovery. Global JOIN Stage
+must stay absent. Selection checks the original Remove and file roles,
+renames the exact private Stage into Current, then syncs the selected
+file and original vault directory. Repeating an uncertain selection
+requires the same held file at Current and the same A1 records.
+Ordinary readers refuse a selected namespace 9. Native startup accepts
+the selected catalog only with an authenticated retired row while the
+replacement journals are absent. The original mount retires before that
+cold open. Neither step grants replacement key custody.
+
+Production rejoin still needs a new native key cut and covered per-
+incarnation journals. The new admission must descend from the exact
+selected removal. The registry successor must retain the old row and its
+original receipt and select exactly one new active row. Saved outbox originals are preserved. Pending work
+under the retired admission keeps its original scope. Physical deployment,
+crash recovery and same-vault activation remain open.
+
 ## Acceptance before enabling
 
 The Chat V2 integration workflow runs focused desktop membership checks on

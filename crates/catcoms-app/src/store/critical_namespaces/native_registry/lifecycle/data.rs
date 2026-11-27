@@ -78,6 +78,17 @@ pub(super) struct JoinedBinding {
     pub(super) local_display: Option<String>,
 }
 
+impl JoinedBinding {
+    fn same_device_group(&self, other: &Self) -> bool {
+        self.vault == other.vault
+            && self.layout == other.layout
+            && self.group == other.group
+            && self.signer == other.signer
+            && self.profile == other.profile
+            && self.pin == other.pin
+    }
+}
+
 #[derive(PartialEq, Eq)]
 pub(super) enum Backend {
     Legacy {
@@ -181,6 +192,12 @@ impl Index {
     /// Bound structure before encoding/copying, under the physical owner's
     /// complete selected/candidate/frame/metadata payment. No SDK proof occurs.
     pub(super) fn validate_data(&self) -> Result<(), AppError> {
+        self.validate_data_in(false)
+    }
+
+    // Only the rejoin-specific reader can widen the native row grammar. The
+    // ordinary reader keeps failing closed even if given already-decoded data.
+    pub(super) fn validate_data_in(&self, rejoin: bool) -> Result<(), AppError> {
         if self.origin.generation == 0
             || self.generation == 0
             || (self.generation == 1) != self.parent.is_none()
@@ -190,6 +207,7 @@ impl Index {
         }
         let mut previous = None;
         let mut native_joined = false;
+        let mut previous_joined = None;
         let mut identities = Vec::with_capacity(self.rows.len());
         let mut invocations = Vec::with_capacity(self.rows.len());
         for row in &self.rows {
@@ -239,11 +257,26 @@ impl Index {
                     return Err(refused());
                 }
                 if birth.kind.is_native_joined() {
-                    if native_joined || row.is_dm || !matches!(row.backend, Backend::Joined { .. })
-                    {
+                    if native_joined || row.is_dm {
                         return Err(refused());
                     }
-                    native_joined = true;
+                    let binding = match &row.backend {
+                        Backend::Joined { binding, .. } => {
+                            native_joined = true;
+                            binding
+                        }
+                        Backend::RetiredJoined { binding, .. } if rejoin => binding,
+                        _ => return Err(refused()),
+                    };
+                    if rejoin {
+                        if previous_joined.is_some_and(|old: &JoinedBinding| {
+                            !old.same_device_group(binding)
+                                || old.joined_epoch >= binding.joined_epoch
+                        }) {
+                            return Err(refused());
+                        }
+                        previous_joined = Some(binding);
+                    }
                 }
                 invocations.push(birth.invocation);
             }
@@ -298,6 +331,9 @@ impl Index {
                     }
                 }
             }
+        }
+        if previous_joined.is_some() && !native_joined {
+            return Err(refused());
         }
         if self.generation == 1
             && self.origin.generation == 1
@@ -464,5 +500,7 @@ impl Index {
     }
 }
 
+#[cfg(test)]
+mod rejoin;
 #[cfg(test)]
 mod tests;

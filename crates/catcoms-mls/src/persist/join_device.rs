@@ -2,6 +2,8 @@
 //! group and supplies no Fresh/Current/Saved witness. Only a real authenticated selected-KP
 //! Welcome can complete the separate prepared join. The provider budget is not SDK heap admission.
 use super::*;
+use crate::proto;
+use tls_codec::Size;
 
 const TAG: &str = "catcoms/private-prejoin-device/v1";
 
@@ -87,6 +89,47 @@ pub fn restore_join_device_provider_bounded(
     Ok(device)
 }
 
+/// Restore only the expected signer into a clean provider for a same-vault
+/// rejoin. The authenticated original pre-join provider may contain private
+/// KeyPackages. None of those records are copied to the new device.
+/// The caller must hold the original sealed source and the newly authorized
+/// native key operation. Pay for both providers and the existing
+/// FOUNDER_INPUT_PRIVATE_INVOICE, which includes a fixed challenge signature
+/// and the canonical signer-only storage check.
+pub fn restore_join_signer_only_bounded(
+    source: &[u8],
+    expected: &[u8; 32],
+    (max_bytes, max_backing_bytes): (usize, usize),
+) -> Result<MlsDevice, MlsError> {
+    let original = restore_join_device_provider_bounded(source, max_bytes, max_backing_bytes)?;
+    // The isolated SDK store must not materialize a large malformed key
+    // record just to reject it when checking the canonical signer row.
+    const MAX_SIGNER_TLS: usize = 128;
+    if !original.retained_ed25519_key_matches(expected)
+        || original.signer().tls_serialized_len() > MAX_SIGNER_TLS
+    {
+        return Err(MlsError::Internal(
+            "rejoin signer differs from the original",
+        ));
+    }
+
+    let isolated = OpenMlsRustCrypto::default();
+    original.signer().store(isolated.storage()).map_err(proto)?;
+    // Retire the entire original private provider before any new package
+    // could use this isolated device. No provider or key bytes escape here.
+    drop(original);
+    let device = MlsDevice::restore(isolated, expected)?;
+    // The existing one-signer check proves the canonical SDK row and the
+    // real private/public pair without admitting any group operation.
+    device.preflight_fresh_founder_input()?;
+    drop(snapshot_join_device_bounded(
+        &device,
+        max_bytes,
+        max_backing_bytes,
+    )?);
+    Ok(device)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +155,46 @@ mod tests {
             assert!(joined.has_local_signer(&member.public_key_bytes()));
             assert_eq!(master.as_slice(), original.as_slice());
         }
+    }
+
+    #[test]
+    fn private_rejoin_isolates_the_original_signer_from_old_packages() {
+        let limits = (512 * 1024, 512 * 1024);
+        let founder = MlsDevice::generate().unwrap();
+        let mut group = ServerGroup::create(&founder).unwrap();
+        let a1 = MlsDevice::generate().unwrap();
+        let signer: [u8; 32] = a1.public_key_ref().try_into().unwrap();
+        let first_nonce = [17; 16];
+        let second_nonce = [18; 16];
+        let old_package = a1
+            .key_package_for_invite(&group.group_id(), first_nonce)
+            .unwrap();
+        let old_ref = a1.key_package_reference(&old_package).unwrap();
+        let master = snapshot_join_device_bounded(&a1, limits.0, limits.1).unwrap();
+        let old_bytes = master.clone();
+        let old = group.add_member(&founder, old_package).unwrap();
+        group.remove_member(&founder, &a1.device_id()).unwrap();
+        assert!(restore_join_signer_only_bounded(&master, &[0; 32], limits).is_err());
+        assert!(restore_join_signer_only_bounded(&master, &signer, (1, limits.1)).is_err());
+
+        let a2 = restore_join_signer_only_bounded(&master, &signer, limits).unwrap();
+        assert_eq!(a1.device_id(), a2.device_id());
+        assert_eq!(a2.public_key_ref(), &signer);
+        assert!(ServerGroup::join_for_key_package(&a2, &old.welcome, &old_ref).is_err());
+        assert!(ServerGroup::join_for_key_package(&a1, &old.welcome, &old_ref).is_ok());
+        let fresh = a2
+            .key_package_for_invite(&group.group_id(), second_nonce)
+            .unwrap();
+        let fresh_ref = a2.key_package_reference(&fresh).unwrap();
+        assert_ne!(old_ref, fresh_ref);
+        let outcome = group.add_member(&founder, fresh).unwrap();
+        let successor =
+            ServerGroup::join_for_key_package(&a2, &outcome.welcome, &fresh_ref).unwrap();
+        assert_eq!(
+            successor.epoch_authenticator_id(),
+            group.epoch_authenticator_id()
+        );
+        assert_eq!(master.as_slice(), old_bytes.as_slice());
     }
 
     #[test]

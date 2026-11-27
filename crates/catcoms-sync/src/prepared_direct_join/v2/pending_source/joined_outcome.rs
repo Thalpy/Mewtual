@@ -210,7 +210,7 @@ impl RecoveredV2JoinedOutcome {
         let delivery = V2JoinDeliveryData::decode(delivery_bytes)?;
         let response = delivery.response_data();
         let anchor = &packet.invite.spec_data().anchor;
-        let admission = WelcomeAdmission::for_delivery(&delivery, anchor)?;
+        let admission = WelcomeAdmission::for_delivery(&delivery, anchor, pending.rejoin_remove)?;
         let ValidatedWelcome {
             binding: expected_binding,
             state,

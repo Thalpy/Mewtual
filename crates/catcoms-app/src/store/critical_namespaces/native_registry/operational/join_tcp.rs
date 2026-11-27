@@ -217,6 +217,18 @@ impl Transport {
             .ok_or_else(refused)
     }
 
+    /// Observe the original attached actor before the joined graph drops
+    /// its Service. The observer owns no physical vault or transport key.
+    pub(super) fn observe_attached_drain(&self) -> Result<catcoms_net::NativeTcpDrain, AppError> {
+        self.attempt
+            .try_lock()
+            .map_err(|_| refused())?
+            .as_ref()
+            .filter(|attempt| matches!(attempt.state, State::Attached))
+            .map(|attempt| attempt.original.observe_drain())
+            .ok_or_else(refused)
+    }
+
     pub(super) fn try_retire(&self) -> Result<bool, NativeTextSourceRetirementRefusal> {
         use NativeTextSourceRetirementRefusal as Error;
         let (service, drain) = {
@@ -286,5 +298,44 @@ impl Drop for Loan {
                 };
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn attached_join_transport_drain_survives_the_unpolled_original_actor() {
+        let seed = [73; 32];
+        let peer = catcoms_net::seeded_transport_identity_data(&seed)
+            .unwrap()
+            .phase0_peer_data();
+        let original = Arc::new(Transport::default());
+        // The test uses ephemeral listeners and does not need a real remote.
+        let mut loan = original
+            .checkout(
+                (peer, 0),
+                || {
+                    Ok((
+                        Zeroizing::new(seed),
+                        NativeTcpPreparation::new((), Arc::new(())),
+                    ))
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        let service = loan.take().unwrap();
+        loan.attached();
+        drop(loan);
+        let drain = original.observe_attached_drain().unwrap();
+        drop(service);
+        drop(original);
+        // No await has let the tracked actor acknowledge the original stop.
+        assert!(!drain.is_drained());
+        tokio::time::timeout(std::time::Duration::from_secs(5), drain.wait())
+            .await
+            .unwrap();
+        assert!(drain.is_drained());
     }
 }

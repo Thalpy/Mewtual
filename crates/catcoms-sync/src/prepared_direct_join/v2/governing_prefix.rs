@@ -170,6 +170,31 @@ impl<'a> V2GoverningJoinPrefixData<'a> {
         self.replay_successors(accepted, after_epoch)
     }
 
+    /// Verify a later admission against the exact terminal observation of
+    /// the previous admission. The caller separately proves that it held the
+    /// removed admission and that the Remove was selected in the vault.
+    pub fn verify_rejoin_ancestry(
+        &self,
+        accepted: &GenesisAnchorBindingData,
+        selected: (OwnerHeaderId, OwnerFactId),
+        removed: (OwnerHeaderId, OwnerFactId, u64),
+    ) -> Result<ReplayMath, SyncError> {
+        // The final step must be the selected A2 Add. Replaying the entire
+        // chain proves that the exact A1 Remove is an ancestor, even if
+        // other members joined or left between the two operations.
+        if selected.1 == removed.1
+            || !self.successors.iter().any(|(header, body)| {
+                matches!(body, BodyData::Removal(removal)
+                    if header.header().id() == removed.0
+                        && removal.spec().frozen_tip.context.admission == removed.1
+                        && removal.spec().after_epoch == removed.2)
+            })
+        {
+            return Err(SyncError::JoinRejected);
+        }
+        self.verify_selected_add(accepted, selected.0, selected.1)
+    }
+
     pub fn verify_selected_removal(
         &self,
         accepted: &GenesisAnchorBindingData,

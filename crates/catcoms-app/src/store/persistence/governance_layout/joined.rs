@@ -24,6 +24,7 @@ pub(in crate::store) enum JoinedPinOpening {
     NativeWithoutRow,
 }
 mod pending;
+pub(in crate::store) mod rejoin;
 pub(in crate::store) mod shared_history;
 pub(in crate::store) use pending::{
     AcceptedFirstJoin, AcceptedJoinTransport, JoinedPendingIo, JoinedRegistrationDependency,
@@ -88,7 +89,11 @@ struct ColdPendingCatalog {
 }
 
 impl ColdPendingCatalog {
-    fn require(&self, store: &ServerStore) -> Result<(), AppError> {
+    fn require_with_rejoin_catalog(
+        &self,
+        store: &ServerStore,
+        rejoin_catalog: Option<&rejoin::SelectedRejoinCatalog<'_>>,
+    ) -> Result<(), AppError> {
         validate_directory(store, &self.directory)?;
         absent(&fixed(store, false, governance::GOVERNANCE_SEED)?)?;
         absent(&fixed(
@@ -97,6 +102,9 @@ impl ColdPendingCatalog {
             critical_namespaces::Slot::Stage.name(),
         )?)?;
         let (file, raw) = &self.current;
+        if let Some(rejoin) = rejoin_catalog {
+            return rejoin.require_replaced_current(store, session_id(file).map_err(io)?, raw);
+        }
         exact_held(
             &fixed(store, false, critical_namespaces::Slot::Current.name())?,
             file,
@@ -134,10 +142,20 @@ impl SelectedPinIndex {
     }
 
     fn require(&self, store: &ServerStore) -> Result<(), AppError> {
+        self.require_with_rejoin_catalog(store, None)
+    }
+
+    fn require_with_rejoin_catalog(
+        &self,
+        store: &ServerStore,
+        rejoin_catalog: Option<&rejoin::SelectedRejoinCatalog<'_>>,
+    ) -> Result<(), AppError> {
         self.require_file(store)?;
         pending::require_pending_names(store, self.pending.as_ref())?;
         if let Some(catalog) = &self.cold_catalog {
-            catalog.require(store)?;
+            catalog.require_with_rejoin_catalog(store, rejoin_catalog)?;
+        } else if rejoin_catalog.is_some() {
+            return Err(denied());
         }
         Ok(())
     }
