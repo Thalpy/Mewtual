@@ -2352,11 +2352,14 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
         drop(retired);
         wait_for_original_vault().await;
         std::fs::remove_file(&stage).unwrap();
-        let (mut retired, catalog_budget) = open_retired_with_ui((
-            catalog_generation.clone(),
-            catalog_authorized.clone(),
-            catalog_lock.clone(),
-        ));
+        let (mut retired, catalog_budget) = open_retired_with_ui(
+            (
+                catalog_generation.clone(),
+                catalog_authorized.clone(),
+                catalog_lock.clone(),
+            ),
+            false,
+        );
         timeout(Duration::from_secs(10), async {
             while retired.removal_data().unwrap().is_none() {
                 SystemClock.sleep(Duration::from_millis(10)).await;
