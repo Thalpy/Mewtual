@@ -679,11 +679,12 @@ covered lookup can recover the original request even if the invite
 expired. A cold incomplete attempt is preserved. The original pin,
 registration, Welcome and Remove stay in place through this step.
 
-The new admission must descend from the exact selected removal. A2
-transport, its Welcome Entry and Outcome, Index4 selection and the native
-renderer route remain open. The registry successor must retain the old
-row and its receipt and select exactly one new active row. Saved outbox
-originals remain under their original scopes. Physical acceptance is open.
+The new admission descends from the exact selected removal. The retired
+owner can exchange the saved request over TCP and cover its Welcome,
+Outcome, signed prefix and Index4. The covered successor retains the old
+row and selects one replacement row. Saved outbox originals keep their
+original scopes. Live attachment, renderer rejoin, further same-device
+successors and physical acceptance remain open.
 
 ## Acceptance before enabling
 
