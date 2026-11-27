@@ -34,6 +34,11 @@ unavailable. ActionId cursors order each captured page independently of
 device timestamps. Refresh from the first page to include records whose
 IDs precede an earlier cursor.
 
+Cold founder invitation issuance can report that the native registry is
+busy. Retrying the same row and invocation at that parent uses the original
+journal and any already covered signature. An incomplete or unreadable
+journal still refuses issuance.
+
 Joined contact consent is optional on the native connect command. The
 original four-field request connects once. An explicit `remember` boolean
 can add a bounded, encrypted native approval. `forget_native_chat_contacts`

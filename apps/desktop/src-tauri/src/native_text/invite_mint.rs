@@ -109,7 +109,10 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                 .finish()
                 .map_err(|_| BUSY)?
                 .prepare_invite_publication(token, INVITE_LIFETIME_MS, negative)
-                .map_err(|_| FAILED)?;
+                .map_err(|error| match error {
+                    catcoms_app::store::V2MemberSaveRefusal::Busy => BUSY,
+                    _ => FAILED,
+                })?;
             let body = serde_json::to_string(&hex::encode(publication.packet_bytes_data()))
                 .map_err(|_| FAILED)?;
             Ok::<_, &'static str>((Box::new(publication), body, _payment))

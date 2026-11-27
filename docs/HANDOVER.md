@@ -29,10 +29,12 @@ Remove and two founder restarts, then confirmed the new Admission after
 another restart. Review identified lock placement, final file checks and
 payment tail defects. The corrected version runs the SDK outside Root and
 rechecks the actual invitation, journal and selector at the key and commit
-boundaries. The corrected Windows test passed in isolation. One combined
-run refused a cold invitation, so combined repeatability remains open.
-The alternate-provider Windows TCP case recovered the deepest reply and
-the offline author's edit and deletion within its 45-second bound.
+boundaries. The previous combined run reproduced a cold invitation that
+reported registry contention as a data error. The cold invite now asks
+for the same request again only when the actual registry cell is held.
+The Windows combined run then passed both the cold invitation replay and
+the alternate-provider case. The latter recovered the deepest reply and
+the offline author's edit and deletion within its original 45-second bound.
 The full frontend suite passed all 3,949 tests.
 
 Rejoin in the same member vault remains open. Chat V2 stays disabled.
