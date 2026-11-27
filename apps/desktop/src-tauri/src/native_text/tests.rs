@@ -1741,6 +1741,11 @@ async fn native_text_rejoin_activates_the_replacement_row_on_startup() {
     native_text_membership_removal_reopen(MembershipAfterRemove::RejoinActive).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_routes_same_vault_rejoin_and_drains_the_original_file_loan() {
+    native_text_membership_removal_reopen(MembershipAfterRemove::RejoinRouted).await;
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MembershipAfterRemove {
     Retired,
@@ -1752,6 +1757,124 @@ enum MembershipAfterRemove {
     RejoinPrefix,
     RejoinIndex,
     RejoinActive,
+    RejoinRouted,
+}
+
+async fn check_routed_rejoin(
+    path: PathBuf,
+    old_port: u16,
+    founder: (
+        &tauri::WebviewWindow<MockRuntime>,
+        &Queue,
+        &serde_json::Value,
+    ),
+    retired: &serde_json::Value,
+) {
+    let invite = command_value_after_busy(
+        founder.0,
+        founder.1,
+        "mint_invite_fresh",
+        invite_mint::BUSY,
+        serde_json::json!({"server":founder.2["server"],"expectedContext":founder.2["context"]}),
+    )
+    .await;
+    let args = serde_json::json!({"inviteHex":invite,"approvedHost":"127.0.0.1"});
+    for (first, expected) in [
+        (true, "restart-to-continue"),
+        (false, "restart-to-activate"),
+    ] {
+        let (app, main, queue) = app(path.clone(), None, true);
+        unlock_current(&app, &main, &queue).await;
+        let state = app.state::<AppState>();
+        assert!(ui_session_closed(&state));
+        assert!(retired_ui_current(
+            &state,
+            state.ui_session_generation.load(Ordering::SeqCst)
+        ));
+        if first {
+            let edge = AdmissionBarrier::new();
+            *state.native_text.rejoin_file_edge.lock().unwrap() = Some(edge.clone());
+            let old = invite_command(&main, "rejoin_server", args.clone());
+            let work = tokio::spawn(run(&queue));
+            timeout(Duration::from_secs(10), edge.arrived.notified())
+                .await
+                .unwrap();
+            assert!(state.store.lock().await.is_none());
+            let mut locked = invite_command(
+                &main,
+                "lock_session",
+                serde_json::json!({"uiStateJson":null}),
+            );
+            let locking = tokio::spawn(run(&queue));
+            timeout(Duration::from_secs(10), async {
+                while state.ui_session_generation.load(Ordering::SeqCst) == 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(matches!(
+                locked.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+            edge.release.notify_one();
+            work.await.unwrap();
+            locking.await.unwrap();
+            assert!(found_value(locked.await.unwrap())["continuity_error"].is_null());
+            refused(old.await.unwrap());
+            assert!(!path.join("chat-critical-namespaces.rejoin.stage").exists());
+            assert!(matches!(
+                state.store.lock().await.as_ref(),
+                Some(MountedVault::TextV2Retired(_))
+            ));
+            unlock_current(&app, &main, &queue).await;
+        } else {
+            let edge = AdmissionBarrier::new();
+            *state.native_text.rejoin_network_edge.lock().unwrap() = Some(edge.clone());
+            let old = invite_command(&main, "rejoin_server", args.clone());
+            let work = tokio::spawn(run(&queue));
+            timeout(Duration::from_secs(20), edge.arrived.notified())
+                .await
+                .unwrap();
+            assert!(matches!(
+                state.store.lock().await.as_ref(),
+                Some(MountedVault::TextV2Retired(_))
+            ));
+            let locked = invite_command(
+                &main,
+                "lock_session",
+                serde_json::json!({"uiStateJson":null}),
+            );
+            timeout(Duration::from_secs(10), run(&queue))
+                .await
+                .expect("lock does not join the original TCP reply");
+            assert!(found_value(locked.await.unwrap())["continuity_error"].is_null());
+            edge.release.notify_one();
+            work.await.unwrap();
+            refused(old.await.unwrap());
+            assert!(!path
+                .join("chat-critical-namespaces.rejoin-received.bin")
+                .exists());
+            unlock_current(&app, &main, &queue).await;
+        }
+        let reply = invite_command(&main, "rejoin_server", args.clone());
+        timeout(Duration::from_secs(60), run(&queue))
+            .await
+            .expect("real native rejoin cut");
+        assert_eq!(
+            found_value(reply.await.unwrap()),
+            serde_json::json!({"step":expected})
+        );
+        assert!(state.servers.lock().await.is_empty());
+        let close = register_vault_close(&state).await.unwrap();
+        sources::close_server_rows(&state, &SystemClock)
+            .await
+            .unwrap();
+        drop((close, state));
+        assert!(catcoms_storage::vault::acquire_vault_session(&path).is_ok());
+    }
+    let invite = hex::decode(invite.as_str().unwrap()).unwrap();
+    check_active_rejoin(path, old_port, founder, (retired, None, &invite)).await;
 }
 
 async fn check_active_rejoin(
@@ -1762,11 +1885,7 @@ async fn check_active_rejoin(
         &Queue,
         &serde_json::Value,
     ),
-    (retired, expected, invite): (
-        &serde_json::Value,
-        catcoms_app::store::NativeTextRejoinIndexReceipt,
-        &[u8],
-    ),
+    (retired, expected, invite): (&serde_json::Value, Option<u64>, &[u8]),
 ) {
     // Rejoining must work even if another process owns A1's old port.
     let _occupied_a1 = std::net::TcpListener::bind(("0.0.0.0", old_port)).unwrap();
@@ -1778,7 +1897,10 @@ async fn check_active_rejoin(
     let rows = result["servers"].as_array().unwrap();
     assert_eq!(rows.len(), 1);
     let active = &rows[0];
-    assert_eq!(active["server"].as_u64(), Some(expected.row.id));
+    let active_id = active["server"].as_u64().expect("a new registered row");
+    if let Some(expected) = expected {
+        assert_eq!(active_id, expected);
+    }
     assert_ne!(active["context"], retired["context"]);
     let old = native_send_request(&window, retired, 190, "The removed row cannot publish");
     let old_work = queue.lock().unwrap().pop();
@@ -1798,7 +1920,7 @@ async fn check_active_rejoin(
     );
     run(&queue).await;
     let returned = found_value(exact.await.unwrap());
-    assert_eq!(returned["server"].as_u64(), Some(expected.row.id));
+    assert_eq!(returned["server"].as_u64(), Some(active_id));
     assert_eq!(returned["context"], active["context"]);
 
     let post = native_send_request(&window, active, 191, "Saved by the replacement admission");
@@ -1881,7 +2003,7 @@ async fn check_active_rejoin(
         .await
         .expect("the covered A2 self-Remove publishes its terminal result")
         .unwrap();
-    assert_eq!(removed["server"].as_u64(), Some(expected.row.id));
+    assert_eq!(removed["server"].as_u64(), Some(active_id));
     assert_eq!(removed["context"], active["context"]);
     assert_eq!(removed["removed"], true);
 
@@ -2156,6 +2278,19 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
         .expect("the previous native TCP owner released the vault");
     };
     wait_for_original_vault().await;
+    if scenario == MembershipAfterRemove::RejoinRouted {
+        let original = catcoms_app::store::NativeTextJoinedStorage::open_for_native_startup(
+            &member_path,
+            SECRET.as_bytes(),
+            &mut OsCryptoRng,
+            boot::current_policy().unwrap(),
+        )
+        .unwrap();
+        let (_, port) = original.recovered_join_transport_data().unwrap().unwrap();
+        drop(original);
+        check_routed_rejoin(member_path, port, (&main, &founder_queue, &found), &joined).await;
+        return;
+    }
     let selector = std::fs::read_dir(&member_path)
         .unwrap()
         .find_map(|entry| {
@@ -2996,7 +3131,7 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
                             member_path.clone(),
                             old_port.get(),
                             (&main, &founder_queue, &found),
-                            (&joined, expected, &replacement_bytes),
+                            (&joined, Some(expected.row.id), &replacement_bytes),
                         )
                         .await;
                     }

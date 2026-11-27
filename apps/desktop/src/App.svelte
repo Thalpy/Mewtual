@@ -387,6 +387,11 @@
   let servers = $state<ServerState[]>([]);
   let chatBackend = $state<"legacy" | "text-v2" | null>(null);
   let nativeRejoinRequired = $state(false);
+  let rejoinInvite = $state("");
+  let rejoinHost = $state("");
+  let rejoinBusy = $state(false);
+  let rejoinNotice = $state("");
+  let rejoinRestart = $state(false);
   let nativeOriginals = $state.raw<NativeOriginal[]>([]);
   let nativeOwnMessages = $state.raw<Record<string, NativeOwnMessage>>({});
   let nativeOwnLoading = $state(false);
@@ -6916,6 +6921,7 @@
   // passphrase again. Re-entering calls `unlock`, which no-ops on an already-open vault and hands
   // back the registered servers, so no actor or transport is duplicated.
   function lockScreen(nativeAlreadyLocked = false) {
+    resetNativeRejoin();
     unlockAttempt += 1;
     unlocking = false;
     abortSummon();
@@ -7066,6 +7072,44 @@
     error = studioCaptureError;
     syncIntent = false;
     locked = true; // studio-exit: forced edge (lock, as above)
+  }
+
+  function resetNativeRejoin() {
+    rejoinInvite = "";
+    rejoinHost = "";
+    rejoinBusy = false;
+    rejoinNotice = "";
+    rejoinRestart = false;
+  }
+
+  async function submitNativeRejoin() {
+    if (locked || !nativeRejoinRequired || rejoinBusy || rejoinRestart || windowCloseInFlight) return;
+    const inviteHex = rejoinInvite.trim(), approvedHost = rejoinHost.trim();
+    if (!inviteHex || !approvedHost) return;
+    const generation = uiStateLoadGeneration;
+    const current = () => generation === uiStateLoadGeneration
+      && !locked && nativeRejoinRequired && !windowCloseInFlight;
+    rejoinBusy = true;
+    rejoinNotice = "";
+    try {
+      const response = await invoke<{step: unknown}>("rejoin_server", { inviteHex, approvedHost });
+      if (!current()) return;
+      if (response?.step === "restart-to-continue") {
+        rejoinNotice = "Reopen Mewtual, then enter the same invite to continue.";
+      } else if (response?.step === "restart-to-activate") {
+        rejoinNotice = "Reopen Mewtual to enter the group.";
+      } else {
+        throw new Error("Could not confirm the saved rejoin.");
+      }
+      rejoinRestart = true;
+      rejoinInvite = "";
+      rejoinHost = "";
+    } catch (error) {
+      if (current()) rejoinNotice = typeof error === "string" ? error
+        : error instanceof Error ? error.message : "Could not rejoin. Try the same invite again.";
+    } finally {
+      if (current()) rejoinBusy = false;
+    }
   }
 
   function resetNativeTextForLock() {
@@ -27951,6 +27995,14 @@
   {:else if nativeRejoinRequired}
     <section class="start gate" aria-label="Removed group membership">
       <h2>You were removed from this group</h2>
+      {#if !rejoinRestart}
+        <label class="field"><span>New invite</span><textarea bind:value={rejoinInvite} rows="3" disabled={rejoinBusy}></textarea></label>
+        <label class="field"><span>Founder’s IP address</span><input bind:value={rejoinHost} maxlength="45" autocomplete="off" disabled={rejoinBusy} /></label>
+        <button onclick={submitNativeRejoin} disabled={rejoinBusy || !rejoinInvite.trim() || !rejoinHost.trim()}>
+          {rejoinBusy ? "Rejoining…" : "Rejoin group"}
+        </button>
+      {/if}
+      {#if rejoinNotice}<p role="status">{rejoinNotice}</p>{/if}
       <button class="ghost" onclick={() => lockScreen()}>Lock vault</button>
     </section>
   {:else if !uiStateReady}

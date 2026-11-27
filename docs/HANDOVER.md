@@ -1,5 +1,19 @@
 # Mewtual; Handover
 
+## Rejoin from the retired native session
+
+The rejoin form passes a signed invite and the numeric IP that the user
+approves to the native retired session. The command covers the rejoin
+catalog and asks for a process reopen. Entering the same invite after
+that reopen can complete the replacement through its exact TCP and
+sealed local phases. The last reopen installs the selected membership.
+The command never retains a passphrase across network I/O.
+
+Lock waits for any previously admitted exact file loan and cancels
+the original network scope without joining it. Close drains the real
+replacement TCP listener. Later same-device successors, automatic
+restart and final acceptance remain open. Chat V2 stays disabled.
+
 ## Authenticate the retired rejoin catalog writer
 
 Retired-vault authentication binds the same physical mount and

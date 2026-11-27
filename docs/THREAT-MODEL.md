@@ -125,6 +125,15 @@ mounted owner and generation before replying. The same native lock
 invalidates both gates, and close waits for any original retired
 physical reader before dropping the vault.
 
+The main-window rejoin command requires the exact retired authorization
+and an explicitly approved numeric host. An admitted disk phase lends
+the original affine vault to a blocking worker and parks its exact return
+in a paid slot, including on unwind. Lock fences the generation before
+it waits for older file custody. The network phase restores the Store
+first and uses only the original cancellable TCP exchange. Irreversible
+close also waits for that operation and its actual TCP actor. Neither
+checkpoint receipt grants a live row.
+
 Cold founder startup can complete a fully staged later Add only after vault
 authentication and replay under the original pin. It retains and rechecks
 the named parent, archive, stage and each journal record against their
