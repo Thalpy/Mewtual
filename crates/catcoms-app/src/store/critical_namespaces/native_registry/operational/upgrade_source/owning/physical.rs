@@ -281,7 +281,7 @@ impl Physical {
         &self,
         data: crate::store::NativeTextJoinedRegistrationData,
     ) -> Result<(), AppError> {
-        self.with_registered_native_join(data, |_| Ok(()))
+        self.with_registered_native_join(data, |_, _| Ok(()))
     }
 
     pub(super) fn require_recovered_native_join_removal(
@@ -289,7 +289,7 @@ impl Physical {
         data: crate::store::NativeTextJoinedRegistrationData,
         removal: catcoms_sync::SelectedRejoinRemoval,
     ) -> Result<(), AppError> {
-        self.with_registered_native_join(data, |store| {
+        self.with_registered_native_join(data, |store, _| {
             store.require_recovered_joined_removal(data, removal)
         })
     }
@@ -383,10 +383,53 @@ impl Physical {
         prepared.select_catalog(self.current()?.checked_store()?)
     }
 
+    pub(super) fn cover_selected_rejoin_catalog(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+        removal: catcoms_sync::SelectedRejoinRemoval,
+    ) -> Result<[u8; 32], AppError> {
+        if !self.rejoin_catalog_selected()? {
+            return Err(refused());
+        }
+        self.with_registered_native_join(data, |store, inventory| {
+            store.cover_selected_rejoin_catalog(data, removal, inventory)
+        })
+    }
+
+    pub(super) fn cover_rejoin_pending(
+        &self,
+        original: (
+            crate::store::NativeTextJoinedRegistrationData,
+            catcoms_sync::SelectedRejoinRemoval,
+        ),
+        warm: &mut Option<
+            Box<crate::store::persistence::governance_layout::joined::rejoin::WarmRejoinPending>,
+        >,
+        request: (&crate::store::NativeTextInvitePacketData<'_>, [u8; 32], u64),
+        native: crate::store::persistence::governance_layout::joined::rejoin::RejoinKeyEntry<'_>,
+        rng: &mut impl CryptoRngCore,
+        require_current: impl Fn() -> Result<(), AppError>,
+    ) -> Result<crate::store::NativeTextRejoinPendingReceipt, AppError> {
+        if !self.rejoin_catalog_selected()? {
+            return Err(refused());
+        }
+        self.with_registered_native_join(original.0, |store, inventory| {
+            store.cover_rejoin_pending(
+                inventory,
+                original,
+                warm,
+                request,
+                native,
+                rng,
+                require_current,
+            )
+        })
+    }
+
     fn with_registered_native_join<T>(
         &self,
         data: crate::store::NativeTextJoinedRegistrationData,
-        require: impl FnOnce(&ServerStore) -> Result<T, AppError>,
+        require: impl FnOnce(&ServerStore, &UpgradeInventory) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
         let cell = self.cell.try_lock().map_err(|_| refused())?;
         cell.require_idle()?;
@@ -403,7 +446,7 @@ impl Physical {
         if store.recovered_join_registration_data()? != Some(data) {
             return Err(refused());
         }
-        let output = require(store)?;
+        let output = require(store, &inventory)?;
         inventory.require(store)?;
         Ok(output)
     }

@@ -157,6 +157,18 @@ pub(super) fn has_rejoin_descriptor(
     Ok(false)
 }
 
+/// Authenticate the entire selected ID9 dialect and bind further private
+/// records to this particular encrypted catalog.
+pub(in crate::store) fn selected_frame_digest(
+    key: &[u8; 32],
+    frame: &[u8],
+    domain: &[u8; 32],
+) -> Result<[u8; 32], AppError> {
+    let plain = open_framed_catalog(key, frame)?;
+    catalog::parse_rejoin_native_registry_layout(&plain, domain, true)?;
+    Ok(*blake3::hash(frame).as_bytes())
+}
+
 fn open_framed_catalog(key: &[u8; 32], frame: &[u8]) -> Result<Zeroizing<Vec<u8>>, AppError> {
     if !(41..=catalog::MAX_CATALOG_FRAMED).contains(&frame.len()) {
         return Err(refused());

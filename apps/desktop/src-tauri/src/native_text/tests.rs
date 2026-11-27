@@ -1696,7 +1696,7 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
         wait_for_original_vault().await;
         let catalog = member_path.join("chat-critical-namespaces.bin");
         let before = std::fs::read(&catalog).unwrap();
-        let open_retired = || {
+        let open_retired_with_ui = |atoms| {
             let mut rng = OsCryptoRng;
             let registry = Registry::default();
             let storage = NativeTextJoinedStorage::open_for_native_startup(
@@ -1714,11 +1714,7 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
                 .unwrap();
             let NativeTextJoinedRecovery::Removed(retired) = runtime
                 .into_recovered_joined_membership(
-                    (
-                        Arc::new(AtomicU64::new(1)),
-                        Arc::new(AtomicU64::new(0)),
-                        Arc::new(AtomicBool::new(false)),
-                    ),
+                    atoms,
                     registry.ui_budget.clone(),
                     &registry.sources.policy(),
                     &negative,
@@ -1727,7 +1723,15 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
             else {
                 panic!("a proven terminal row must retain retired storage only");
             };
-            retired
+            (retired, registry.ui_budget.clone())
+        };
+        let open_retired = || {
+            open_retired_with_ui((
+                Arc::new(AtomicU64::new(1)),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicBool::new(false)),
+            ))
+            .0
         };
         let mut retired = open_retired();
         let mut rng = OsCryptoRng;
@@ -1755,6 +1759,7 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
         }
         impl rand_core::CryptoRng for NeverRng {}
         let proof = retired.removal_data().unwrap().unwrap();
+        assert!(retired.cover_selected_rejoin_catalog().is_err());
         assert_eq!(proof.2, 2);
         assert_eq!(std::fs::read(&catalog).unwrap(), before);
         assert!(!member_path
@@ -1897,18 +1902,169 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
         let reopened = open_retired();
         timeout(Duration::from_secs(10), async {
             loop {
-                if let Some(data) = reopened.removal_data().unwrap() {
-                    assert_eq!(data, proof);
+                if let Some(covered) = reopened.cover_selected_rejoin_catalog().unwrap() {
+                    assert_eq!(covered, *blake3::hash(&bytes).as_bytes());
+                    assert_eq!(reopened.removal_data().unwrap(), Some(proof));
                     break;
                 }
                 SystemClock.sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("cold startup replays the original terminal A1 beneath ID9");
+        .expect("cold startup covers the original ID9 and retains only terminal A1");
+        let foreign = catalog.with_extension("held-cold-rejoin-for-test");
+        std::fs::rename(&catalog, &foreign).unwrap();
+        std::fs::write(&catalog, &bytes).unwrap();
+        assert!(reopened.cover_selected_rejoin_catalog().is_err());
+        std::fs::remove_file(&catalog).unwrap();
+        std::fs::rename(foreign, &catalog).unwrap();
+        assert_eq!(
+            reopened.cover_selected_rejoin_catalog().unwrap(),
+            Some(*blake3::hash(&bytes).as_bytes())
+        );
         assert_eq!(std::fs::read(&catalog).unwrap(), bytes);
         assert!(!stage.exists());
         drop(reopened);
+        wait_for_original_vault().await;
+
+        let replacement = command_value_after_busy(
+            &main,
+            &founder_queue,
+            "mint_invite_fresh",
+            invite_mint::BUSY,
+            serde_json::json!({"server": found["server"], "expectedContext": found["context"]}),
+        )
+        .await;
+        let replacement_bytes = hex::decode(replacement.as_str().unwrap()).unwrap();
+        let replacement = NativeTextInvitePacketData::decode(&replacement_bytes).unwrap();
+        let now = replacement.binding().spec_data().expires_at_ms - 1;
+        let generation = Arc::new(AtomicU64::new(1));
+        let authorized = Arc::new(AtomicU64::new(1));
+        let lock = Arc::new(AtomicBool::new(false));
+        let open = || open_retired_with_ui((generation.clone(), authorized.clone(), lock.clone()));
+        let (mut retired, ui_budget) = open();
+        timeout(Duration::from_secs(10), async {
+            while retired.removal_data().unwrap().is_none() {
+                SystemClock.sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut candidate = retired
+            .prepare_rejoin_ui(1, ui_budget.prepare().unwrap())
+            .finish()
+            .unwrap();
+        let old_ui = retired.admit_rejoin_ui(&mut candidate).unwrap();
+        let (_live, signal) = tokio::sync::watch::channel(false);
+        let caller = catcoms_rt::RequestCancellation::new(signal, None);
+        let attempt = member_path.join("chat-critical-namespaces.rejoin-attempt.bin");
+        let pending = member_path.join("chat-critical-namespaces.rejoin-pending.bin");
+        let inputs = (&replacement, [95; 32], now);
+        lock.store(true, Ordering::SeqCst);
+        assert!(retired
+            .cover_rejoin_pending(&old_ui, inputs, &caller, &mut NeverRng)
+            .is_err());
+        generation.store(2, Ordering::SeqCst);
+        authorized.store(2, Ordering::SeqCst);
+        lock.store(false, Ordering::SeqCst);
+        assert!(retired
+            .cover_rejoin_pending(&old_ui, inputs, &caller, &mut NeverRng)
+            .is_err());
+        assert!(!attempt.exists() && !pending.exists());
+        let mut candidate = retired
+            .prepare_rejoin_ui(2, ui_budget.prepare().unwrap())
+            .finish()
+            .unwrap();
+        let ui = retired.admit_rejoin_ui(&mut candidate).unwrap();
+        let saved = retired
+            .cover_rejoin_pending(&ui, inputs, &caller, &mut OsCryptoRng)
+            .unwrap()
+            .unwrap();
+        assert_ne!(saved.request_digest, [0; 32]);
+        let attempt_bytes = std::fs::read(&attempt).unwrap();
+        let pending_bytes = std::fs::read(&pending).unwrap();
+        for (path, expected) in [(&attempt, &attempt_bytes), (&pending, &pending_bytes)] {
+            let original = path.with_extension("held-rejoin-test");
+            std::fs::rename(path, &original).unwrap();
+            std::fs::write(path, expected).unwrap();
+            assert!(retired
+                .cover_rejoin_pending(&ui, inputs, &caller, &mut NeverRng)
+                .is_err());
+            assert_eq!(&std::fs::read(path).unwrap(), expected);
+            std::fs::remove_file(path).unwrap();
+            std::fs::rename(original, path).unwrap();
+        }
+        let warm = retired
+            .cover_rejoin_pending(
+                &ui,
+                (&replacement, [95; 32], u64::MAX),
+                &caller,
+                &mut NeverRng,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(warm.request_digest, saved.request_digest);
+        assert_eq!(warm.context, saved.context);
+        drop((old_ui, ui, candidate, retired));
+        wait_for_original_vault().await;
+
+        let (mut reopened, ui_budget) = open();
+        let mut candidate = reopened
+            .prepare_rejoin_ui(2, ui_budget.prepare().unwrap())
+            .finish()
+            .unwrap();
+        let ui = reopened.admit_rejoin_ui(&mut candidate).unwrap();
+        let exact = timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(receipt) = reopened
+                    .cover_rejoin_pending(
+                        &ui,
+                        (&replacement, [95; 32], u64::MAX),
+                        &caller,
+                        &mut NeverRng,
+                    )
+                    .unwrap()
+                {
+                    break receipt;
+                }
+                SystemClock.sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(exact.request_digest, saved.request_digest);
+        assert_eq!(exact.context, saved.context);
+        assert!(reopened
+            .cover_rejoin_pending(&ui, (&replacement, [96; 32], now), &caller, &mut NeverRng,)
+            .is_err());
+        for path in [&attempt, &pending] {
+            let original = path.with_extension("held-cold-rejoin-test");
+            std::fs::rename(path, &original).unwrap();
+            assert!(reopened
+                .cover_rejoin_pending(&ui, inputs, &caller, &mut NeverRng)
+                .is_err());
+            assert!(!path.exists());
+            std::fs::rename(original, path).unwrap();
+        }
+        let torn = &attempt_bytes[..attempt_bytes.len() / 2];
+        std::fs::write(&attempt, torn).unwrap();
+        assert!(reopened
+            .cover_rejoin_pending(&ui, inputs, &caller, &mut NeverRng)
+            .is_err());
+        assert_eq!(std::fs::read(&attempt).unwrap(), torn);
+        std::fs::write(&attempt, &attempt_bytes).unwrap();
+
+        let partial = &pending_bytes[..pending_bytes.len() / 2];
+        std::fs::write(&pending, partial).unwrap();
+        assert!(reopened
+            .cover_rejoin_pending(&ui, inputs, &caller, &mut NeverRng)
+            .is_err());
+        assert_eq!(std::fs::read(&pending).unwrap(), partial);
+        assert_eq!(std::fs::read(&attempt).unwrap(), attempt_bytes);
+        assert_eq!(std::fs::read(&catalog).unwrap(), bytes);
+        assert_eq!(std::fs::read(&selector).unwrap(), selector_bytes);
+        std::fs::write(&pending, pending_bytes).unwrap();
+        drop((ui, candidate, reopened));
         wait_for_original_vault().await;
     }
 

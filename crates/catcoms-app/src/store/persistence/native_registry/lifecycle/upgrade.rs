@@ -192,6 +192,9 @@ impl UpgradeInventory {
     pub(in crate::store) fn catalog(&self) -> &[u8] {
         self.base.catalog()
     }
+    pub(in crate::store) fn catalog_identity(&self) -> SessionId {
+        self.base.catalog.identity()
+    }
     pub(in crate::store) fn index(&self) -> &[u8] {
         self.base.index()
     }

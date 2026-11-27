@@ -666,17 +666,24 @@ must stay absent. Selection checks the original Remove and file roles,
 renames the exact private Stage into Current, then syncs the selected
 file and original vault directory. Repeating an uncertain selection
 requires the same held file at Current and the same A1 records.
-Ordinary readers refuse a selected namespace 9. Native startup accepts
-the selected catalog only with an authenticated retired row while the
-replacement journals are absent. The original mount retires before that
-cold open. Neither step grants replacement key custody.
+Ordinary readers refuse a selected namespace 9. Native startup recovers
+only the authenticated retired row while Index4 replacement is pending.
+The original mount retires before a fresh cold open. That owner covers
+the same selected catalog and authorizes a distinct UI-generation device
+cut for the replacement request.
 
-Production rejoin still needs a new native key cut and covered per-
-incarnation journals. The new admission must descend from the exact
-selected removal. The registry successor must retain the old row and its
-original receipt and select exactly one new active row. Saved outbox originals are preserved. Pending work
-under the retired admission keeps its original scope. Physical deployment,
-crash recovery and same-vault activation remain open.
+The private attempt file commits to the exact accepted native packet,
+request token and the A1 retirement in that catalog. A complete Pending
+retains a sealed replacement provider and transport reservation. Exact
+covered lookup can recover the original request even if the invite
+expired. A cold incomplete attempt is preserved. The original pin,
+registration, Welcome and Remove stay in place through this step.
+
+The new admission must descend from the exact selected removal. A2
+transport, its Welcome Entry and Outcome, Index4 selection and the native
+renderer route remain open. The registry successor must retain the old
+row and its receipt and select exactly one new active row. Saved outbox
+originals remain under their original scopes. Physical acceptance is open.
 
 ## Acceptance before enabling
 

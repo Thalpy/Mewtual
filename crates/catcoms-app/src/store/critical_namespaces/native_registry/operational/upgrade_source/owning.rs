@@ -528,6 +528,32 @@ impl Store {
         self.physical.stage_retired_rejoin_catalog(prepared)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn cover_selected_rejoin_catalog(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+        removal: catcoms_sync::SelectedRejoinRemoval,
+    ) -> Result<[u8; 32], AppError> {
+        self.physical.cover_selected_rejoin_catalog(data, removal)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn cover_rejoin_pending(
+        &self,
+        original: (
+            crate::store::NativeTextJoinedRegistrationData,
+            catcoms_sync::SelectedRejoinRemoval,
+        ),
+        warm: &mut Option<
+            Box<crate::store::persistence::governance_layout::joined::rejoin::WarmRejoinPending>,
+        >,
+        request: (&crate::store::NativeTextInvitePacketData<'_>, [u8; 32], u64),
+        native: crate::store::persistence::governance_layout::joined::rejoin::RejoinKeyEntry<'_>,
+        rng: &mut impl CryptoRngCore,
+        require_current: impl Fn() -> Result<(), AppError>,
+    ) -> Result<crate::store::NativeTextRejoinPendingReceipt, AppError> {
+        self.physical
+            .cover_rejoin_pending(original, warm, request, native, rng, require_current)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn select_retired_rejoin_catalog(
         &self,
         prepared: &mut crate::store::persistence::governance_layout::joined::rejoin::RejoinCatalogPreparation,

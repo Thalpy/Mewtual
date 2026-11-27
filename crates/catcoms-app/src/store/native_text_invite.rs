@@ -42,6 +42,7 @@ pub enum NativeTextInviteRecovery {
 /// Verified signature, policy and reservation relationships. No accepted pin,
 /// present membership, expiry, possession or permission to dial is implied.
 pub struct NativeTextInvitePacketData<'a> {
+    encoded: &'a [u8],
     binding: SignedInviteBindingData,
     policy: &'a [u8],
     reservation: &'a [u8],
@@ -76,6 +77,7 @@ impl<'a> NativeTextInvitePacketData<'a> {
         let binding = SignedInviteBindingData::decode(binding)?;
         let (peer, peer_address_id, tcp_port) = check_parts(&binding, policy, reservation)?;
         Ok(Self {
+            encoded: bytes,
             binding,
             policy,
             reservation,
@@ -83,6 +85,12 @@ impl<'a> NativeTextInvitePacketData<'a> {
             peer_address_id,
             tcp_port,
         })
+    }
+
+    /// The complete validated packet, including the exact authenticated
+    /// policy and transport reservation retained by a native attempt.
+    pub fn encoded_data(&self) -> &'a [u8] {
+        self.encoded
     }
 
     pub fn binding(&self) -> &SignedInviteBindingData {
