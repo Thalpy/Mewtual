@@ -460,7 +460,8 @@ impl V2FounderPrefixVerifier {
         view: &ProjectionView,
     ) -> Result<ProjectionAdmissionToken, ChatError> {
         self.verify_create_semantics(action)?;
-        if !view.life.live()
+        if view.life.local_archive
+            || !view.life.live()
             || view.life.realm != action.spec().realm.id()
             || !view
                 .life

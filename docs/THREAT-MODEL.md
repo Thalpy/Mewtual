@@ -4113,6 +4113,23 @@ first effect, while exact accepted/rejected history remains recoverable. Product
 protected roles, SDP transfer and live V2 remain open. Slot reservation or private Hello intake
 alone is not whole-chain progress, browser readiness, live signalling or media evidence.
 
+## Chat V2 archived originals after a Remove
+
+A selected device-local history receipt binds the exact original bytes, scope
+and author Admission. The mounted verifier checks its original selected
+governing prefix and retains each actual removal cut within the existing
+64-step membership bound. Archive display revalidates the signature and
+causal dependencies against that verifier. It publishes only after checking
+the captured archive observation and current native source again. A selected
+Delete remains hidden and its signed original is still available to the
+authorized local audit. A missing, changed or incomplete target fails the
+read.
+
+The archive view cannot sign or admit ordinary live effects. Local receipt
+selection does not establish when another device received an original.
+Remote originals under an obsolete Admission still require separate
+authorization evidence. Local outbox ancestry carries no display effect.
+
 ## Chat history admission and retained audit (20 October, continuation)
 
 Legacy operation ingress now refuses a 32-byte Automerge actor that differs from its verified

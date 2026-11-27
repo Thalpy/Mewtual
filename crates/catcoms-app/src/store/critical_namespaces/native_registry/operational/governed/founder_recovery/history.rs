@@ -203,7 +203,9 @@ impl NativeTextColdFounderSource {
     ) -> Result<Option<NativeTextJoinedMemberProjection>, AppError> {
         self.restore_first_add(caller)?;
         let scope = self.history_scope(channel)?;
-        let (verifier, group_view) = self.governed.as_ref().ok_or_else(refused)?.member_parts()?;
+        let governed = self.governed.as_ref().ok_or_else(refused)?;
+        let (verifier, group_view) = governed.member_parts()?;
+        let retired = governed.retired_member_history()?;
         let sdk = self.sdk.as_ref().ok_or_else(refused)?;
         let original = &self.source;
         let result =
@@ -232,7 +234,7 @@ impl NativeTextColdFounderSource {
                     )
                     .map_err(|_| refused())?;
                     let mut view = ledger
-                        .begin_projection_view_in(group_view)
+                        .begin_local_archive_projection_view_in(group_view)
                         .map_err(|_| refused())?;
                     if !view.try_ready() {
                         return Err(refused());
@@ -243,7 +245,7 @@ impl NativeTextColdFounderSource {
                         verifier,
                         caller: &signal,
                     }
-                    .replay_message(&mut ledger, &view, create, |id| {
+                    .replay_message(&mut ledger, &view, create, retired, |id| {
                         saved_dependency(store, self.outbox_context(), original, scope, id, rng)
                     })
                     .map_err(|_| refused())?;

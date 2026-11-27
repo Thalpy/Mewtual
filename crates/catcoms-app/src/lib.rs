@@ -172,6 +172,10 @@ pub enum AppError {
     /// journaled result, after this transient read refusal.
     #[error("Chat V2 registry is busy")]
     ChatV2RegistryBusy,
+    /// The caller can retry a received action when its bounded pending
+    /// archive change finally has room. No live mutation was admitted.
+    #[error("Chat V2 archive is busy")]
+    ChatV2ArchiveBusy,
     /// A product-layer validation error (e.g. an over-large avatar).
     #[error("{0}")]
     Invalid(String),

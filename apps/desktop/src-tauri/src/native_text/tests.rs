@@ -1523,6 +1523,158 @@ async fn native_text_cold_founder_finishes_a_complete_staged_add() {
     native_text_membership_removal_reopen(true, true).await;
 }
 
+struct RetainedRemovalHistory {
+    visible: serde_json::Value,
+    selected_edit: serde_json::Value,
+    deleted: serde_json::Value,
+    deleted_audit: serde_json::Value,
+}
+
+fn removal_history_args(
+    row: &serde_json::Value,
+    mut arguments: serde_json::Value,
+) -> serde_json::Value {
+    arguments["server"] = row["server"].clone();
+    arguments["channel"] = row["channel"].clone();
+    arguments["expectedContext"] = row["context"].clone();
+    arguments
+}
+
+async fn check_retained_removal_history(
+    window: &tauri::WebviewWindow<MockRuntime>,
+    queue: &Queue,
+    row: &serde_json::Value,
+    expected: &RetainedRemovalHistory,
+) {
+    for (action, text) in [
+        (&expected.visible, Some("edited before removal")),
+        (&expected.deleted, None),
+    ] {
+        for (key, scope) in [
+            ("archivedAction", "received-archive"),
+            ("receivedAction", "received-live"),
+        ] {
+            let mut args = serde_json::json!({});
+            args[key] = action.clone();
+            let result = command_value_after_busy(
+                window,
+                queue,
+                "get_message_page",
+                history::BUSY,
+                removal_history_args(row, args),
+            )
+            .await;
+            assert_eq!(result["scope"], scope);
+            if let Some(text) = text {
+                assert_eq!(&result["item"]["action"], action);
+                assert_eq!(result["item"]["text"], text);
+            } else {
+                assert!(result["item"].is_null());
+            }
+        }
+    }
+    let audit = command_value_after_busy(
+        window,
+        queue,
+        "get_message_page",
+        history::BUSY,
+        removal_history_args(
+            row,
+            serde_json::json!({"auditAction":expected.deleted,"auditAfter":null,"limit":8}),
+        ),
+    )
+    .await;
+    assert_eq!(audit["scope"], "selected-shared-history-audit");
+    assert_eq!(audit["items"], expected.deleted_audit);
+}
+
+async fn archive_originals_before_removal(
+    (founder_window, founder_queue, founder): (
+        &tauri::WebviewWindow<MockRuntime>,
+        &Queue,
+        &serde_json::Value,
+    ),
+    (member_window, member_queue, member): (
+        &tauri::WebviewWindow<MockRuntime>,
+        &Queue,
+        &serde_json::Value,
+    ),
+) -> RetainedRemovalHistory {
+    let mut targets = Vec::with_capacity(2);
+    let mut selected_edit = serde_json::Value::Null;
+    let mut deleted_audit = serde_json::Value::Null;
+    for (token, mutation, edited) in [
+        (51, "edit_message", Some("edited before removal")),
+        (53, "delete_message", None),
+    ] {
+        let create = command_value_after_busy(
+            member_window, member_queue, "send_message", sending::BUSY,
+            removal_history_args(member, serde_json::json!({
+                "retryToken":hex::encode([token;32]), "text":"original before removal", "replyTo":null,
+            })),
+        ).await;
+        let action = create["message_id"].clone();
+        let mut input = serde_json::json!({
+            "retryToken":hex::encode([token + 1;32]), "messageId":action, "expectedRevision":action,
+        });
+        if let Some(text) = edited {
+            input["text"] = text.into();
+        }
+        let revision = command_value_after_busy(
+            member_window,
+            member_queue,
+            mutation,
+            sending::BUSY,
+            removal_history_args(member, input),
+        )
+        .await;
+        assert_ne!(revision["message_id"], action);
+        let records = timeout(Duration::from_secs(30), async {
+            loop {
+                let audit = command_value_after_busy(
+                    founder_window,
+                    founder_queue,
+                    "get_message_page",
+                    history::BUSY,
+                    removal_history_args(
+                        founder,
+                        serde_json::json!({"auditAction":action,"auditAfter":null,"limit":8}),
+                    ),
+                )
+                .await;
+                if let Some(items) = audit["items"].as_array() {
+                    if items
+                        .iter()
+                        .any(|item| item["action"] == revision["message_id"])
+                    {
+                        assert_eq!(items.len(), 2);
+                        assert!(items.iter().any(|item| item["action"] == action));
+                        break audit["items"].clone();
+                    }
+                }
+                SystemClock.sleep(Duration::from_millis(35)).await;
+            }
+        })
+        .await
+        .expect("the founder selected the exact TCP Create and revision before Remove");
+        if edited.is_none() {
+            deleted_audit = records;
+        } else {
+            selected_edit = revision["message_id"].clone();
+        }
+        targets.push(action);
+    }
+    let [visible, deleted] = targets.try_into().unwrap();
+    let history = RetainedRemovalHistory {
+        visible,
+        selected_edit,
+        deleted,
+        deleted_audit,
+    };
+    check_retained_removal_history(founder_window, founder_queue, founder, &history).await;
+    history
+}
+
 async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_staged_add: bool) {
     use catcoms_app::store::NativeTextInvitePacketData;
     use tauri::Listener;
@@ -1584,6 +1736,60 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
         .find(|member| member["founder"] == false)
         .expect("the selected roster names the joined admission");
 
+    let retained_history = if !join_after_restart {
+        Some(
+            archive_originals_before_removal(
+                (&main, &founder_queue, &found),
+                (&window, &member_queue, &joined),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    if let Some(history) = &retained_history {
+        use catcoms_replication::chat::ActionId;
+        let selected = |value: &serde_json::Value| {
+            ActionId::from_bytes(membership::decode_exact_hex(value.as_str().unwrap()).unwrap())
+        };
+        let target = selected(&history.visible);
+        let edit = selected(&history.selected_edit);
+        let unresolved = ActionId::from_bytes([235; 32]);
+        let state = founder.state::<AppState>();
+        let work = state
+            .servers
+            .lock()
+            .await
+            .native(&found["server"].as_u64().unwrap())
+            .unwrap()
+            .data()
+            .member_work
+            .clone();
+        assert_eq!(work.reserve_archive_change(edit, target), Some(true));
+        assert_eq!(work.reserve_archive_change(unresolved, target), Some(true));
+        let incomplete = command_after_busy(
+            &main,
+            &founder_queue,
+            "get_message_page",
+            history::BUSY,
+            removal_history_args(
+                &found,
+                serde_json::json!({"receivedAction":history.visible}),
+            ),
+        )
+        .await;
+        let tauri::ipc::InvokeResponse::Err(error) = incomplete else {
+            panic!("one selected revision must not hide another unresolved revision");
+        };
+        assert_eq!(error.0, "A received change is waiting to be saved.");
+        let outstanding = work.unsettled_archive_changes(target).unwrap();
+        assert_eq!(
+            outstanding.into_iter().flatten().collect::<Vec<_>>(),
+            vec![unresolved]
+        );
+        work.settle_archive_change(unresolved, target);
+    }
+
     let (notice, selected_eviction) = oneshot::channel();
     member.once_any("chat-v2-membership", move |event| {
         let notice_data: serde_json::Value = serde_json::from_str(event.payload()).unwrap();
@@ -1617,6 +1823,9 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
         work.await;
     }
     refused(send.await.unwrap());
+    if let Some(history) = &retained_history {
+        check_retained_removal_history(&main, &founder_queue, &found, history).await;
+    }
 
     // Only the authenticated selected A1 Remove explains why this row
     // cannot be activated. An outcome with its selector removed is still
@@ -1926,6 +2135,9 @@ async fn native_text_membership_removal_reopen(join_after_restart: bool, repair_
         serde_json::json!({"server": found["server"], "expectedContext": found["context"]});
     let (reopened, main, queue) = app(founder_path.clone(), None, true);
     unlock_current(&reopened, &main, &queue).await;
+    if let Some(history) = &retained_history {
+        check_retained_removal_history(&main, &queue, &found, history).await;
+    }
     async fn mint(
         window: &tauri::WebviewWindow<MockRuntime>,
         queue: &Queue,
@@ -3206,9 +3418,9 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     let delete = catcoms_replication::chat::ActionId::from_bytes([247; 32]);
     {
         let _permit = work.foreground(scope.clone()).await.unwrap();
-        work.note_archive_change(edit, target, false);
-        work.note_archive_change(delete, target, false);
-        work.note_archive_change(edit, target, true);
+        assert_eq!(work.reserve_archive_change(edit, target), Some(true));
+        assert_eq!(work.reserve_archive_change(delete, target), Some(true));
+        work.settle_archive_change(edit, target);
     }
     let probe = command_after_busy(
         &joiner_window,
@@ -3224,7 +3436,7 @@ async fn native_text_connected_join_gated_route_publishes_one_original_joined_ro
     assert_eq!(error.0, "A received change is waiting to be saved.");
     {
         let _permit = work.foreground(scope).await.unwrap();
-        work.note_archive_change(delete, target, true);
+        work.settle_archive_change(delete, target);
     }
     drop(work);
     let probe = command_value_after_busy(

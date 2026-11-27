@@ -204,6 +204,9 @@ fn check_governed_member<T: MeshTransport, R: CryptoRngCore>(
 }
 
 const MEMBER_CHANNEL_LAYOUT_BYTES: usize = std::mem::size_of::<MemberChannel>() + 4 * 1024;
+const WARM_FOUNDER_LANE_BYTES: usize = V2_MEMBER_LANE_BYTES
+    + catcoms_sync::MAX_V2_GOVERNING_JOIN_STEPS
+        * catcoms_replication::chat::V2FrozenAdmission::retained_layout_bytes();
 
 /// Lane invoice, reserved BEFORE the lane/domain/capture/verifier allocations: the general
 /// verifier's replay math and named metadata, the bounded channel ledgers/views and finished
@@ -558,6 +561,7 @@ pub(super) struct V2MemberLane {
     requests: MemberRequests,
     channels: Vec<MemberChannel>,
     received: Option<FounderReceivedLedger>,
+    pub(super) retired_history: Vec<catcoms_replication::chat::V2FrozenAdmission>,
     verifier: Option<V2GeneralPrefixVerifier>,
     bound: Option<BoundV2TextFounderAnchor>,
     anchor: Option<V2TextFounderAnchorData>,
@@ -881,8 +885,8 @@ impl V2MemberLane {
             .ok_or_else(refused)?
             .pending
             .pool;
-        let fee = pool.try_reserve(V2_MEMBER_LANE_BYTES)?;
-        fee.validate(pool, V2_MEMBER_LANE_BYTES)?;
+        let fee = pool.try_reserve(WARM_FOUNDER_LANE_BYTES)?;
+        fee.validate(pool, WARM_FOUNDER_LANE_BYTES)?;
         // The member domain pays its own metadata and repeats original negatives across its
         // waits. Its role forbids minting the founder verifier on it, and vice versa.
         let domain = Arc::new(V2TextProjectionDomain::prepare_member(
@@ -902,6 +906,7 @@ impl V2MemberLane {
             requests: MemberRequests::new(),
             channels: Vec::with_capacity(MAX_MEMBER_CHANNELS),
             received: None,
+            retired_history: Vec::with_capacity(catcoms_sync::MAX_V2_GOVERNING_JOIN_STEPS),
             verifier: None,
             bound: None,
             anchor: None,
@@ -922,7 +927,7 @@ impl V2MemberLane {
             .ok_or_else(refused)?
             .pending
             .pool;
-        self.fee.validate(pool, V2_MEMBER_LANE_BYTES)?;
+        self.fee.validate(pool, WARM_FOUNDER_LANE_BYTES)?;
         self.domain.validate_accounts(store)?;
         if let Some(request) = self.requests.request.as_deref() {
             request.validate_accounts(store)?;

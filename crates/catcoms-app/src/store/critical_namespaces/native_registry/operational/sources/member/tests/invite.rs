@@ -8,9 +8,20 @@ use crate::store::critical_namespaces::{
     ARCHIVE_BOOTSTRAP_ROOT,
 };
 use crate::store::NativeTextInviteRecovery;
+use catcoms_replication::chat::ActionId;
 use catcoms_rt::{Clock, SystemClock};
 use std::cell::Cell;
 use std::time::Duration;
+
+struct TestArchiveAdmission;
+
+impl crate::store::FounderArchiveAdmission for TestArchiveAdmission {
+    fn reserve(&self, _: ActionId, _: ActionId) -> Option<bool> {
+        Some(true)
+    }
+
+    fn release_unstarted(&self, _: ActionId, _: ActionId) {}
+}
 
 #[derive(Debug)]
 struct DependencyTestScope(RequestCancellation);
@@ -1071,7 +1082,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 panic!("expected the original joined reply at the founder");
             };
             let received = founder_capture()
-                .receive_founder_member(&founder_receiver, &frame)
+                .receive_founder_member(&founder_receiver, &frame, &TestArchiveAdmission)
                 .unwrap()
                 .unwrap();
             assert_eq!(received.action, reply_id);
@@ -1271,7 +1282,11 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 }
                 let crate::store::NativeTextFounderFrameOutcome::NeedsDependency(exchange) =
                     founder_capture()
-                        .receive_founder_member_with_recovery(&receiver, &frame)
+                        .receive_founder_member_with_recovery(
+                            &receiver,
+                            &frame,
+                            &TestArchiveAdmission,
+                        )
                         .unwrap()
                 else {
                     panic!("the founder should need the intentionally skipped parent");
@@ -1311,7 +1326,12 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         });
                     let response = response.unwrap();
                     match founder_capture()
-                        .recover_founder_dependency_with_followup(&receiver, &response, true)
+                        .recover_founder_dependency_with_followup(
+                            &receiver,
+                            &response,
+                            true,
+                            &TestArchiveAdmission,
+                        )
                         .unwrap()
                     {
                         crate::store::NativeTextFounderFrameOutcome::NeedsDependency(exchange)
@@ -1329,10 +1349,10 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     responses.push(response);
                 }
                 assert!(founder_capture()
-                    .recover_founder_dependency(&receiver, &responses[0])
+                    .recover_founder_dependency(&receiver, &responses[0], &TestArchiveAdmission)
                     .unwrap());
                 let received = founder_capture()
-                    .receive_founder_member(&receiver, &frame)
+                    .receive_founder_member(&receiver, &frame, &TestArchiveAdmission)
                     .unwrap()
                     .expect("the original child can now use the exact missing parent");
                 assert_eq!(received.action, action);
@@ -1347,7 +1367,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 ));
                 stop_recovery.send_replace(true);
                 assert!(founder_capture()
-                    .recover_founder_dependency(&receiver, &responses[0])
+                    .recover_founder_dependency(&receiver, &responses[0], &TestArchiveAdmission)
                     .is_err());
             }
         })
@@ -3612,10 +3632,20 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 (frames.remove(0), frames.remove(0))
             }).await.expect("bounded ordinary subscriber after the founder restarted");
             assert!(original
-                .receive_member_frame(&cold_receiver, &damaged, &mut founder_rng)
+                .receive_member_frame(
+                    &cold_receiver,
+                    &damaged,
+                    &TestArchiveAdmission,
+                    &mut founder_rng
+                )
                 .is_err());
             let received = original
-                .receive_member_frame(&cold_receiver, &original_frame, &mut founder_rng)
+                .receive_member_frame(
+                    &cold_receiver,
+                    &original_frame,
+                    &TestArchiveAdmission,
+                    &mut founder_rng,
+                )
                 .unwrap()
                 .expect("the recovered founder loaded its original signed reply and saved parent");
             assert_eq!(received.action, reply_id);
@@ -3633,7 +3663,12 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 .unwrap());
             stop.send_replace(true);
             assert!(original
-                .receive_member_frame(&cold_receiver, &original_frame, &mut founder_rng)
+                .receive_member_frame(
+                    &cold_receiver,
+                    &original_frame,
+                    &TestArchiveAdmission,
+                    &mut founder_rng
+                )
                 .is_err());
             assert!(live
                 .with_publication(|_| panic!("a cancelled recovered receiver exposed a body"))

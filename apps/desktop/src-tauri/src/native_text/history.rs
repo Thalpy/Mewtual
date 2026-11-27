@@ -542,29 +542,20 @@ async fn execute_received(
     let scope = call.scope.clone();
     let payment = call.payment.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let projection = match reader {
-            Preparation::Founder(original) => original
-                .read_founder_member_projection(channel, action, &scope)
-                .map_err(|failure| match failure {
-                    V2MemberSaveRefusal::Busy => BUSY.to_owned(),
-                    _ => STALE.to_owned(),
-                })?,
-            joined @ Preparation::Joined(..) => {
-                // A recovery worker can select a mutation outside the live
-                // ledger. Even a delayed live notice must use that archive.
-                match read_archived_target(joined, channel, action, &scope, &local)? {
-                    Some(archive) => Some(archive),
-                    None => {
-                        let slot = local.received.lock().map_err(|_| STALE.to_owned())?;
-                        slot.as_ref()
-                            .map(|ledger| ledger.read_message_projection(action))
-                            .transpose()
-                            .map_err(|_| STALE.to_owned())?
-                            .flatten()
-                    }
-                }
-            }
-        };
+        let joined = matches!(&reader, Preparation::Joined(..));
+        let mut projection =
+            read_archived_target(reader, channel, action, &scope, &local, TargetRead::Refresh)?;
+        // The founder has already checked its own live ledger after a
+        // confirmed archive miss. Joined live rows are held by this worker.
+        if joined && projection.is_none() {
+            let slot = local.received.lock().map_err(|_| STALE.to_owned())?;
+            projection = slot
+                .as_ref()
+                .map(|ledger| ledger.read_message_projection(action))
+                .transpose()
+                .map_err(|_| STALE.to_owned())?
+                .flatten();
+        }
         Ok(ReceivedOutput {
             scope: "received-live",
             projection,
@@ -576,20 +567,29 @@ async fn execute_received(
     .map_err(|_| STALE.to_owned())?
 }
 
+enum TargetRead {
+    Refresh,
+    Archive,
+}
+
 fn read_archived_target(
     original: Preparation,
     channel: u128,
     action: ActionId,
     scope: &RequestCancellation,
     local: &server_table::NativeMemberWork,
+    read: TargetRead,
 ) -> Result<Option<NativeTextJoinedMemberProjection>, String> {
     const INCOMPLETE: &str = "A received change is waiting to be saved.";
     let unsettled = local.unsettled_archive_changes(action).ok_or(INCOMPLETE)?;
     let founder = matches!(&original, Preparation::Founder(_));
     let projection = match original {
-        Preparation::Founder(original) => {
-            original.archived_founder_message_projection(channel, action, scope)
-        }
+        Preparation::Founder(original) => match read {
+            TargetRead::Refresh => original.read_founder_target_projection(channel, action, scope),
+            TargetRead::Archive => {
+                original.archived_founder_message_projection(channel, action, scope)
+            }
+        },
         Preparation::Joined(original, row) => original.archived_message_projection(
             &row,
             channel,
@@ -602,20 +602,23 @@ fn read_archived_target(
         V2MemberSaveRefusal::Busy => BUSY.to_owned(),
         _ => "Saved received messages could not be read. Try again.".to_owned(),
     })?;
-    // Only the exact mutation in the selected archive settles a failed write.
-    if unsettled.iter().flatten().any(|change| {
-        !projection
+    // A selected change can retire its exact slot while other changes
+    // still block this target. Never retire unresolved debt by association.
+    let mut incomplete = false;
+    for change in unsettled.into_iter().flatten() {
+        if projection
             .as_ref()
-            .is_some_and(|original| original.archived_includes(*change))
-    }) {
-        return Err(INCOMPLETE.into());
-    }
-    // The joined worker rechecks selection and emits invalidation independent
-    // of this IPC result, which the renderer can cancel or ignore.
-    if founder {
-        for change in unsettled.into_iter().flatten() {
-            local.note_archive_change(change, action, true);
+            .is_some_and(|original| original.archived_includes(change))
+        {
+            if founder {
+                local.settle_archive_change(change, action);
+            }
+        } else {
+            incomplete = true;
         }
+    }
+    if incomplete {
+        return Err(INCOMPLETE.into());
     }
     Ok(projection)
 }
@@ -662,7 +665,14 @@ async fn execute_archive(
             }))
         }
         ArchiveRead::Message(action) => {
-            let projection = read_archived_target(original, channel, action, &scope, &local)?;
+            let projection = read_archived_target(
+                original,
+                channel,
+                action,
+                &scope,
+                &local,
+                TargetRead::Archive,
+            )?;
             Ok(Response::Received(ReceivedOutput {
                 scope: "received-archive",
                 projection,

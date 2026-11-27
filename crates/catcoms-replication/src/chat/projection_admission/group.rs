@@ -200,7 +200,19 @@ impl ChatLedger {
         if group.life.group.as_ref() != self.realm.group() || !group.life.live() {
             return Err(ChatError::Scope);
         }
-        Ok(self.projection.begin(Some(group.life.clone())))
+        Ok(self.projection.begin(Some(group.life.clone()), false))
+    }
+
+    /// Start a detached local archive display view. It can only admit
+    /// exact locally selected archive effects which remain provisional.
+    pub fn begin_local_archive_projection_view_in(
+        &mut self,
+        group: &ProjectionGroupView,
+    ) -> Result<ProjectionView, ChatError> {
+        if group.life.group.as_ref() != self.realm.group() || !group.life.live() {
+            return Err(ChatError::Scope);
+        }
+        Ok(self.projection.begin(Some(group.life.clone()), true))
     }
 }
 

@@ -45,9 +45,9 @@ pub use projection_admission::{
     V2AuthenticatedAdmission, V2FounderExpectation, V2FounderPrefixVerifier, V2FounderReplayCursor,
     V2FrozenAdmission, V2GeneralAcceptanceSource, V2GeneralCandidate, V2GeneralExpectation,
     V2GeneralPrefixVerifier, V2GeneralRetiredData, V2HostSelectionExpectation,
-    V2KnownGoverningParent, V2LiveMemberObservation, V2OrdinaryDependency, V2OrdinaryKeyCall,
-    V2OrdinaryReceiveStatus, V2OrdinarySigningGuard, V2OrdinarySigningPlan, V2OriginNegative,
-    V2PreparedSelectedHistoryData, V2ProjectionOrigin, V2RetiredAppendData,
+    V2KnownGoverningParent, V2LiveMemberObservation, V2LocalArchiveOriginal, V2OrdinaryDependency,
+    V2OrdinaryKeyCall, V2OrdinaryReceiveStatus, V2OrdinarySigningGuard, V2OrdinarySigningPlan,
+    V2OriginNegative, V2PreparedSelectedHistoryData, V2ProjectionOrigin, V2RetiredAppendData,
     V2SelectedHistoryHashData, V2SelectedHistoryNodeData, V2SelectedHistoryTipData,
     V2SelectedParentProof, V2VerifiedAppendCandidate, MAX_SELECTED_HISTORY_PROOF_HASHES,
 };

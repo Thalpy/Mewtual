@@ -1,5 +1,33 @@
 # Mewtual; Handover
 
+## Keep verified chat history visible after member removal
+
+A device can still display messages and edits it had already verified and
+saved when a member leaves the roster. A selected Delete remains hidden.
+A normal targeted refresh checks the selected archive before using the
+live ledger. The owner can still read the exact signed history in audit.
+
+The 44 focused Core tests passed, including retained revisions, reply
+ancestry, and rejecting a stale view after a selected Delete. Ten focused
+App archive tests and the real MLS join test passed on Windows. Two
+Windows native tests passed. The removal test sent real TCP Creates and
+revisions, checked both history commands and owner audit, removed the
+sender, then repeated those checks after reopening the vault.
+
+The joined reader needs a separate mounted restart result for this case.
+Remote removed-member originals still need their own historical acceptance
+evidence. Founder reception now reserves mutation capacity before
+projection, and both warm and recovered founders check the exact durable
+ancestor set before writing an archive record. A targeted refresh can retire
+one confirmed revision while another unresolved revision still blocks that
+message. A newly reserved slot is released when the original never gains a
+visible effect. The focused reservation test passed on Windows. Twelve
+focused App archive tests and three Windows native tests passed before the
+final reservation policy test. The live ledger and per-target archive
+replay bounds remain open. So do the 2,048-record and 256 MiB archive
+ceilings and independent founder replay of an unsaved received original.
+Chat V2 stays disabled.
+
 ## Same-device rejoin proof and cold removal
 
 Cold native recovery verifies the original selected Remove before reporting

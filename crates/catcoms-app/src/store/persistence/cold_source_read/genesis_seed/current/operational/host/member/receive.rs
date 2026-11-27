@@ -21,6 +21,36 @@ pub(super) struct FounderReceivedLedger {
     _fee: CatalogReadReservation,
 }
 
+impl V2MemberLane {
+    fn read_live_projection(
+        &self,
+        channel: u128,
+        create: ActionId,
+        pool: &crate::store::critical_namespaces::read_pool::CriticalCatalogReadPool,
+    ) -> Result<FounderReceiveOutcome, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let Some(received) = self.received.as_ref().filter(|received| {
+            !received.session.signal.is_cancelled()
+                && received.ledger.realm().channel() == channel
+                && received.ledger.action(create).is_some()
+        }) else {
+            return Ok(FounderReceiveOutcome::Read(None));
+        };
+        let fee = pool
+            .try_reserve(2 * MAX_ACTION_BYTES + 32 * 1024)
+            .map_err(|_| Refusal::Busy)?;
+        let projection = received
+            .ledger
+            .guarded_projection(create, WORK_LIMIT)
+            .map_err(|_| Refusal::Failed)?;
+        Ok(FounderReceiveOutcome::Read(Some((
+            projection,
+            received.session.signal.clone(),
+            fee,
+        ))))
+    }
+}
+
 impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
     pub(in crate::store) fn run_founder_member_receive(
         &mut self,
@@ -48,7 +78,8 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                 FounderReceiveOperation::ArchivePage(_) => {
                     Ok(FounderReceiveOutcome::ArchivePage(None))
                 }
-                FounderReceiveOperation::ArchiveMessage(_) => {
+                FounderReceiveOperation::ArchiveMessage(_)
+                | FounderReceiveOperation::TargetMessage(_) => {
                     Ok(FounderReceiveOutcome::ArchiveMessage(None))
                 }
                 _ => Err(Refusal::Unavailable),
@@ -112,7 +143,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     .map_err(|_| Refusal::Stale)?;
                 Ok(FounderReceiveOutcome::Dependency(reply))
             }
-            FounderReceiveOperation::Frame(frame, session, carrier) => {
+            FounderReceiveOperation::Frame(frame, session, carrier, admit_mutation) => {
                 if session.signal.is_cancelled() {
                     return Err(Refusal::Cancelled);
                 }
@@ -191,7 +222,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     verifier,
                     &mut received.ledger,
                     &received.view,
-                    (store, history.scope),
+                    (store, history.scope, admit_mutation),
                     |id| {
                         let mount = store
                             .member_outbox_mount()
@@ -230,7 +261,9 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     ));
                 }
                 let archived = history
-                    .save(&original, rng, || require_current().map_err(|_| refused()))
+                    .save(&original, &received.ledger, rng, || {
+                        require_current().map_err(|_| refused())
+                    })
                     .unwrap_or(Some(false));
                 require_current()?;
                 Ok(FounderReceiveOutcome::Frame(
@@ -239,7 +272,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     ),
                 ))
             }
-            FounderReceiveOperation::Recover(response, session, carrier) => {
+            FounderReceiveOperation::Recover(response, session, carrier, admit_mutation) => {
                 response.require_current(session)?;
                 let _fee = pool
                     .try_reserve(FOUNDER_TRANSPORT_FEE)
@@ -282,7 +315,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     verifier,
                     &mut received.ledger,
                     &received.view,
-                    (store, history.scope),
+                    (store, history.scope, admit_mutation),
                     |id| {
                         let mount = store
                             .member_outbox_mount()
@@ -321,7 +354,9 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     ));
                 }
                 let archived = history
-                    .save(&original, rng, || require_current().map_err(|_| refused()))
+                    .save(&original, &received.ledger, rng, || {
+                        require_current().map_err(|_| refused())
+                    })
                     .map_err(|_| Refusal::Failed)?;
                 require_current()?;
                 Ok(FounderReceiveOutcome::Recovered(
@@ -331,25 +366,7 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                 ))
             }
             FounderReceiveOperation::Read(create) => {
-                let Some(received) = lane.received.as_ref().filter(|received| {
-                    !received.session.signal.is_cancelled()
-                        && received.ledger.realm().channel() == channel
-                        && received.ledger.action(create).is_some()
-                }) else {
-                    return Ok(FounderReceiveOutcome::Read(None));
-                };
-                let fee = pool
-                    .try_reserve(2 * MAX_ACTION_BYTES + 32 * 1024)
-                    .map_err(|_| Refusal::Busy)?;
-                let projection = received
-                    .ledger
-                    .guarded_projection(create, WORK_LIMIT)
-                    .map_err(|_| Refusal::Failed)?;
-                Ok(FounderReceiveOutcome::Read(Some((
-                    projection,
-                    received.session.signal.clone(),
-                    fee,
-                ))))
+                lane.read_live_projection(channel, create, pool)
             }
             FounderReceiveOperation::ArchivePage(query) => {
                 let history = FounderHistory::new(
@@ -369,7 +386,8 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     })
                     .map(FounderReceiveOutcome::ArchivePage)
             }
-            FounderReceiveOperation::ArchiveMessage(create) => {
+            FounderReceiveOperation::ArchiveMessage(create)
+            | FounderReceiveOperation::TargetMessage(create) => {
                 let (_, observation) = self
                     .owner
                     .prepare_governed_member_subscription(store, verifier, channel)
@@ -385,9 +403,21 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     lane.admission,
                     lane.outbox_context(),
                 )?;
-                let result = history.message(&lane.domain, create, scope, rng, pool)?;
+                let result = history.message(
+                    &lane.domain,
+                    &lane.retired_history,
+                    create,
+                    scope,
+                    rng,
+                    pool,
+                )?;
                 check_governed_member(&self.owner, governed, &lane.domain, verifier, store)
                     .map_err(|_| Refusal::Stale)?;
+                if result.is_none()
+                    && matches!(operation, FounderReceiveOperation::TargetMessage(_))
+                {
+                    return lane.read_live_projection(channel, create, pool);
+                }
                 Ok(FounderReceiveOutcome::ArchiveMessage(result))
             }
             FounderReceiveOperation::Audit(query) => {

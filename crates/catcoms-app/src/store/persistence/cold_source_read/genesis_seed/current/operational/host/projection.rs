@@ -397,6 +397,17 @@ impl V2TextProjectionDomain {
             .map_err(|_| refused())
     }
 
+    /// Open a detached display view under the same physical source and group.
+    pub(super) fn begin_archive_channel_view(
+        &self,
+        ledger: &mut catcoms_replication::chat::ChatLedger,
+    ) -> Result<catcoms_replication::chat::ProjectionView, AppError> {
+        self.negative.validate_negative()?;
+        ledger
+            .begin_local_archive_projection_view_in(&self.view)
+            .map_err(|_| refused())
+    }
+
     /// Cancellation is immediate but is never an acknowledgment of callback drain.
     pub(super) fn cancel(&self) {
         self.negative.body.stopped.store(true, Ordering::Release);

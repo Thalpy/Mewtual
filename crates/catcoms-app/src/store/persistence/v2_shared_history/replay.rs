@@ -6,8 +6,8 @@ use crate::store::persistence::v2_member_outbox::MemberSavedOriginal;
 use crate::store::{ServerStore, V2MemberSaveRefusal};
 use crate::AppError;
 use catcoms_replication::chat::{
-    ActionId, ActionState, ChatLedger, ProjectionView, V2GeneralPrefixVerifier,
-    V2OrdinaryReceiveStatus, MAX_PARENTS,
+    ActionId, ActionState, ChatLedger, ProjectionView, V2FrozenAdmission, V2GeneralPrefixVerifier,
+    V2LocalArchiveOriginal, V2OrdinaryReceiveStatus, MAX_PARENTS,
 };
 use catcoms_rt::RequestCancellation;
 use std::collections::BTreeSet;
@@ -58,6 +58,7 @@ impl SharedHistoryReplay<'_> {
         ledger: &mut ChatLedger,
         view: &ProjectionView,
         create: ActionId,
+        retired: &[V2FrozenAdmission],
         mut read_local: impl FnMut(ActionId) -> Result<Option<MemberSavedOriginal>, V2MemberSaveRefusal>,
     ) -> Result<Option<SharedHistoryMessageSelection>, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
@@ -87,6 +88,7 @@ impl SharedHistoryReplay<'_> {
         }
         let roots = page.actions.clone();
         let observation = page.observation.clone();
+        let retired = retired.iter().collect::<Vec<_>>();
         drop(page);
 
         let mut pending: Vec<_> = roots.iter().rev().copied().collect();
@@ -102,7 +104,7 @@ impl SharedHistoryReplay<'_> {
             }
             let archived = self
                 .store
-                .read_shared_history_record(self.scope, action)
+                .read_selected_shared_history_record(self.scope, action)
                 .map_err(|_| Refusal::Failed)?;
             let status = if let Some(original) = archived {
                 let signed = original.original.action();
@@ -110,15 +112,17 @@ impl SharedHistoryReplay<'_> {
                 if roots.binary_search(&action).is_ok() && target != create {
                     return Err(Refusal::Failed);
                 }
-                let admission = self
-                    .verifier
-                    .admission(original.admission)
-                    .map_err(|_| Refusal::Stale)?;
-                self.verifier.project_provisional_from_ledger(
+                let selected = V2LocalArchiveOriginal::from_trusted_local_selection(
+                    signed,
+                    original.admission,
+                    original.original.original_bytes(),
+                )
+                .map_err(|_| Refusal::Failed)?;
+                self.verifier.project_local_archive_original(
                     ledger,
                     view,
-                    signed,
-                    &admission,
+                    selected,
+                    &retired,
                     LEDGER_WORK,
                 )
             } else {
@@ -126,16 +130,12 @@ impl SharedHistoryReplay<'_> {
                     return Err(Refusal::Failed);
                 }
                 let original = read_local(action)?.ok_or(Refusal::Unavailable)?;
-                let admission = self
-                    .verifier
-                    .admission(original.receipt().admission)
-                    .map_err(|_| Refusal::Stale)?;
-                self.verifier.replay_ordinary_history_original(
+                self.verifier.replay_local_archive_dependency(
                     ledger,
                     view,
                     original.action(),
-                    &admission,
-                    &[],
+                    original.receipt().admission,
+                    &retired,
                     LEDGER_WORK,
                 )
             }

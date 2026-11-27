@@ -381,7 +381,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             .prepare_member_ledger_with(
                 selection,
                 channel,
-                caller.clone(),
+                (caller.clone(), ReceiverView::LocalArchive),
                 |_| Ok(Some(())),
                 |source, ledger, view, ()| {
                     source.replay_archived_message(ledger, view, create, &caller, rng)
@@ -517,7 +517,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         self.prepare_member_ledger_with(
             selection,
             channel,
-            caller,
+            (caller, ReceiverView::Live),
             |_| Ok(Some(())),
             |_, _, _, ()| Ok(()),
         )?
@@ -529,7 +529,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         self,
         selection: &NativeTextJoinedRowSelection,
         channel: u128,
-        caller: RequestCancellation,
+        (caller, mode): (RequestCancellation, ReceiverView),
         prepare: impl FnOnce(&ReceiverSource<'_, R>) -> Result<Option<T>, V2MemberSaveRefusal>,
         populate: impl FnOnce(
             &ReceiverSource<'_, R>,
@@ -570,9 +570,13 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     },
                 )
                 .map_err(|_| Refusal::Failed)?;
-                let mut view = ledger
-                    .begin_projection_view_in(group)
-                    .map_err(|_| Refusal::Unavailable)?;
+                let mut view = match mode {
+                    ReceiverView::Live => ledger.begin_projection_view_in(group),
+                    ReceiverView::LocalArchive => {
+                        ledger.begin_local_archive_projection_view_in(group)
+                    }
+                }
+                .map_err(|_| Refusal::Unavailable)?;
                 if !view.try_ready() {
                     return Err(Refusal::Busy);
                 }
@@ -930,6 +934,11 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
     }
 }
 
+enum ReceiverView {
+    Live,
+    LocalArchive,
+}
+
 impl<R: CryptoRngCore> ReceiverSource<'_, R> {
     fn archived_actions(
         &self,
@@ -968,9 +977,13 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
                 .map_err(|_| V2MemberSaveRefusal::Unavailable)?,
             caller,
         }
-        .replay_message(ledger, view, create, |action| {
-            self.read_dependency(channel, action, rng)
-        })
+        .replay_message(
+            ledger,
+            view,
+            create,
+            self.prefix.retired_history_data(),
+            |action| self.read_dependency(channel, action, rng),
+        )
     }
 
     fn history_scope(&self, channel: u128) -> SharedHistoryScope {
@@ -1058,67 +1071,29 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
         use V2MemberSaveRefusal as Refusal;
         let channel = ledger.ledger.realm().channel();
         let scope = self.history_scope(channel);
-        let target = original.projection_target_data();
-        // This is synchronous local selection work. Pay for both bounded
-        // sets and the next parent list before inspecting any ancestor.
+        use crate::store::persistence::v2_member_transport::{
+            archive_ancestry_fee, require_durable_archive_dependencies,
+        };
         let _work = self
             .metadata
-            .reserve_join_node(MAX_RECEIVED_ACTIONS * 256 + (MAX_PARENTS + 1) * 32)
+            .reserve_join_node(archive_ancestry_fee(MAX_RECEIVED_ACTIONS))
             .map_err(|_| Refusal::Busy)?;
-        let mut ancestors = original.opened.action_data().dependencies();
-        if ancestors.is_empty() {
-            return require_archivable(ledger, original);
-        }
-        let mut selected = std::collections::BTreeSet::from([original.action_id_data()]);
-        let mut pending = std::collections::BTreeSet::new();
-        loop {
-            for dependency in ancestors {
-                if !selected.contains(&dependency) && !pending.contains(&dependency) {
-                    if selected.len() + pending.len() == MAX_RECEIVED_ACTIONS {
-                        return Err(Refusal::Unavailable);
-                    }
-                    pending.insert(dependency);
+        require_durable_archive_dependencies(
+            &ledger.ledger,
+            original.opened.action_data(),
+            (self.store, scope),
+            MAX_RECEIVED_ACTIONS,
+            |dependency| self.read_dependency(channel, dependency, rng),
+            || {
+                if caller.is_cancelled() || ledger.signal.is_cancelled() {
+                    return Err(Refusal::Cancelled);
                 }
-            }
-            let Some(dependency) = pending.pop_first() else {
-                break;
-            };
-            if caller.is_cancelled() || ledger.signal.is_cancelled() {
-                return Err(Refusal::Cancelled);
-            }
-            if !original.is_for_original_row_cached(&ledger.selection) {
-                return Err(Refusal::Stale);
-            }
-            let archived = self
-                .store
-                .read_shared_history_record(scope, dependency)
-                .map_err(|_| Refusal::Failed)?;
-            let own = if archived.is_none() && dependency != target {
-                self.read_dependency(channel, dependency, rng)?
-            } else {
-                None
-            };
-            let (signed, admission) = archived
-                .as_ref()
-                .map(|record| (record.original.action(), record.admission))
-                .or_else(|| {
-                    own.as_ref()
-                        .map(|saved| (saved.action(), saved.receipt().admission))
-                })
-                .ok_or(Refusal::Unavailable)?;
-            if signed.id() != dependency
-                || !ledger
-                    .ledger
-                    .matches_valid_ordinary_original(signed, admission)
-            {
-                return Err(Refusal::Stale);
-            }
-            selected.insert(dependency);
-            ancestors = signed.dependencies();
-        }
-        if caller.is_cancelled() {
-            return Err(Refusal::Cancelled);
-        }
+                if !original.is_for_original_row_cached(&ledger.selection) {
+                    return Err(Refusal::Stale);
+                }
+                Ok(())
+            },
+        )?;
         require_archivable(ledger, original)
     }
 

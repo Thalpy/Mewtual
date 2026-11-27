@@ -76,15 +76,32 @@ impl<'a> FounderHistory<'a> {
     pub(super) fn save(
         &self,
         original: &SelectedV2MemberEnvelope,
+        ledger: &ChatLedger,
         rng: &mut impl CryptoRngCore,
-        require_current: impl FnOnce() -> Result<(), AppError>,
+        require_current: impl FnMut() -> Result<(), AppError>,
     ) -> Result<Option<bool>, AppError> {
-        archive_founder_member(self.store, self.scope, original, rng, require_current)
+        archive_founder_member(
+            (self.store, self.scope),
+            original,
+            ledger,
+            rng,
+            |dependency, rng| {
+                let mount = self
+                    .store
+                    .member_outbox_mount()
+                    .map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+                let key =
+                    member_outbox_key(self.store).map_err(|_| V2MemberSaveRefusal::Unavailable)?;
+                self.saved(&mount, &key, dependency, rng)
+            },
+            require_current,
+        )
     }
 
     pub(super) fn message(
         &self,
         domain: &V2TextProjectionDomain,
+        retired: &[catcoms_replication::chat::V2FrozenAdmission],
         create: ActionId,
         signal: RequestCancellation,
         rng: &mut impl CryptoRngCore,
@@ -110,7 +127,7 @@ impl<'a> FounderHistory<'a> {
         )
         .map_err(|_| Refusal::Failed)?;
         let mut view = domain
-            .begin_channel_view(&mut ledger)
+            .begin_archive_channel_view(&mut ledger)
             .map_err(|_| Refusal::Unavailable)?;
         if !view.try_ready() {
             return Err(Refusal::Busy);
@@ -126,7 +143,7 @@ impl<'a> FounderHistory<'a> {
             verifier: self.verifier,
             caller: &signal,
         }
-        .replay_message(&mut ledger, &view, create, |action| {
+        .replay_message(&mut ledger, &view, create, retired, |action| {
             self.saved(&mount, &key, action, rng)
         })?;
         let Some(selected) = selected else {

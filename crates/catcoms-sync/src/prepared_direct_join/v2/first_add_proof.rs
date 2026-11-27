@@ -15,9 +15,9 @@ use catcoms_replication::chat::{
     },
     owner_state::transition::{ReplayBody, ReplayMath},
     ActionDraft, FounderGenesisAnchorData, ProjectionGroupView, ProjectionView,
-    V2AuthenticatedAdmission, V2GeneralCandidate, V2GeneralExpectation, V2GeneralPrefixVerifier,
-    V2GeneralRetiredData, V2HostSelectionExpectation, V2OrdinaryDependency, V2OrdinarySigningPlan,
-    V2PreparedSelectedHistoryData, V2ProjectionOrigin,
+    V2AuthenticatedAdmission, V2FrozenAdmission, V2GeneralCandidate, V2GeneralExpectation,
+    V2GeneralPrefixVerifier, V2GeneralRetiredData, V2HostSelectionExpectation,
+    V2OrdinaryDependency, V2OrdinarySigningPlan, V2PreparedSelectedHistoryData, V2ProjectionOrigin,
 };
 use std::sync::{Arc, Weak};
 
@@ -192,6 +192,7 @@ impl<'a> V2FirstAddProofData<'a> {
             .derive_successor(add, ReplayBody::Admission(own), self.add.image())
             .map_err(reject)?;
         Ok(PreparedV2JoinedPrefix {
+            retired_history: Vec::with_capacity(crate::MAX_V2_GOVERNING_JOIN_STEPS),
             verifier,
             candidate: Some(candidate),
             own: own.admission_id(),
@@ -203,6 +204,7 @@ impl<'a> V2FirstAddProofData<'a> {
 /// Real Core candidate for the original authenticated first Add. Its App
 /// owner keeps the matching selected journal and native scope before advancing.
 pub struct PreparedV2JoinedPrefix {
+    retired_history: Vec<V2FrozenAdmission>,
     verifier: V2GeneralPrefixVerifier,
     candidate: Option<V2GeneralCandidate>,
     own: OwnerFactId,
@@ -220,6 +222,31 @@ pub(super) struct SelectedJoinData<'a> {
 }
 
 impl PreparedV2JoinedPrefix {
+    /// The App owner pays this charge before replaying the original Welcome.
+    /// History occupies bounded space alongside the same selected verifier.
+    pub const fn retired_history_layout_bytes() -> usize {
+        crate::MAX_V2_GOVERNING_JOIN_STEPS * V2FrozenAdmission::retained_layout_bytes()
+    }
+
+    /// Actual selected Removes for this node's original governing verifier.
+    pub fn retired_history_data(&self) -> &[V2FrozenAdmission] {
+        &self.retired_history
+    }
+
+    pub(super) fn require_retired_history_room(&self) -> Result<(), SyncError> {
+        if self.retired_history.len() >= crate::MAX_V2_GOVERNING_JOIN_STEPS {
+            return Err(SyncError::JoinRejected);
+        }
+        Ok(())
+    }
+
+    // Callers check the already paid capacity before selecting a successor.
+    pub(super) fn retain_frozen_history(&mut self, retired: &mut V2GeneralRetiredData) {
+        if let Some(frozen) = retired.take_frozen_data() {
+            self.retired_history.push(frozen);
+        }
+    }
+
     pub(super) fn bind_source_origin(&mut self, original: &Arc<()>) {
         self.source_origin = Some(Arc::downgrade(original));
     }
@@ -331,6 +358,7 @@ impl PreparedV2JoinedPrefix {
         image: &[u8],
         body: ReplayBody<'_>,
     ) -> Result<(), SyncError> {
+        self.require_retired_history_room()?;
         let history = self.candidate.as_ref().ok_or(SyncError::JoinRejected)?;
         let selected = history.header_data();
         let expectation =
@@ -342,6 +370,7 @@ impl PreparedV2JoinedPrefix {
         {
             return Err(SyncError::JoinRejected);
         }
+        self.retain_frozen_history(&mut retired);
         drop(retired);
         let own = match &body {
             ReplayBody::Admission(admission) => admission.admission_id(),
