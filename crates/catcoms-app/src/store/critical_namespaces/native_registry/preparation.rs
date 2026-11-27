@@ -59,6 +59,13 @@ impl NativeRegistryHandler {
             | Self::GovernanceOpening(handler) => handler.require(),
         }
     }
+    /// Only the actual native startup handler may settle a founder
+    /// review claim. The passive parser alone cannot enter a writer.
+    pub(in crate::store) fn accepts_review_recovery(&self) -> bool {
+        self.lifecycle()
+            .is_some_and(|handler| handler.accepts_rejoin_startup())
+    }
+
     pub(in crate::store) fn namespace_version(&self) -> u32 {
         match self {
             Self::Migration(_) => 1,
@@ -77,7 +84,7 @@ impl NativeRegistryHandler {
             .lifecycle()
             .is_some_and(|handler| handler.accepts_rejoin_startup())
         {
-            return grammar::parse_native_rejoin_startup(plain, domain, executing);
+            return grammar::parse_native_review_startup(plain, domain, executing);
         }
         match self.shared_history_opening() {
             Opening::Optional => {

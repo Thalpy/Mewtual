@@ -25,6 +25,16 @@ pub(in crate::store::critical_namespaces::native_registry) fn selected_cold_foun
     networks: &[Arc<NetworkDependency>],
 ) -> Result<Option<ColdFounderSelection>, AppError> {
     let (index, _) = super::preparation::decode_selected_data(store, inventory)?;
+    let Some(row) = checked_founder_row(&index)? else {
+        return Ok(None);
+    };
+    let [network] = networks else {
+        return Err(refused());
+    };
+    validate_founder_network(store, &index, row, network).map(Some)
+}
+
+fn checked_founder_row(index: &Index) -> Result<Option<&Row>, AppError> {
     let [row] = index.rows.as_slice() else {
         return Err(refused());
     };
@@ -41,22 +51,65 @@ pub(in crate::store::critical_namespaces::native_registry) fn selected_cold_foun
     {
         return Err(refused());
     }
-    let expected = expected(&index, row)?;
-    let [network] = networks else {
+    Ok(Some(row))
+}
+
+fn validate_founder_network(
+    store: &ServerStore,
+    index: &Index,
+    row: &Row,
+    network: &Arc<NetworkDependency>,
+) -> Result<ColdFounderSelection, AppError> {
+    let Backend::Founder { birth, binding } = &row.backend else {
         return Err(refused());
     };
+    let expected = expected(index, row)?;
     if !network.matches(expected, None) {
         return Err(refused());
     }
     network.require(store)?;
-    Ok(Some(ColdFounderSelection {
+    Ok(ColdFounderSelection {
         status: founder::status(row)?,
         name: row.name.clone(),
         invocation: birth.invocation,
         request: birth.request,
         binding: binding.clone(),
         network: network.clone(),
-    }))
+    })
+}
+
+/// Read the actual founder network file with a separately paid owner.
+/// Unlike generic native startup this has no reason to inspect Catalog Stage.
+pub(super) fn capture_declaring_founder(
+    store: &ServerStore,
+    index: &Index,
+    pool: &crate::store::CriticalCatalogReadPool,
+) -> Result<ColdFounderSelection, AppError> {
+    let row = checked_founder_row(index)?.ok_or_else(refused)?;
+    let expected = expected(index, row)?;
+    let fee =
+        Arc::new(pool.try_reserve(crate::store::persistence::native_registry::network::COLD_FEE)?);
+    let network = NetworkDependency::capture_cold(store, expected, None, fee)?;
+    validate_founder_network(store, index, row, &network)
+}
+
+impl ColdFounderSelection {
+    pub(in crate::store::critical_namespaces::native_registry) fn require_saved_source_data(
+        &self,
+        source: &crate::store::RetainedBootstrapSourceData,
+    ) -> Result<(), AppError> {
+        let data = source.data();
+        let context = data.view_data().context.spec_data();
+        if context.vault != self.binding.vault
+            || context.group != self.binding.group
+            || context.signer != self.binding.signer
+            || context.profile.as_bytes() != &self.binding.profile
+            || data.source_id_data().as_bytes() != &self.binding.source
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
 }
 
 fn expected(index: &Index, row: &Row) -> Result<NetworkExpected, AppError> {

@@ -40,6 +40,17 @@ pub(in crate::store) struct SelectedSharedHistory {
 }
 
 impl SelectedSharedHistory {
+    pub(super) fn matches_original(&self, other: &Self) -> Result<bool, AppError> {
+        Ok(self.directory.same_original(&other.directory)
+            && session_id(&self.marker.0).map_err(io)?
+                == session_id(&other.marker.0).map_err(io)?
+            && self.marker.1 == other.marker.1)
+    }
+
+    pub(super) fn marker_digest(&self) -> [u8; 32] {
+        *blake3::hash(&self.marker.1).as_bytes()
+    }
+
     pub(super) fn capture(
         store: &ServerStore,
         descriptor: &[u8],
@@ -115,7 +126,10 @@ impl ServerStore {
         opened.validate_original(self)?;
         let key = Zeroizing::new(self.keys.db_key()?);
         let plain = Zeroizing::new(unseal(&key, &unframe(&declaration.prepared.candidate)?)?);
-        let (layout, descriptor) = self.parse_joined_catalog_descriptors(&plain)?;
+        let (layout, descriptor, review) = self.parse_joined_catalog_descriptors(&plain)?;
+        if review.is_some() {
+            return Err(denied());
+        }
         let descriptor = descriptor.ok_or_else(denied)?;
         let mounted = SelectedSharedHistory::capture(self, descriptor, layout, &key)?;
         let expected_marker = declaration.marker.as_ref().ok_or_else(denied)?;
@@ -357,7 +371,7 @@ impl ServerStore {
         })
     }
 
-    fn with_selected_shared_history<T>(
+    pub(super) fn with_selected_shared_history<T>(
         &self,
         scope: SharedHistoryScope,
         local_ancestor: Option<ActionId>,
@@ -894,7 +908,7 @@ pub(super) fn recover_declaration(
     }))
 }
 
-fn reopen_output(
+pub(super) fn reopen_output(
     path: &Path,
     captured: Option<OpenedArchiveObject>,
     expected: &[u8],
@@ -911,7 +925,7 @@ fn reopen_output(
     }
 }
 
-fn reopen_held_output(path: &Path, captured: &File) -> Result<CreatedStage, AppError> {
+pub(super) fn reopen_held_output(path: &Path, captured: &File) -> Result<CreatedStage, AppError> {
     let id = session_id(captured).map_err(io)?;
     held(path, captured, id)?;
     let (file, original) = open_exact_write(path, WriteMode::Existing)?;
@@ -924,7 +938,7 @@ fn reopen_held_output(path: &Path, captured: &File) -> Result<CreatedStage, AppE
     })
 }
 
-fn stage_output(
+pub(super) fn stage_output(
     store: &ServerStore,
     path: &Path,
     held: &mut Option<CreatedStage>,

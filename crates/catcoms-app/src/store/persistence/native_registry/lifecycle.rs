@@ -3,6 +3,7 @@
 //! limits, recovery classifications or writing roles.
 use super::*;
 pub(in crate::store) mod governed;
+pub(in crate::store) mod review_declaration;
 pub(in crate::store) mod upgrade;
 
 // Closed version3 physical bounds, checked against the semantic codec by Root.

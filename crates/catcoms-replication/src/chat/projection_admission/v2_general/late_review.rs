@@ -89,16 +89,24 @@ impl V2RemovedCreateEvidence {
         self.removal
     }
 
-    /// Encode the exact original. Temporary dependency state is deliberately
-    /// omitted so a missing parent never changes the case's durable identity.
-    /// The store must still bind the selected root and the actual mount.
-    pub fn encode_record_data(&self, original: &[u8]) -> Result<Zeroizing<Vec<u8>>, ChatError> {
+    /// Check the exact incoming bytes before looking up a retained case.
+    /// A semantic duplicate can have another signature and must first
+    /// satisfy the evidence for its own incoming envelope.
+    pub fn require_original_data(&self, original: &[u8]) -> Result<(), ChatError> {
         if original.is_empty()
             || original.len() > crate::chat::MAX_ACTION_BYTES
             || OriginalActionDigest::for_original_bytes(original) != self.original
         {
             return Err(ChatError::Scope);
         }
+        Ok(())
+    }
+
+    /// Encode the exact original. Temporary dependency state is deliberately
+    /// omitted so a missing parent never changes the case's durable identity.
+    /// The store must still bind the selected root and the actual mount.
+    pub fn encode_record_data(&self, original: &[u8]) -> Result<Zeroizing<Vec<u8>>, ChatError> {
+        self.require_original_data(original)?;
         let target = self.target.encode();
         let mut frame = Encoder::with_capacity(
             MAX_REMOVED_CREATE_RECORD_BYTES
@@ -172,6 +180,11 @@ impl<'a> V2RemovedCreateRecord<'a> {
 
     pub fn original_bytes_data(&self) -> &'a [u8] {
         self.bytes
+    }
+
+    /// Digest checked against the exact original and its signature on decode.
+    pub fn original_digest_data(&self) -> OriginalActionDigest {
+        self.original
     }
 
     pub fn target_data(&self) -> &AcceptanceRecord {

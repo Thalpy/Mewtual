@@ -48,6 +48,14 @@ unavailable. ActionId cursors order each captured page independently of
 device timestamps. Refresh from the first page to include records whose
 IDs precede an earlier cursor.
 
+The founder-only held-post storage entry accepts an exact original,
+the current verifier's removed-Create evidence and its host scope.
+It returns the same retained case for a verified semantic retry.
+An original already selected in ordinary history produces no hold.
+A damaged or unavailable ordinary archive leaves the attempt unresolved.
+The entry has no renderer or network command. The caller must supply
+the original checked source and already verified ancestry.
+
 Cold founder invitation issuance can report that the native registry is
 busy. Retrying the same row and invocation at that parent uses the original
 journal and any already covered signature. An incomplete or unreadable

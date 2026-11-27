@@ -6,6 +6,7 @@ use catcoms_storage::private_chat_page::MAX_PRIVATE_CHAT_PAGE_FRAME_BYTES;
 use catcoms_sync::owner_v2::{
     BootstrapSourceContextData, BootstrapSourceId, OpenedBootstrapSourceData,
 };
+use critical_namespaces::read_pool::CatalogReadReservation;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::Weak;
@@ -481,20 +482,72 @@ impl ServerStore {
         group: &[u8],
         signer: [u8; 32],
     ) -> Result<ReadWork, AppError> {
-        use critical_namespaces::{archive_bootstrap as archive, refused};
+        use critical_namespaces::refused;
+        let (fee, key) = self.reserve_bootstrap_source_read(group)?;
+        let root_guard = self.archive_bootstrap_root.lock().map_err(|_| refused())?;
+        let root = root_guard.as_ref().ok_or_else(refused)?;
+        let capture = self.capture_paid_source_under_root(root, (group, signer), (&fee, &key))?;
+        drop(root_guard);
+        drop(fee);
+        Ok(ReadWork {
+            capture,
+            key,
+            #[cfg(test)]
+            before_read: None,
+            #[cfg(test)]
+            after_open: None,
+        })
+    }
+
+    /// Read-only original founder reproof while an explicitly authenticated
+    /// catalog declaration still owns the physical startup. The supplied
+    /// archive root is independently held and never installed by this read.
+    pub(in crate::store) fn read_saved_bootstrap_source_under_root(
+        &self,
+        root: &critical_namespaces::archive_bootstrap::MountedRoot,
+        group: &[u8],
+        signer: [u8; 32],
+    ) -> Result<RetainedBootstrapSourceData, AppError> {
+        let (fee, key) = self.reserve_bootstrap_source_read(group)?;
+        let capture = self.capture_paid_source_under_root(root, (group, signer), (&fee, &key))?;
+        let data = ReadWork {
+            capture,
+            key,
+            #[cfg(test)]
+            before_read: None,
+            #[cfg(test)]
+            after_open: None,
+        }
+        .run()?;
+        data.validate_under_archive_root(self, root)?;
+        Ok(data)
+    }
+
+    fn reserve_bootstrap_source_read(
+        &self,
+        group: &[u8],
+    ) -> Result<(Arc<CatalogReadReservation>, Zeroizing<[u8; 32]>), AppError> {
+        use critical_namespaces::refused;
         if group.is_empty() || group.len() > 256 || self.dir.as_os_str().len() > MAX_PATH {
             return Err(refused());
         }
         let policy = self.archive_bootstrap_policy.as_ref().ok_or_else(refused)?;
         policy.source_read.as_ref().ok_or_else(refused)?;
         validate_fixed_invoice()?;
-        // Before ANY small/large data buffer, not a scalar promise decoded from a terminal.
-        // Keep this original fee alias OUTSIDE Root so early refusals cannot drop its last
-        // owner/reenter the pool while a global writer is held.
+        // Prepare payment before borrowing the mounted root. An error
+        // with the root held cannot retire the last original reservation.
         let fee = Arc::new(policy.pending.pool.try_reserve(READ_FEE)?);
         let key = Zeroizing::new(self.keys.db_key()?);
-        let root_guard = self.archive_bootstrap_root.lock().map_err(|_| refused())?;
-        let root = root_guard.as_ref().ok_or_else(refused)?;
+        Ok((fee, key))
+    }
+
+    fn capture_paid_source_under_root(
+        &self,
+        root: &critical_namespaces::archive_bootstrap::MountedRoot,
+        (group, signer): (&[u8], [u8; 32]),
+        (fee, key): (&Arc<CatalogReadReservation>, &[u8; 32]),
+    ) -> Result<Arc<ReadCapture>, AppError> {
+        use critical_namespaces::{archive_bootstrap as archive, refused};
         let root_path = self.dir.join(critical_namespaces::ARCHIVE_BOOTSTRAP_ROOT);
         validate_archive_root_session(&root_path, root)?;
         if root.negative.is_cancelled() {
@@ -506,7 +559,7 @@ impl ServerStore {
         let target_id = catcoms_storage::kept::session_id(&target_directory).map_err(io)?;
         let origin = read_control(&target.join("origin"), founder::MAX_TARGET_MARKER_FRAME)?;
         let (invocation, debit_id) = founder::open_target_marker_locator_data(
-            &key,
+            key,
             &origin.frame,
             root.descriptor.vault,
             root.descriptor.root,
@@ -530,14 +583,13 @@ impl ServerStore {
         if founder::DebitId::of(&debit.frame) != debit_id {
             return Err(refused());
         }
-        let actual_debit = founder::open_debit_data(&key, invocation, &debit.frame)?;
-        let marker =
-            founder::open_target_marker_data(&key, &actual_debit, debit_id, &origin.frame)?;
+        let actual_debit = founder::open_debit_data(key, invocation, &debit.frame)?;
+        let marker = founder::open_target_marker_data(key, &actual_debit, debit_id, &origin.frame)?;
         let terminal = read_control(
             &control_path(&root_path, &invocation, FounderControlSlot::Intent)?,
             founder::MAX_INTENT_FRAME,
         )?;
-        let data = founder::open_intent_data(&key, &actual_debit, debit_id, &terminal.frame)?;
+        let data = founder::open_intent_data(key, &actual_debit, debit_id, &terminal.frame)?;
         data.matches_marker(&marker, founder::TargetMarkerId::of(&origin.frame))?;
         let founder::IntentKind::SourceSaved {
             context,
@@ -594,16 +646,7 @@ impl ServerStore {
         });
         // No full producer/SDK operation follows this exact final selected-file proof.
         capture.verify_selected_files()?;
-        drop(root_guard);
-        drop(fee);
-        Ok(ReadWork {
-            capture,
-            key,
-            #[cfg(test)]
-            before_read: None,
-            #[cfg(test)]
-            after_open: None,
-        })
+        Ok(capture)
     }
 }
 

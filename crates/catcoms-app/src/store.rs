@@ -673,6 +673,7 @@ mod persistence {
     /// Chat V2 ordinary-member durable outbox; independent of the founder `v2_text` journal.
     pub(in crate::store) mod v2_member_outbox;
     pub(in crate::store) mod v2_member_transport;
+    mod v2_review_hold;
     pub(in crate::store) mod v2_shared_history;
     pub(in crate::store) mod v2_text;
     pub(in crate::store) use cold_source_read::v2_genesis_activation;
@@ -2864,9 +2865,29 @@ mod persistence {
             Ok(())
         }
 
-        /// Strict bounded original-root read and real barriers. Root/marker IDs remain held for
-        /// final on-demand absence checks; authenticated labels alone never construct this value.
+        /// Cover the exact read-only capture before selecting the archive.
         pub(super) fn open_declared_archive_root(
+            &self,
+            descriptor: &critical_namespaces::archive_bootstrap::Descriptor,
+            fee: critical_namespaces::read_pool::CatalogReadReservation,
+        ) -> Result<critical_namespaces::archive_bootstrap::MountedRoot, AppError> {
+            let root = self.capture_declared_archive_root(descriptor, fee)?;
+            root.marker
+                .sync_all()
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            root.directory
+                .sync_all()
+                .map_err(|error| AppError::Io(error.to_string()))?;
+            sync_directory(&self.dir).map_err(|error| AppError::Io(error.to_string()))?;
+            let path = self.dir.join(critical_namespaces::ARCHIVE_BOOTSTRAP_ROOT);
+            validate_archive_root_session(&path, &root)?;
+            Ok(root)
+        }
+
+        /// Read the actual named ID2 leaf under the original vault session.
+        /// A declaration can use this read before the common opener publishes
+        /// an archive root. This does not add publication or mutation authority.
+        pub(in crate::store) fn capture_declared_archive_root(
             &self,
             descriptor: &critical_namespaces::archive_bootstrap::Descriptor,
             fee: critical_namespaces::read_pool::CatalogReadReservation,
@@ -2890,25 +2911,7 @@ mod persistence {
             archive::verify_marker_frame(&self.keys.db_key()?, descriptor, &raw)?;
             let marker_id = catcoms_storage::kept::session_id(&marker)
                 .map_err(|error| AppError::Io(error.to_string()))?;
-            marker
-                .sync_all()
-                .map_err(|error| AppError::Io(error.to_string()))?;
-            directory
-                .sync_all()
-                .map_err(|error| AppError::Io(error.to_string()))?;
-            sync_directory(&self.dir).map_err(|error| AppError::Io(error.to_string()))?;
-            let reopened = open_archive_directory(&path)?;
-            if catcoms_storage::kept::session_id(&reopened)
-                .map_err(|error| AppError::Io(error.to_string()))?
-                != directory_id
-                || !matches!(
-                    catcoms_storage::kept::session_at(&path.join(archive::ROOT_MARKER), marker_id),
-                    catcoms_storage::kept::SessionAt::Ours
-                )
-            {
-                return Err(refused());
-            }
-            Ok(archive::MountedRoot {
+            let root = archive::MountedRoot {
                 descriptor: descriptor.clone(),
                 directory,
                 directory_id,
@@ -2918,7 +2921,9 @@ mod persistence {
                 mount: self.registry_mount(),
                 negative: self.chat_mount.observer(),
                 _fee: fee,
-            })
+            };
+            validate_archive_root_session(&path, &root)?;
+            Ok(root)
         }
 
         pub(super) fn archive_target_absent_under_original_root(
@@ -5801,6 +5806,9 @@ pub struct ServerStore {
     shared_history_mount: std::sync::Mutex<
         Option<persistence::governance_layout::joined::shared_history::SelectedSharedHistory>,
     >,
+    review_hold_mount: std::sync::Mutex<
+        Option<persistence::governance_layout::joined::review_hold::SelectedReviewHold>,
+    >,
     // Namespace5 marker + held member-outbox parent, installed only by the concrete configured
     // handler. Its presence is mount DATA, never a member-source or save permission.
     member_outbox_layout: std::sync::Mutex<
@@ -6058,6 +6066,7 @@ impl ServerStore {
             joined_pin_index: Default::default(),
             installed_rejoin: Default::default(),
             shared_history_mount: Default::default(),
+            review_hold_mount: Default::default(),
             member_outbox_layout: Default::default(),
             member_outbox_mount: Default::default(),
             current_layout: Default::default(),

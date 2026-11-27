@@ -280,14 +280,11 @@ pub(super) fn decode_selected_data(
     let plain = Zeroizing::new(unseal(&key, &unframe(inventory.catalog())?)?);
     let parsed = parse_selected_catalog(store, &plain, &original.vault)?;
     let cap = Capability { original };
-    Capability::decode_exact(parsed.native_registry_payload.ok_or_else(refused)?, cap)?;
-    Capability::decode_exact(
-        &open(&key, MARKER_KEY, inventory.marker(), v1::MAX_MARKER_FRAME)?,
+    let index = authenticate_fixed_index(
+        &key,
         cap,
-    )?;
-    let index = Index::decode_data(
-        &open(&key, INDEX_KEY, inventory.index(), super::codec::MAX_FRAME)?,
-        cap,
+        parsed.native_registry_payload.ok_or_else(refused)?,
+        (inventory.index(), inventory.marker()),
     )?;
     let mut successor = false;
     if let Some(stage) = inventory.catalog_stage() {
@@ -316,6 +313,28 @@ pub(super) fn decode_selected_data(
             successor,
         },
     ))
+}
+
+mod review_declaration;
+pub(in crate::store) use review_declaration::VerifiedFounderReviewParent;
+
+/// Authenticate the original unchanging native row, marker and catalog
+/// capability. The caller owns the physical role proof, including any Stage.
+fn authenticate_fixed_index(
+    key: &[u8; 32],
+    capability: Capability,
+    descriptor: &[u8],
+    (index, marker): (&[u8], &[u8]),
+) -> Result<Index, AppError> {
+    Capability::decode_exact(descriptor, capability)?;
+    Capability::decode_exact(
+        &open(key, MARKER_KEY, marker, v1::MAX_MARKER_FRAME)?,
+        capability,
+    )?;
+    Index::decode_data(
+        &open(key, INDEX_KEY, index, super::codec::MAX_FRAME)?,
+        capability,
+    )
 }
 
 fn parse_selected_catalog<'a>(

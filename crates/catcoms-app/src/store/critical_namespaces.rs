@@ -131,6 +131,7 @@ use read_pool::{CatalogReadReservation, EMPTY_READ_FEE};
 pub(in crate::store) mod pending_join;
 pub(in crate::store) mod pending_join_codec;
 pub(in crate::store) mod rejoin_namespace;
+pub(in crate::store) mod review_hold_namespace;
 pub(in crate::store) mod shared_history_namespace;
 pub use pending_join::{
     ActivatedCheckpointJoin, CheckpointJoinExecutionPolicy, CheckpointJoinNetwork,

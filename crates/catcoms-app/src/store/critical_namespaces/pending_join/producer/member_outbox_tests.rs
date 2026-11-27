@@ -341,3 +341,30 @@ fn native_registry_join_successor_refuses_lost_changed_or_unknown_seven() {
         assert!(codec::parse_native_registry_layout(&changed, &VAULT, false, false).is_err());
     }
 }
+
+#[test]
+fn review_hold_join_rewrite_keeps_id10_and_successor_refuses_loss() {
+    let raw = catalog(&[4, 5]);
+    let mut parsed = codec::parse_all_known_for_test(&raw, &VAULT, false).unwrap();
+    let mut target = parsed.rows[0].as_ref().unwrap().metadata.clone();
+    target.revision += 1;
+    target.scheduling = codec::Scheduling::Active;
+    let review = &b"selected founder review namespace"[..];
+    parsed.review_hold_payload = Some(review);
+    let candidate = encode_schedule(&parsed, &target, &VAULT).unwrap();
+    let mut expected = entries(&raw).into_iter().skip(1).collect::<Vec<_>>();
+    expected.push((10, 1, review.to_vec()));
+    assert_eq!(
+        entries(&candidate).into_iter().skip(1).collect::<Vec<_>>(),
+        expected
+    );
+
+    let original = parsed.summary([0; 32]);
+    let mut next = parsed.summary([1; 32]);
+    next.generation = original.generation + 1;
+    next.parent = Some(original.digest);
+    next.rows[0] = Some(target);
+    codec::successor(&original, &next).unwrap();
+    next.review_hold_payload_digest = None;
+    assert!(codec::successor(&original, &next).is_err());
+}

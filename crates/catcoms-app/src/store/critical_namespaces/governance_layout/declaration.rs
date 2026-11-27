@@ -38,6 +38,7 @@ impl ServerStore {
         (
             archive_current_namespace_codec::CurrentLayoutData,
             Option<&'a [u8]>,
+            Option<&'a [u8]>,
         ),
         AppError,
     > {
@@ -48,6 +49,7 @@ impl ServerStore {
         Ok((
             parsed.current_layout.ok_or_else(refused)?,
             parsed.shared_history_payload,
+            parsed.review_hold_payload,
         ))
     }
 

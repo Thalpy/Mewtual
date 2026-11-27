@@ -28,8 +28,23 @@ once the exact parent is valid. This check does not decide whether the
 post was already verified. The bounded plaintext hold frame preserves
 the exact signature and selected Remove coordinates. Loading a frame
 requires separately replayed evidence before the host can trust those
-coordinates. Encrypted persistence, delivery from an approved holder,
-decision selection and the admin timeline remain open.
+coordinates.
+
+The founder review storage uses a distinct critical namespace. Its
+opener requires the exact selected catalog, original marker and directory,
+and a real founder row with its original source and network reservation.
+It holds the selected ordinary-history owner from a clean absence check
+through encrypted hold selection. A pending or damaged ordinary archive
+cannot establish absence. A review case retains its first covered
+signature even when a semantic duplicate arrives.
+
+The declaration excludes ID9 and unresolved rejoin journals. A2 binds
+its Pending to the whole encrypted catalog, so rewriting that catalog
+would strand the exact request. Recovered founder startup can select
+the new namespace and mount it on the same unlock, before exposing the
+row. Restart can finish the same authenticated claim after a cut.
+First-session founder provisioning, approved-holder delivery, signed
+decisions and the admin timeline remain open.
 
 29 October clarification: current desktop new-message sends use a separate save-before-export
 transaction with a persisted retry identity. The accepted-in-memory boundary below still applies

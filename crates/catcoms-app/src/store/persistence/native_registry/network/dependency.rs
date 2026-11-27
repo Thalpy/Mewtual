@@ -104,6 +104,10 @@ impl NetworkDependency {
         self.vault.require(&path(store, false, "")?)
     }
 
+    pub(in crate::store) fn frame_digest(&self) -> [u8; 32] {
+        *blake3::hash(self.output.raw()).as_bytes()
+    }
+
     pub(in crate::store) fn restore_reservation(
         &self,
         store: &ServerStore,

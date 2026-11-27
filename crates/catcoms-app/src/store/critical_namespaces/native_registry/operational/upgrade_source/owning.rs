@@ -453,6 +453,23 @@ impl Store {
         self.physical.recovered_join_registration_data()
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn select_review_storage_before_founder_startup(
+        &self,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<bool, AppError> {
+        self.physical
+            .select_review_storage_before_founder_startup(rng)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn require_review_hold_founder(
+        &self,
+    ) -> Result<(), AppError> {
+        if self.physical.has_mounted_review_hold()? && self.recovered_founder_input()?.is_none() {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn recovered_founder_input(
         &self,
     ) -> Result<Option<RecoveredFounderInput>, AppError> {

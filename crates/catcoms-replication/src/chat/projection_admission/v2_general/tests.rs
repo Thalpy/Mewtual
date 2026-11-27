@@ -1836,6 +1836,10 @@ fn removed_create_evidence_names_the_selected_remove_and_keeps_signature_bytes()
     drop(removed);
     let selected = f.verifier.replay_data();
     let (ledger, view) = f.ledger();
+    assert_eq!(
+        frozen.admission_id_data(),
+        first.admission_data().admission_id()
+    );
     let original = old.encode();
     let proof = f
         .verifier
@@ -1889,6 +1893,9 @@ fn removed_create_evidence_names_the_selected_remove_and_keeps_signature_bytes()
 
     let mut corrupt = original.clone();
     *corrupt.last_mut().unwrap() ^= 1;
+    assert!(proof.require_original_data(&original).is_ok());
+    assert!(proof.require_original_data(&[]).is_err());
+    assert!(proof.require_original_data(&corrupt).is_err());
     assert!(proof.encode_record_data(&corrupt).is_err());
     let mut corrupt_frame = frame.to_vec();
     *corrupt_frame.last_mut().unwrap() ^= 1;

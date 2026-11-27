@@ -123,10 +123,25 @@ impl Bootstrap {
                     let result = (|| {
                         let current = current_policy().map_err(|_| FAILED)?;
                         const EXISTING: &str = "Could not unlock the existing Chat V2 vault.";
-                        let storage = NativeTextJoinedStorage::open_for_native_startup(
+                        let mut storage = NativeTextJoinedStorage::open_for_native_startup(
                             directory, secret, &mut rng, current,
                         )
                         .map_err(|_| EXISTING)?;
+                        if storage
+                            .select_review_storage_before_founder_startup(&mut rng)
+                            .map_err(|_| EXISTING)?
+                        {
+                            // The write used the original exclusive vault
+                            // mount. Transfer no source when replacing it.
+                            drop(storage);
+                            storage = NativeTextJoinedStorage::open_for_native_startup(
+                                directory,
+                                secret,
+                                &mut rng,
+                                current_policy().map_err(|_| FAILED)?,
+                            )
+                            .map_err(|_| EXISTING)?;
+                        }
                         match storage.row_count_data().map_err(|_| EXISTING)? {
                             0 => {
                                 let vault = storage
