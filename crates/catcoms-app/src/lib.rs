@@ -167,6 +167,11 @@ pub enum AppError {
     /// go on. Anything rewording it silently downgrades every such boundary to a guess.
     #[error("persistence committed but could not be made durable: {0}")]
     CommittedButNotDurable(String),
+    /// A competing operation holds the native Chat V2 registry cell.
+    /// The caller can retry its exact operation, including any earlier
+    /// journaled result, after this transient read refusal.
+    #[error("Chat V2 registry is busy")]
+    ChatV2RegistryBusy,
     /// A product-layer validation error (e.g. an over-large avatar).
     #[error("{0}")]
     Invalid(String),

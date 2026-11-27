@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 
 pub(super) const STAGE: &str = "text.wal.stage.v1";
 const FILE_COMPARE_BYTES: usize = 8192;
-const ADD_STAGES: [&str; 12] = [
+pub(super) const ADD_STAGES: [&str; 12] = [
     STAGE,
     request::NAME,
     SDK_ENTRY_NAME,
@@ -46,14 +46,14 @@ const ADD_STAGES: [&str; 12] = [
     response::NAME,
     selected_head::NAME,
 ];
-const REMOVE_STAGES: [&str; 4] = [
+pub(super) const REMOVE_STAGES: [&str; 4] = [
     "text.remove.sdk-entry.v1",
     "text.remove.outcome.v1",
     "text.remove.header-attempt.v1",
     "text.remove.head-stage.v1",
 ];
 
-fn add_stage_path(
+pub(super) fn add_stage_path(
     target: &Path,
     name: &'static str,
     later: Option<TextHeadIdData>,
@@ -96,6 +96,7 @@ pub(in crate::store) use header_read::{
     GovernedAddHeaderRecoveryState, GovernedAddWelcomeRecoveryState,
 };
 mod writer;
+pub(super) use writer::select_named_head;
 pub(in crate::store) use writer::PreparedGovernedRemoveFence;
 pub(in crate::store) use writer::{PreparedColdGovernedAdd, PreparedGovernedAddFence};
 

@@ -126,7 +126,7 @@ fn select_governed_head(
     )
 }
 
-fn select_named_head(
+pub(in crate::store::persistence::v2_text) fn select_named_head(
     (target, directory, id): (&Path, &std::fs::File, catcoms_storage::kept::SessionId),
     stage: &Path,
     head_path: &Path,

@@ -230,7 +230,14 @@ impl<T: MeshTransport, R: CryptoRngCore> member::NativeTextMemberJob<T, R> {
                 return Err(Error::Cancelled);
             }
             inner.require_current().map_err(|_| Error::Unavailable)?;
-            return result.map(InviteResult::Saved).map_err(|_| Error::Failed);
+            return result
+                .map(InviteResult::Saved)
+                .map_err(|error| match error {
+                    // Keep the same original invite token and journal. The
+                    // contention can be at a reproof after a covered save.
+                    AppError::ChatV2RegistryBusy => Error::Busy,
+                    _ => Error::Failed,
+                });
         }
         let driver = body.driver.as_mut().ok_or(Error::Unavailable)?;
         let binding = driver.binding_data().ok_or(Error::Unavailable)?;

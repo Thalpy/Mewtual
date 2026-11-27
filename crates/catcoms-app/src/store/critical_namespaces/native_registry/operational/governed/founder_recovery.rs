@@ -239,6 +239,7 @@ impl NativeTextColdFounderSource {
         Ok(header)
     }
 
+    #[cfg(test)]
     pub(in crate::store::critical_namespaces::native_registry) fn take_native_vault(
         &mut self,
         atoms: (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
@@ -246,6 +247,22 @@ impl NativeTextColdFounderSource {
         caller: &RequestCancellation,
     ) -> Result<crate::store::NativeTextVault, AppError> {
         self.require_recovered_checkpoint(caller)?;
+        self.take_original_native_vault(atoms, budget, caller)
+    }
+
+    /// Startup must authenticate the actual vault before trying repair.
+    /// Moving this original mount grants no row or selected membership.
+    fn take_original_native_vault(
+        &mut self,
+        atoms: (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
+        budget: crate::store::NativeUiInvocationBudget,
+        caller: &RequestCancellation,
+    ) -> Result<crate::store::NativeTextVault, AppError> {
+        if caller.is_cancelled() {
+            return Err(refused());
+        }
+        self.work
+            .require_recovered_founder_source(&self.selection, &self.source)?;
         crate::store::NativeTextVault::from_recovered_joined_index(
             self.index.take().ok_or_else(refused)?,
             atoms,
@@ -264,12 +281,39 @@ impl NativeTextColdFounderSource {
         inputs: crate::store::NativeTextCreationInputs<R>,
         caller: &RequestCancellation,
     ) -> Result<RecoveredFounderNativeSources<R>, AppError> {
-        let vault = self.take_native_vault(atoms, ui_budget.clone(), caller)?;
+        let vault = self.take_original_native_vault(atoms, ui_budget.clone(), caller)?;
         let authentication = vault
             .prepare_native_authentication(ui_budget.prepare()?)
             .verify(secret)?;
+        if let Err(original) = self.require_recovered_checkpoint(caller) {
+            // Only this fresh authenticated startup path can settle a
+            // wholly stored successor. An installed runtime always keeps
+            // the strict reader, including while its own writer is active.
+            if self.governed.is_some() || self.sdk.is_some() || self.genesis.is_some() {
+                return Err(original);
+            }
+            let found =
+                self.work
+                    .with_recovered_founder_store(&self.selection, &self.source, |store| {
+                        HeldColdFounderAdd::complete_staged_add(
+                            store,
+                            &self.source,
+                            self.selection.binding.pin,
+                            caller,
+                        )
+                    })?;
+            if !found {
+                return Err(original);
+            }
+            self.require_recovered_checkpoint(caller)?;
+        }
+        if let Some(governed) = self.governed.as_deref_mut() {
+            self.work
+                .with_recovered_founder_store(&self.selection, &self.source, |store| {
+                    governed.cover_selected_add_startup(store, &self.source, caller)
+                })?;
+        }
         self.bind_original_tcp(caller)?;
-        self.require_recovered_checkpoint(caller)?;
         let mut sources = vault
             .capture_native_sources(policy.prepare()?)
             .finish()

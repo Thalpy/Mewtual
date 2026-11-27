@@ -40,6 +40,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod repair;
+
 const ABSENT: [&str; 4] = [
     "head.stage",
     "text.seed.stage.v1",
