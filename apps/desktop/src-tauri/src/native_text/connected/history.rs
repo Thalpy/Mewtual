@@ -259,15 +259,14 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
                 }
             } else if let Some(parked) = parked {
                 replay = Some((sweep, parked));
+                // Exact fetches are serialized on this row. Keep making
+                // bounded local progress on the paid original instead of
+                // waiting for unrelated inventory or catalogue work. The
+                // replay's original deadline bounds contention here.
+                continue;
             }
-            // One paid continuation per row. Resume one batch and leave room
-            // for inventory and reconciliation work while it is parked.
         }
-        // No other foreground wait can outlive the active paid continuation.
-        let parked_deadline = replay.as_ref().map(|(_, parked)| parked.deadline);
-        if let Some(target) =
-            reconcile_archive_change(&state, source, &mut pending_cursor, parked_deadline).await
-        {
+        if let Some(target) = reconcile_archive_change(&state, source, &mut pending_cursor).await {
             source.notify_received(app, &state, Some(target)).await;
         }
         let Some(candidates) = row.history_peer_candidates() else {
@@ -290,13 +289,13 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
             let updated = with_row_until(
                 &state,
                 source,
-                parked_deadline,
+                Some(local_turn_deadline()),
                 move |original, row, _, scope| {
                     original.maintain_archive_relay_catalogue(&row, channel, &scope)
                 },
             )
             .await;
-            let delay = if matches!(updated, Some(Ok(false))) {
+            let delay = if matches!(updated, None | Some(Ok(false))) {
                 0
             } else {
                 RETRY_MS
@@ -305,13 +304,9 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
         }
         for peer in candidates {
             for archive in [false, true] {
-                let parked = replay
-                    .as_ref()
-                    .is_some_and(|(sweep, _)| sweep.peer == peer && sweep.archive == archive);
-                if !parked
-                    && !peers
-                        .iter()
-                        .any(|sweep| sweep.peer == peer && sweep.archive == archive)
+                if !peers
+                    .iter()
+                    .any(|sweep| sweep.peer == peer && sweep.archive == archive)
                 {
                     peers.push_back(PeerSweep::new(peer, archive));
                 }
@@ -325,7 +320,7 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
         peer_due = now.saturating_add(TURN.as_millis() as u64);
         let mut sweep = peers.remove(index).expect("selected due history peer");
         let mut parked = None;
-        let _ = turn(&state, source, &mut sweep, parked_deadline, &mut parked).await;
+        let _ = turn(&state, source, &mut sweep, &mut parked).await;
         if let Some(parked) = parked {
             replay = Some((sweep, parked));
         } else {
@@ -338,7 +333,6 @@ async fn reconcile_archive_change(
     state: &AppState,
     source: &Arc<Source>,
     cursor: &mut usize,
-    deadline: Option<u64>,
 ) -> Option<ActionId> {
     let pending = source.member_work().pending_archive_changes();
     // This point lookup may finish a durable WAL. It is scoped to the
@@ -352,7 +346,7 @@ async fn reconcile_archive_change(
     with_row_until(
         state,
         source,
-        deadline,
+        Some(local_turn_deadline()),
         move |original, row, local, scope| {
             let selected = original
                 .selected_archive_target_data(&row, channel, change.action, &scope)
@@ -368,7 +362,6 @@ async fn turn(
     state: &AppState,
     source: &Arc<Source>,
     sweep: &mut PeerSweep,
-    parked_deadline: Option<u64>,
     parked: &mut Option<ParkedOriginal>,
 ) -> Option<()> {
     let page = sweep.page.clone();
@@ -383,9 +376,6 @@ async fn turn(
             return None;
         }
         if let Some(action) = page.action_at(sweep.next_entry) {
-            if parked_deadline.is_some() {
-                return None;
-            }
             let now = SystemClock.monotonic_ms();
             let mut deadline = *sweep
                 .exact_deadline
@@ -430,8 +420,8 @@ async fn turn(
                 }
                 Some(EntryResult::TryAgain) => sweep.finish_original(false),
                 Some(EntryResult::LocallyBusy) => {
-                    // The driver never owned this request, so the same
-                    // wire retry is available when lower custody retires.
+                    // No wire attempt entered the driver. Local admission
+                    // can retry within the same original deadline.
                     if let Some(ancestry) = &mut sweep.ancestry {
                         ancestry.requests -= 1;
                     }
@@ -459,7 +449,7 @@ async fn turn(
     let request = with_row_until(
         state,
         source,
-        parked_deadline,
+        Some(local_turn_deadline()),
         move |original, row, _, scope| match page {
             Some(page) => {
                 original.prepare_history_continuation(&row, &page, scope, &mut OsCryptoRng)
@@ -488,13 +478,7 @@ async fn turn(
             return None;
         }
     };
-    let request_time = time_remaining(parked_deadline, REQUEST);
-    if request_time < REQUEST {
-        // A carried reply near its own deadline must not give an unrelated
-        // provider a partial response window and count it as a failure.
-        return None;
-    }
-    let requested = tokio::time::timeout(request_time, exchange.receive()).await;
+    let requested = tokio::time::timeout(REQUEST, exchange.receive()).await;
     if matches!(&requested, Ok(Err(TransportError::Busy))) {
         sweep.due = SystemClock
             .monotonic_ms()
@@ -596,7 +580,7 @@ async fn fetch_entry(
     let request = planned.request.clone();
     let channel = source.channel();
     let check_local = planned.expected.is_none();
-    let fetch = with_row_until(
+    let Some(fetch) = with_row_until(
         state,
         source,
         ancestry_deadline,
@@ -613,6 +597,16 @@ async fn fetch_entry(
             };
             if local.is_some() && page.is_current_cached() {
                 return Ok(Fetch::Covered);
+            }
+            // Own Create already projects from the same durable outbox.
+            // Edits and deletes must still reach an older received copy,
+            // and targeted replay must check the exact signed digest.
+            if check_local && matches!(&request, ExactRequest::Offered(_)) {
+                match original.covers_discovered_own_create(&row, &page, action, &scope) {
+                    Ok(true) => return Ok(Fetch::Covered),
+                    Ok(false) | Err(V2MemberSaveRefusal::Busy) => {}
+                    Err(error) => return Err(error),
+                }
             }
             match request {
                 ExactRequest::Offered(action) => original.prepare_discovered_original(
@@ -637,11 +631,14 @@ async fn fetch_entry(
             .map(Fetch::Request)
         },
     )
-    .await?;
+    .await
+    else {
+        return Some(EntryResult::LocallyBusy);
+    };
     let exchange = match fetch {
         Ok(Fetch::Covered) => return Some(EntryResult::Covered),
         Ok(Fetch::Request(exchange)) => exchange,
-        Err(V2MemberSaveRefusal::Busy) => return None,
+        Err(V2MemberSaveRefusal::Busy) => return Some(EntryResult::LocallyBusy),
         Err(failure) => {
             #[cfg(test)]
             eprintln!("chat history worker could not prepare exact fetch: {failure:?}");
@@ -834,6 +831,12 @@ fn time_remaining(deadline: Option<u64>, maximum: Duration) -> Duration {
     deadline.map_or(maximum, |end| {
         Duration::from_millis(end.saturating_sub(SystemClock.monotonic_ms())).min(maximum)
     })
+}
+
+fn local_turn_deadline() -> u64 {
+    SystemClock
+        .monotonic_ms()
+        .saturating_add(TURN.as_millis() as u64)
 }
 
 async fn with_row_until<T: Send + 'static>(
