@@ -67,6 +67,11 @@ the signed edits and deletions for an exact message. The same native
 authorization covers warm and restored founders. An unfinished archive
 write or corrupt selected record refuses the read without settling it.
 
+The same dialog can show originals saved on this device, including edits,
+deletions, and their local send disposition. It uses the existing
+channel-scoped history reader and keeps the first page's finite endpoint.
+The focused renderer tests, Svelte check and production build pass.
+
 Focused Windows App tests passed for bounded original and revision
 pages, authenticated restart, corrupt selected records and an unfinished
 archive write. The full frontend suite passed with 3,948 tests and the
