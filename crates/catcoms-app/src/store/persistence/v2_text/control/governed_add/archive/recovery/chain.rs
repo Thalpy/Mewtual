@@ -348,6 +348,7 @@ fn require_exact_predecessors(
     directory: &Path,
     predecessors: &[Predecessor],
 ) -> Result<(), AppError> {
+    let io = |error: std::io::Error| AppError::Io(error.to_string());
     let mut buffer = [0; PREDECESSOR_READ_BYTES];
     for predecessor in predecessors {
         let path = archive_child(directory, predecessor.id.as_bytes())?;
