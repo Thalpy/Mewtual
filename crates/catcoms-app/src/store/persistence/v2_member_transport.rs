@@ -13,6 +13,9 @@ use super::v2_shared_history::{
     SharedHistoryActionQuery, SharedHistoryProjectionLease, SharedHistoryScope,
     SHARED_HISTORY_RECORD_FEE,
 };
+use crate::store::critical_namespaces::native_registry::founder_review_intake::{
+    FounderReviewCommand, FounderReviewOutcome,
+};
 use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
 use crate::store::critical_namespaces::refused;
 use crate::store::{NativeTextJoinedMemberProjection, ServerStore, V2MemberSaveRefusal as Refusal};
@@ -1044,6 +1047,7 @@ pub(in crate::store) enum FounderReceiveOperation<'a> {
         Option<&'a crate::store::NativeTextHeldReviewContinuation>,
         usize,
     ),
+    RemovedReview(FounderReviewCommand<'a>, &'a NativeChatMemberDependencies),
 }
 
 /// A founder's paid page of checked local archive records. The scope is a
@@ -1155,5 +1159,6 @@ pub(in crate::store) enum FounderReceiveOutcome {
     SelectedTarget(Option<ActionId>),
     Audit(NativeTextFounderAudit),
     HeldAudit(Box<crate::store::NativeTextHeldReviewPage>),
+    RemovedReview(FounderReviewOutcome),
     RecoveredProjection(Option<NativeTextJoinedMemberProjection>),
 }

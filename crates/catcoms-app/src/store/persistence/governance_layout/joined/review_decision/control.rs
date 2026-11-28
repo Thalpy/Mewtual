@@ -19,6 +19,7 @@ use catcoms_replication::chat::{
     FounderGenesisAnchorData,
 };
 use catcoms_storage::{kept::SessionId, VaultPhysicalWorkLease};
+use catcoms_sync::owner_v2::V2FounderReviewSignOutcome;
 
 mod next;
 mod selected;
@@ -37,6 +38,7 @@ pub(in crate::store) enum ReviewControlFault {
     BeforeAttempt,
     BeforeIntentFileSync,
     BeforeFreshKey,
+    LostReviewKeyResult,
     ShortRawWrite,
     BeforeRawFileSync,
     ShortSelectionScratch,
@@ -52,6 +54,10 @@ pub(in crate::store) enum ReviewControlFault {
 #[cfg(test)]
 thread_local! {
     static CONTROL_FAULT: std::cell::Cell<Option<ReviewControlFault>> = const { std::cell::Cell::new(None) };
+    pub(in crate::store) static AFTER_REVIEW_KEY_FOR_TEST: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
+    pub(in crate::store) static BEFORE_REVIEW_KEY_FOR_TEST: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -297,7 +303,7 @@ impl DecisionControl {
         (store, mount): (&ServerStore, &SelectedReviewDecision),
         spec: ReviewSigningSpec<'_>,
         mut recheck: impl FnMut(Option<ReviewStreamPosition>) -> Result<(), AppError>,
-        sign: impl FnOnce(&[u8]) -> Result<[u8; 64], AppError>,
+        sign: impl FnOnce(&[u8]) -> Result<V2FounderReviewSignOutcome, AppError>,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<ReviewStreamEntry, AppError> {
         let (selected_base, next_sequence) = self.data.prior.as_ref().map_or_else(
@@ -381,10 +387,34 @@ impl DecisionControl {
             if take_fault(ReviewControlFault::BeforeFreshKey) {
                 return Err(AppError::Io("injected stop before review key entry".into()));
             }
-            // Once the caller is invoked, only exact Raw can settle it.
-            // A cold Attempt and an ambiguous native return never re-enter.
+            // The call is ambiguous until it returns exact Raw or proves
+            // that the signing primitive was never invoked. Only that
+            // definite refusal retains the warm retry for this Attempt.
+            // Cold recovery has no such witness.
             self.data.unentered_attempt = false;
-            self.data.signed_raw = Some(sign(prepared.signing_bytes())?);
+            #[cfg(test)]
+            if let Some(hook) = BEFORE_REVIEW_KEY_FOR_TEST.with(std::cell::Cell::take) {
+                hook();
+            }
+            match sign(prepared.signing_bytes())?.into_raw() {
+                Some(signature) => {
+                    #[cfg(test)]
+                    if take_fault(ReviewControlFault::LostReviewKeyResult) {
+                        return Err(AppError::Io(
+                            "injected loss of the review key result".into(),
+                        ));
+                    }
+                    self.data.signed_raw = Some(signature);
+                }
+                None => {
+                    self.data.unentered_attempt = true;
+                    return Err(AppError::ChatV2RegistryBusy);
+                }
+            }
+            #[cfg(test)]
+            if let Some(hook) = AFTER_REVIEW_KEY_FOR_TEST.with(std::cell::Cell::take) {
+                hook();
+            }
         }
         // The caller's End and exact RuntimeLoan remain held here. UI
         // negative checks must not interrupt covering already signed bytes.

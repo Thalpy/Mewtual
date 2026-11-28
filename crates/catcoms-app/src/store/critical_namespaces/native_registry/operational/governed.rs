@@ -21,6 +21,7 @@ use catcoms_sync::{
 };
 mod contact;
 mod founder_recovery;
+pub(in crate::store) use founder_recovery::review as founder_review_intake;
 mod runtime;
 pub(super) use contact::{connect_approved_host, ApprovedContact};
 pub use founder_recovery::{

@@ -550,6 +550,24 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedFreshV2TextFounder<T, R> {
             .prepare_member_history_with_access(layout, read, negative, rng, access)
     }
 
+    pub(in crate::store) fn finish_warm_founder_review(
+        &mut self,
+        layout: &V2CurrentLayoutStore,
+        request: (crate::store::NativeTextInitialReviewRequest, bool),
+        keys: crate::store::critical_namespaces::native_registry::founder_review_intake::WarmFounderReviewKeys<'_>,
+        caller: &RequestCancellation,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<Option<catcoms_replication::chat::owner_bodies::ReviewStreamEntry>, AppError> {
+        keys.0.preflight(&self.origin)?;
+        if !self.is_ready_data() {
+            return Err(refused());
+        }
+        self.host
+            .as_mut()
+            .ok_or_else(refused)?
+            .finish_warm_founder_review(layout, request, keys, caller, rng)
+    }
+
     pub(in crate::store) fn run_founder_member_receive(
         &mut self,
         layout: &V2CurrentLayoutStore,

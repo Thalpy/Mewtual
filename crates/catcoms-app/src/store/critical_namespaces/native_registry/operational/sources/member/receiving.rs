@@ -10,6 +10,9 @@ use super::super::super::governed::{
     NativeTextFounderReviewSweep,
 };
 use super::*;
+use crate::store::critical_namespaces::native_registry::founder_review_intake::{
+    FounderReviewCommand, FounderReviewOutcome,
+};
 use crate::store::persistence::v2_member_transport::{
     FounderReceiveOperation, FounderReceiveOutcome, FounderReceiveSession,
     NativeTextFounderDependencyResponse, NativeTextFounderFrameOutcome, NativeTextFounderReceived,
@@ -546,9 +549,14 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
         contact: [u8; V2_MEMBER_CONTACT_BYTES],
         caller: &RequestCancellation,
     ) -> Result<Arc<NativeTextFounderReviewSweep>, V2MemberSaveRefusal> {
-        self.with_recovered_review(caller, |founder, signal, _| {
-            founder.start_removed_review(channel, admission, contact, signal)
-        })
+        match self.run_removed_review(
+            channel,
+            FounderReviewCommand::Start(admission, &contact),
+            caller,
+        )? {
+            FounderReviewOutcome::Sweep(sweep) => Ok(sweep),
+            _ => Err(V2MemberSaveRefusal::Failed),
+        }
     }
 
     /// Release the original restored runtime before awaiting the exact
@@ -559,9 +567,14 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
         query: V2RemovedReviewQuery,
         caller: &RequestCancellation,
     ) -> Result<NativeTextFounderReviewExchange, V2MemberSaveRefusal> {
-        self.with_recovered_review(caller, |founder, signal, rng| {
-            founder.prepare_removed_review(sweep, query, signal, rng)
-        })
+        match self.run_removed_review(
+            sweep.channel_data(),
+            FounderReviewCommand::Prepare(sweep, query),
+            caller,
+        )? {
+            FounderReviewOutcome::Exchange(exchange) => Ok(*exchange),
+            _ => Err(V2MemberSaveRefusal::Failed),
+        }
     }
 
     /// Reacquire the original selected row before authenticating a received
@@ -571,21 +584,26 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
         reply: NativeTextFounderReviewReply,
         caller: &RequestCancellation,
     ) -> Result<NativeTextFounderReviewResult, V2MemberSaveRefusal> {
-        self.with_recovered_review(caller, |founder, signal, rng| {
-            founder.receive_removed_review(reply, signal, rng)
-        })
+        let channel = reply.scope_data().0;
+        match self.run_removed_review(channel, FounderReviewCommand::Receive(&reply), caller)? {
+            FounderReviewOutcome::Received(result) => Ok(result),
+            _ => Err(V2MemberSaveRefusal::Failed),
+        }
     }
 
-    fn with_recovered_review<T>(
+    fn run_removed_review(
         self,
+        channel: u128,
+        operation: FounderReviewCommand<'_>,
         caller: &RequestCancellation,
-        work: impl FnOnce(
-            &mut crate::store::NativeTextColdFounderSource,
-            &RequestCancellation,
-            &mut R,
-        ) -> Result<T, AppError>,
-    ) -> Result<T, V2MemberSaveRefusal> {
+    ) -> Result<FounderReviewOutcome, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
+        let lane = self
+            .row
+            .original
+            .dependency_lane
+            .clone()
+            .ok_or(Refusal::Unavailable)?;
         let (cell, mut keys) = self.prepare_keys()?;
         let source = keys.member_entry().1.observe_current();
         let signal = connected::constrain_founder_transport(
@@ -594,25 +612,16 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
             caller.clone(),
             None,
         );
-        let mut job = self.finish_prepared((cell, keys))?;
-        let inner = &mut job.inner;
-        inner.require_current().map_err(|_| Refusal::Cancelled)?;
-        let body = inner.loan.body.as_mut().ok_or(Refusal::Unavailable)?;
-        let founder = body
-            .recovered_founder
-            .as_mut()
-            .ok_or(Refusal::Unavailable)?;
-        let rng = body.rng.as_mut().ok_or(Refusal::Unavailable)?;
-        let result = work(founder, &signal, rng);
-        inner.loan.recorded = true;
-        inner.require_current().map_err(|_| Refusal::Cancelled)?;
-        if signal.is_cancelled() {
-            return Err(Refusal::Cancelled);
-        }
-        result.map_err(|error| match error {
-            AppError::ChatV2ArchiveBusy => Refusal::Busy,
-            _ => Refusal::Failed,
-        })
+        let job = self.finish_prepared((cell, keys))?;
+        let FounderReceiveOutcome::RemovedReview(outcome) = job.run_founder_member_receive(
+            channel,
+            FounderReceiveOperation::RemovedReview(operation, &lane),
+            &signal,
+        )?
+        else {
+            return Err(Refusal::Failed);
+        };
+        Ok(outcome)
     }
 }
 
@@ -679,5 +688,18 @@ fn run_recovered_receive(
         FounderReceiveOperation::HeldAudit(after, limit) => FounderReceiveOutcome::HeldAudit(
             Box::new(founder.selected_held_review_window(channel, after, limit, caller)?),
         ),
+        FounderReceiveOperation::RemovedReview(operation, _) => {
+            FounderReceiveOutcome::RemovedReview(match operation {
+                FounderReviewCommand::Start(admission, contact) => FounderReviewOutcome::Sweep(
+                    founder.start_removed_review(channel, admission, *contact, caller)?,
+                ),
+                FounderReviewCommand::Prepare(sweep, query) => FounderReviewOutcome::Exchange(
+                    Box::new(founder.prepare_removed_review(sweep, query, caller, rng)?),
+                ),
+                FounderReviewCommand::Receive(reply) => FounderReviewOutcome::Received(
+                    founder.receive_removed_review(reply, caller, rng)?,
+                ),
+            })
+        }
     })
 }

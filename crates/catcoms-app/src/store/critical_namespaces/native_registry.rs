@@ -21,6 +21,7 @@ pub(in crate::store) use lifecycle::{
 // size grants no policy, reserve, handler or physical/native authority.
 pub(in crate::store) const NATIVE_INDEX3_FULL_FEE: usize = lifecycle::preparation::PREPARATION_FEE;
 pub(in crate::store::critical_namespaces) mod operational;
+pub(in crate::store) use operational::founder_review_intake;
 pub(in crate::store) mod preparation;
 
 pub use lifecycle::joined::NativeTextJoinedRegistryRowData;

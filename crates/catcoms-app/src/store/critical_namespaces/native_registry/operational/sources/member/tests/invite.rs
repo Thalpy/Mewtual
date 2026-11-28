@@ -15,6 +15,7 @@ use std::time::Duration;
 
 mod review_projection;
 mod warm_review_authority;
+mod warm_review_mutation;
 
 struct TestArchiveAdmission;
 
@@ -146,6 +147,11 @@ fn mounted_founder_holds_a_removed_create_from_the_original_survivor_over_tcp() 
 }
 
 #[test]
+fn warm_native_founder_holds_and_selects_a_review_decision_across_lock() {
+    run_mounted_successor(MountedSuccessor::WarmReviewMutation);
+}
+
+#[test]
 fn mounted_join_review_selects_before_first_row_publication_after_pending_reopen() {
     run_mounted_successor(MountedSuccessor::WarmReview);
 }
@@ -184,6 +190,7 @@ enum MountedSuccessor {
     RemovedReview,
     WarmReview,
     WarmReviewCut,
+    WarmReviewMutation,
     UnsettledCreate,
     ReceiveCapacity,
     JoinedLedgerReplay,
@@ -466,7 +473,7 @@ async fn cold_native_founder_reuses_the_covered_source_and_listener() {
 }
 
 async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSuccessor>) {
-    use super::super::super::tests::{policy, selected_joined};
+    use super::super::super::tests::{policy, selected_joined, selected_with_ui};
     use crate::store::critical_namespaces::native_registry::preparation::tests::{
         current_policy, SECRET,
     };
@@ -482,6 +489,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         (false, Some(MountedSuccessor::RemovedReview)) => 0xe830,
         (false, Some(MountedSuccessor::WarmReview)) => 0xe840,
         (false, Some(MountedSuccessor::WarmReviewCut)) => 0xe850,
+        (false, Some(MountedSuccessor::WarmReviewMutation)) => 0xe860,
         (false, Some(MountedSuccessor::MissedHistory)) => 0xe7a0,
         (false, Some(MountedSuccessor::UnsettledCreate)) => 0xe7b0,
         (false, Some(MountedSuccessor::ReceiveCapacity)) => 0xe7d0,
@@ -490,14 +498,23 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         (false, Some(MountedSuccessor::LargeArchive)) => 0xe7f0,
     };
     let founder_dir = tempfile::tempdir().unwrap();
-    let (founder, founder_budget) = selected_joined(founder_dir.path());
+    let warm_ui = (successor == Some(MountedSuccessor::WarmReviewMutation))
+        .then(warm_review_mutation::WarmFounderUi::new);
+    let (founder, founder_budget) = match warm_ui.as_ref() {
+        Some(ui) => selected_with_ui(founder_dir.path(), true, ui.values()),
+        None => selected_joined(founder_dir.path()),
+    };
+    let founder = Arc::new(founder);
     let owner = prepared_mesh_founder_with_clock(
         &founder,
         &founder_budget,
         seed,
         Box::new(catcoms_rt::SystemClock),
     );
-    let (owner, row) = if successor == Some(MountedSuccessor::WarmReview) {
+    let (owner, row) = if matches!(
+        successor,
+        Some(MountedSuccessor::WarmReview | MountedSuccessor::WarmReviewMutation)
+    ) {
         let creation = || {
             owner
                 .prepare_creation(
@@ -1217,7 +1234,10 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             .is_some());
         founder_archived = Some(original.action_id_data());
         founder_archive_digest = Some(original.original_digest_for_test());
-        if successor == Some(MountedSuccessor::RemovedReview) {
+        if matches!(
+            successor,
+            Some(MountedSuccessor::RemovedReview | MountedSuccessor::WarmReviewMutation)
+        ) {
             let parent = original.signing_dependency_for_test();
             review_reply_parent = Some(((*parent.action).clone(), parent.admission));
         }
@@ -2338,7 +2358,9 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         use catcoms_rt::TransportEvent;
         let stale_contact = (!matches!(
             successor,
-            MountedSuccessor::Remove | MountedSuccessor::RemovedReview
+            MountedSuccessor::Remove
+                | MountedSuccessor::RemovedReview
+                | MountedSuccessor::WarmReviewMutation
         ))
         .then(|| {
             recovered_row()
@@ -2566,9 +2588,11 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         drop((lane, ingress));
         if matches!(
             successor,
-            MountedSuccessor::Remove | MountedSuccessor::RemovedReview
+            MountedSuccessor::Remove
+                | MountedSuccessor::RemovedReview
+                | MountedSuccessor::WarmReviewMutation
         ) {
-            let (removed_head, removed_epoch, original_eviction, covered, late) = Box::pin(async {
+            let removed = Box::pin(async {
                 use catcoms_replication::chat::owner_header::OwnerBodyId;
                 let contact = recovered_row()
                     .sign_member_contact(&selection, &fresh)
@@ -2584,7 +2608,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     .connect(&scheduler)
                     .await
                     .unwrap();
-                let late = if successor == MountedSuccessor::RemovedReview {
+                let late = if successor != MountedSuccessor::Remove {
                     use crate::store::{MemberSaveJobReport, MemberSaveNativeAdmission};
                     use catcoms_net::NativeChatMemberGossipEvent;
                     use catcoms_replication::chat::{ActionState, V2OrdinaryReceiveStatus};
@@ -2765,6 +2789,25 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     assert_eq!(result, Ok((removed_head, removed_epoch)));
                 }
                 drop(lane);
+                if let (Some(ui), Some(actions)) = (warm_ui.as_ref(), late.as_ref()) {
+                    let prepare = || owner.capture_member(
+                        &row, ui.command(&founder, &founder_budget), owner.policy.prepare_member().unwrap(),
+                    );
+                    Box::pin(warm_review_mutation::prove_original_warm_hold(
+                        &prepare,
+                        &recovered_row,
+                        (&selection, &invite, token),
+                        (channel, third_own, actions),
+                        &fresh,
+                    ))
+                    .await;
+                    warm_review_mutation::prove_warm_selection_across_lock(
+                        prepare,
+                        (ui, &founder, founder_dir.path()),
+                        (channel, actions[0], (removed_head, removed_epoch)),
+                        &fresh,
+                    );
+                }
                 let mut retirement = owner.prepare_retirement().unwrap();
                 tokio::time::timeout(std::time::Duration::from_secs(8), async {
                     while retirement.try_retire().unwrap()
@@ -2776,6 +2819,9 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 .await
                 .expect("the founder's original governing TCP actor drained before the relay");
                 drop(retirement);
+                if warm_ui.is_some() {
+                    return None;
+                }
                 tokio::time::timeout(std::time::Duration::from_secs(5), async {
                     loop {
                         if matches!(recovered_row().prepare_governing_exchange(&selection, fresh.clone()),
@@ -2873,9 +2919,13 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     })
                     .expect("the third original's immutable terminal continuation");
                 let covered = std::fs::read(&original_eviction).unwrap();
-                (removed_head, removed_epoch, original_eviction, covered, late)
+                Some((removed_head, removed_epoch, original_eviction, covered, late))
             })
             .await;
+            let Some((removed_head, removed_epoch, original_eviction, covered, late)) = removed
+            else {
+                return;
+            };
             drop(third_selection);
             Box::pin(async move {
                 let recovered_row =
@@ -3053,7 +3103,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                             std::time::Duration::from_secs(15),
                             async { tokio::join!(exchange.request(), serve) },
                         ).await.unwrap();
-                        cold.receive_removed_review(reply.unwrap(), &fresh, &mut history_rng).unwrap()
+                        cold.receive_removed_review(&reply.unwrap(), &fresh, &mut history_rng).unwrap()
                     };
                     let NativeTextFounderReviewResult::Page(page) = turn(V2RemovedReviewQuery::Page(None)).await
                     else { panic!("the approved survivor must provide its review page"); };

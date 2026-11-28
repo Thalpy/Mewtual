@@ -1028,6 +1028,9 @@ After the first selected Add, the same audit and connected public review
 reply routes accept the original mounted warm founder. The warm writer
 rechecks its selected membership and exact retained predecessors before
 serving a historical decision anchor.
+The original mounted founder can also fetch and hold the exact removed
+Create through an approved peer connection. It uses the same protected
+ReviewDecision purpose and private transaction as a recovered founder.
 The native recovered-founder operation supports independent cases and
 Reject, Reopen and Approve transitions. Exact retry looks up the original
 intent before consulting the latest case. The main-window

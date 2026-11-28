@@ -4426,7 +4426,9 @@ reading the native row. A close between declarations prevents the stale
 request from starting the next one.
 
 A main-window decision command takes exact held-case coordinates and an
-intent. It uses the recovered founder's own key and signed Case index.
+intent. It uses the original warm or recovered founder's own key and
+signed Case index. The warm founder binds its protected signing scope to
+the original issuer installed with its first Add.
 The held-post status read checks the original hold and current decision
 independently. Missing required files cannot prove an undecided case.
 The original mounted warm founder also rechecks the exact current

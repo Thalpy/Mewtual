@@ -1,5 +1,6 @@
 //! The original recovered founder's narrow review signature. App owns the
 //! covered intent, selected case and stream, and the authenticated Raw write.
+use super::super::review::{enter_review_key, V2FounderReviewSignOutcome};
 use super::*;
 use catcoms_replication::chat::{
     owner_bodies::{
@@ -8,9 +9,7 @@ use catcoms_replication::chat::{
     },
     FounderGenesisAnchorData, V2GeneralPrefixVerifier, V2RemovedCreateEvidence,
 };
-use catcoms_rt::{
-    NativeChatKeyEnds, NativeChatKeyPurpose, NativeChatPreparedKeyCut, NativeChatSourceObservation,
-};
+use catcoms_rt::{NativeChatKeyEnds, NativeChatPreparedKeyCut, NativeChatSourceObservation};
 
 impl PreparedV2FounderRecoveredAdd {
     /// App must cover the original exact Intent and Attempt before entry.
@@ -32,7 +31,7 @@ impl PreparedV2FounderRecoveredAdd {
             &mut NativeChatPreparedKeyCut,
             &mut NativeChatKeyEnds,
         ),
-    ) -> Result<[u8; 64], SyncError> {
+    ) -> Result<V2FounderReviewSignOutcome, SyncError> {
         if self.source != original.source_id_data()
             || !self.group.is_designated_committer(&self.device)
             || self
@@ -65,12 +64,11 @@ impl PreparedV2FounderRecoveredAdd {
         };
         let exact = UnsignedReviewStreamEntry::rederive(&pin, position, decision, covered_preimage)
             .map_err(|_| unavailable())?;
-        cut.require_never_entered_data(native, NativeChatKeyPurpose::ReviewDecision)
-            .map_err(|_| unavailable())?;
         // RT can retain an End before its final cancellation check. That
         // End alone never authorizes signing or creates a recoverable Raw.
-        cut.enter(native, NativeChatKeyPurpose::ReviewDecision, ends)
-            .map_err(|_| unavailable())?;
+        if !enter_review_key(native, cut, ends)? {
+            return Ok(V2FounderReviewSignOutcome::refused_before_signing());
+        }
         if self.native_origin.is_none() {
             self.native_origin = Some(native.clone());
         }
@@ -80,6 +78,7 @@ impl PreparedV2FounderRecoveredAdd {
                 exact.signing_bytes(),
                 MAX_UNSIGNED_REVIEW_STREAM_ENTRY_BYTES,
             )
+            .map(V2FounderReviewSignOutcome::signed)
             .map_err(|_| unavailable())
     }
 }

@@ -30,8 +30,21 @@ the affected row and withholds the old statuses.
 The focused App run passed 12 tests. It exercised the same-session audit
 and a real checked empty-journal response after a warm Join, plus the
 four-vault restart, retained registration, changed-file and torn-stage
-cases. Accepting new held posts and signing decisions on the original
-founder still require the warm mutation path.
+cases.
+
+The same original founder can now fetch a removed member's exact signed
+Create from a current holder, retain it in Held posts and sign and select
+the requested decision. It verifies the selected Remove and ordinary
+reply ancestry. Both warm and recovered founders can retry an exact
+Attempt after the original native key cut confirms that signing did not
+start. A lost key result keeps the Attempt held.
+
+Five focused Windows App tests passed. The live TCP fixture checks stale
+reply refusal, two covered holds, and the real founder key on both sides
+of UI lock. It verifies that an old invocation can cover its admitted
+signature and that a fresh invocation selects those same bytes. A lost
+key result cannot sign again. The cold four-vault scenario and the
+original founder declaration cases passed on the same build.
 
 ## Recover signed founder decisions on a joined vault
 
@@ -93,9 +106,8 @@ it publishes the original founder row. It keeps the same live TCP actor
 and rejects an older or replaced Current. Pre-write pressure can retry
 the original request. An interrupted write can need a cold reopen.
 
-First-session hold intake and decision signing, automatic reconnection,
-existing ID9 migration and combined acceptance remain open. The desktop
-Chat V2 switch remains off.
+Automatic reconnection, existing ID9 migration and combined acceptance
+remain open. The desktop Chat V2 switch remains off.
 
 The ordinary received archive still enforces a 2,048-record limit and
 a 256 MiB quota. Hot ledger rotation still reaches that durable limit.
@@ -118,8 +130,8 @@ and row before releasing text.
 The App TCP fixture retrieves one withheld post through a survivor
 and reads it after a second founder restart. It verifies that ordinary
 chat cannot display the post and that audit refuses a replaced directory.
-The recovered founder journal retains each exact decision. First-session
-founder review and final acceptance remain open.
+The founder journal retains each exact decision across both startup paths.
+Final acceptance remains open.
 
 ## Recover removed-member posts for founder review
 

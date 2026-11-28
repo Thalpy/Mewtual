@@ -1909,6 +1909,20 @@ impl SourceWork {
         )
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn finish_warm_founder_review<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &self,
+        driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
+        request: (crate::store::NativeTextInitialReviewRequest, bool),
+        keys: crate::store::critical_namespaces::native_registry::founder_review_intake::WarmFounderReviewKeys<'_>,
+        caller: &catcoms_rt::RequestCancellation,
+        rng: &mut dyn catcoms_rt::CryptoRngCore,
+    ) -> Result<Option<catcoms_replication::chat::owner_bodies::ReviewStreamEntry>, AppError> {
+        driver.finish_warm_founder_review(self.physical.current()?, request, keys, caller, rng)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn run_founder_member_receive<
         T: catcoms_rt::MeshTransport,
         R: catcoms_rt::CryptoRngCore,

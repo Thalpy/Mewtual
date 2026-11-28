@@ -110,18 +110,17 @@ order and reopens each selected catalog. Fresh native Found selects both
 under the original warm runtime, retaining the exact Current file and
 both original mounts through row selection. It reserves the entire
 preparation before writing each declaration. Closing during an admitted
-write still allows its exact storage transaction to finish. Fresh founder
-moderation and serving still need the same-session authority path. An older ID10-only build refuses once ID11 is
-selected. The original
+write still allows its exact storage transaction to finish. An older
+ID10-only build refuses once ID11 is selected. The original warm or
 recovered founder can cover the first signature under the App's exact
-Intent, Attempt and Raw files. It rechecks the original hold, current
+Intent, Attempt and Raw files. Both recheck the original hold, current
 membership and ordinary archive before the dedicated native key call.
 The exact covered signature can be recovered after a later membership
 change by proving its original Header and epoch in the same selected
 lineage. A fresh key attempt still requires the current membership
 position.
 
-The Rust-only first-decision path freezes the exact control digests,
+The first-decision transaction freezes the exact control digests,
 encrypted record, intent and case index pages, and replacement head in an authenticated write-ahead
 file. A separate scratch name precedes it. Once the file is covered,
 the writer can finish only its exact record and head. It covers the
@@ -169,7 +168,21 @@ connected review queries using the same ID11 reader as a recovered founder.
 An older decision anchor must match an exact retained predecessor of the
 currently selected warm membership. An approval body is served only on
 its requested channel after checking the exact frozen author and Remove.
-Hold intake and decision signing still use the recovered founder path.
+The same live founder can discover and hold an original from an explicitly
+approved connected member. Both founders check the signed contact, exact
+connection and selected Remove across turns. The warm founder reuses its
+own saved originals and shared archive to verify ordinary reply ancestry.
+The original warm founder can also sign and select the exact private
+decision on the same session. The first selected native Add binds its
+SDK owner to the original native issuer. The warm signer rechecks its
+installed MLS fingerprint, Core issuer and exact held evidence before
+entering the same dedicated ReviewDecision key purpose as a recovered
+founder. The shared journal covers Raw and requires a fresh UI command
+before returning a decision after lock.
+An actual native Busy or Lock refusal before the signing primitive
+preserves the same mounted Attempt for a new authorized cut. It leaves
+any partial native End with its original owner until drain. A lost
+primitive result or cold Attempt without Raw stays held.
 
 An explicit selected Review Approve supplies a separate EXACT REVIEWED admission route after a
 removal. It does not append to/change the frozen accepted-log cut or prove accepted-before-removal.

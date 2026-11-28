@@ -527,6 +527,37 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     page.with_runtime_fee(fee),
                 )))
             }
+            FounderReceiveOperation::RemovedReview(operation, transport) => {
+                let FounderAccess::Native(keys) = access else {
+                    return Err(Refusal::Unavailable);
+                };
+                let original = self.owner.borrow_current().map_err(|_| Refusal::Stale)?;
+                let history = FounderHistory::new(
+                    store,
+                    verifier,
+                    original,
+                    channel,
+                    lane.admission,
+                    lane.outbox_context(),
+                )?;
+                let result = review::run_warm_removed_review(
+                    (store, &history),
+                    (&self.owner, lane, verifier),
+                    &keys.original,
+                    (operation, transport),
+                    caller,
+                    || {
+                        keys.preflight(&self.origin)?;
+                        check_governed_member(&self.owner, governed, &lane.domain, verifier, store)
+                    },
+                    rng,
+                )
+                .map_err(|error| match error {
+                    AppError::ChatV2ArchiveBusy => Refusal::Busy,
+                    _ => Refusal::Failed,
+                })?;
+                Ok(FounderReceiveOutcome::RemovedReview(result))
+            }
         }
     }
 }

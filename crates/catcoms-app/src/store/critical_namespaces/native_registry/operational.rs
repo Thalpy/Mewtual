@@ -12,6 +12,7 @@ mod cell;
 pub(super) mod data;
 mod facade;
 mod governed;
+pub(in crate::store) use governed::founder_review_intake;
 mod join_tcp;
 pub use governed::{
     NativeTextColdFounderGoverningRequest, NativeTextColdFounderGoverningRequests,

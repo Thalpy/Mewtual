@@ -423,6 +423,18 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> V2TextOwnedCurr
         }
     }
 
+    pub(super) fn sign_governed_review(
+        &self,
+        store: &ServerStore,
+        verifier: &catcoms_replication::chat::V2GeneralPrefixVerifier,
+        input: crate::store::critical_namespaces::native_registry::founder_review_intake::FounderReviewSign<'_>,
+    ) -> Result<catcoms_sync::owner_v2::V2FounderReviewSignOutcome, AppError> {
+        match &self.core {
+            OwnedCurrent::Warm(current) => current.sign_text_review(store, verifier, input),
+            OwnedCurrent::Cold(_) | OwnedCurrent::Repaired(_) => Err(refused()),
+        }
+    }
+
     pub(super) fn sign_invite(
         &self,
         store: &ServerStore,

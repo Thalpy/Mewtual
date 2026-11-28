@@ -31,9 +31,11 @@ pub use installation::{PreparedV2FounderAddInstall, RetiredV2FounderAddInstall};
 mod invite;
 mod member_transport;
 mod recover;
+mod review;
 pub use recover::{
     PreparedV2FounderRecoveredAdd, PreparedV2RecoveredAddInstall, V2RecoveredFounderAddSigning,
 };
+pub use review::V2FounderReviewSignOutcome;
 mod removal;
 use removal::PendingRemoval;
 pub use removal::{
@@ -252,6 +254,9 @@ pub struct PreparedV2FounderGovernanceNode<T, R> {
     installed: Option<V2InstalledFounderAddData>,
     installed_invites: [Option<[u8; 16]>; crate::MAX_V2_GOVERNING_JOIN_STEPS],
     member: Option<V2AuthenticatedAdmission>,
+    // The first actual Add selection binds review keys to the original
+    // native issuer. Subsequent membership transitions preserve it.
+    native_origin: Option<NativeChatSourceObservation>,
     node: UnboundV2GenesisNode<T, R>,
 }
 
@@ -297,6 +302,7 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
             installed: None,
             installed_invites: [None; crate::MAX_V2_GOVERNING_JOIN_STEPS],
             member: None,
+            native_origin: None,
             node: self,
         })
     }
@@ -323,6 +329,7 @@ impl<T, R> UnboundV2GenesisNode<T, R> {
             installed: None,
             installed_invites: [None; crate::MAX_V2_GOVERNING_JOIN_STEPS],
             member: None,
+            native_origin: None,
             node,
         });
         Ok(())

@@ -8,6 +8,8 @@ use crate::store::persistence::v2_member_outbox::fs::{
 
 mod attempt;
 mod control;
+#[cfg(test)]
+pub(in crate::store) use control::{AFTER_REVIEW_KEY_FOR_TEST, BEFORE_REVIEW_KEY_FOR_TEST};
 mod delivery;
 mod observation;
 mod read;

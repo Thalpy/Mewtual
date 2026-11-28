@@ -1,13 +1,13 @@
 //! The original native row lends a review-specific key cut together with
-//! the actual whole recovered RuntimeLoan. No UI guard spans the IO.
+//! the actual whole RuntimeLoan. No UI guard spans the IO.
 use super::*;
 use crate::store::NativeTextInitialReviewRequest;
 use catcoms_replication::chat::owner_bodies::ReviewStreamEntry;
 use catcoms_rt::{NativeChatKeyEnds, NativeChatKeyPurpose};
 
 impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
-    /// Cover the exact initial review signature on the original recovered
-    /// founder. The returned entry is still private journal data. Selecting
+    /// Cover the exact initial review signature on the original founder.
+    /// The returned entry is still private journal data. Selecting
     /// a case and releasing an approved original are separate operations.
     pub fn cover_initial_founder_review(
         self,
@@ -62,17 +62,25 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
         let mut job = self.finish_prepared((cell, keys))?;
         job.inner.require_current().map_err(|_| Refusal::Stale)?;
         let mut ends = NativeChatKeyEnds::new();
-        let body = job.inner.loan.body.as_mut().ok_or(Refusal::Unavailable)?;
-        let founder = body
-            .recovered_founder
-            .as_mut()
-            .ok_or(Refusal::Unavailable)?;
-        let result = founder.finish_founder_review(
-            request,
-            (&native, &mut review_cut, &mut ends),
-            caller,
-            body.rng.as_mut().ok_or(Refusal::Unavailable)?,
-        );
+        let inner = &mut job.inner;
+        let body = inner.loan.body.as_mut().ok_or(Refusal::Unavailable)?;
+        let rng = body.rng.as_mut().ok_or(Refusal::Unavailable)?;
+        let result = if let Some(founder) = body.recovered_founder.as_mut() {
+            founder.finish_founder_review(
+                request,
+                (&native, &mut review_cut, &mut ends),
+                caller,
+                rng,
+            )
+        } else {
+            body.work.finish_warm_founder_review(
+                body.driver.as_mut().ok_or(Refusal::Unavailable)?,
+                request,
+                (&inner.keys, &mut review_cut, &mut ends),
+                caller,
+                rng,
+            )
+        };
         job.inner.loan.recorded = true;
         // Keep the End through the physical operation, then suppress any
         // result addressed to a caller that locked or changed rows.
@@ -81,7 +89,9 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
         }
         job.inner.require_current().map_err(|_| Refusal::Stale)?;
         let saved = result.map_err(|error| match error {
-            AppError::ChatV2RegistryBusy | AppError::Io(_) => Refusal::Busy,
+            AppError::ChatV2RegistryBusy | AppError::ChatV2ArchiveBusy | AppError::Io(_) => {
+                Refusal::Busy
+            }
             _ => Refusal::Unavailable,
         })?;
         saved.ok_or(Refusal::ReviewSupersededBeforeAdmission)
