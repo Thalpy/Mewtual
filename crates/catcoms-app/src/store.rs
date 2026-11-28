@@ -145,8 +145,9 @@ pub use persistence::v2_member_transport::{
     NativeTextFounderAudit, NativeTextFounderDependencyExchange,
     NativeTextFounderDependencyResponse, NativeTextFounderFrameOutcome, NativeTextFounderReceived,
 };
-pub(in crate::store) use persistence::v2_review_hold::HeldReviewQuery;
-pub use persistence::v2_review_hold::{NativeTextHeldCase, NativeTextHeldReviewPage};
+pub use persistence::v2_review_hold::{
+    NativeTextHeldCase, NativeTextHeldReviewContinuation, NativeTextHeldReviewPage,
+};
 mod owner_evidence;
 pub use chat_admission::{
     ChatAdmissionBinding, ChatAdmissionCapture, ChatAdmissionFinish, ChatAdmissionKey,

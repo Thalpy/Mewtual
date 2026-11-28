@@ -25,6 +25,10 @@ impl Witnesses {
         Self { directory, marker }
     }
 
+    pub(super) fn original_directory(&self) -> Result<HeldDirectory, AppError> {
+        self.directory.try_clone()
+    }
+
     pub(super) fn cover(
         &self,
         scope: &HoldScope,

@@ -14,8 +14,8 @@ export const nativeTextFlowExpression = String.raw`(async () => {
     element.dispatchEvent(new Event('input', { bubbles: true }));
   };
   if (new URLSearchParams(location.search).get('nativeText') === 'empty') {
-    const entry = document.querySelector('[aria-label="Create a local group"]');
-    const localEntry = !!entry && !document.querySelector('#start-tab-join') && entry.textContent.includes('saved on this device');
+    const entry = document.querySelector('[aria-label="Find or create a group"]');
+    const localEntry = !!entry && !document.querySelector('#start-tab-join') && !!entry.querySelector('textarea');
     const calls = [], base = window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
     window.__TAURI_INTERNALS__.invoke = async (command, args, options) => { calls.push(command); return base(command, args, options); };
     const fields = entry.querySelectorAll('input'); input(fields[0], 'Rowan'); input(fields[1], 'New local group');
@@ -26,9 +26,10 @@ export const nativeTextFlowExpression = String.raw`(async () => {
       noLegacy: !calls.some(name => ['preview_invite','join_server','get_channels','get_members','durable_send_context'].includes(name)),
       noUnavailableControls: !document.querySelector('.dm-circle,.inbox-circle,.orbit-btn,.join-channel,[title="Server settings"]') };
   }
-  await wait(() => document.querySelectorAll('.native-saved-rows article').length === 2, 'own saved originals');
+  await wait(() => document.querySelectorAll('.native-saved-rows > article').length === 2, 'own saved originals');
   const root = document.querySelector('.native-saved-chat');
-  const localScope = root.textContent.includes('Messages saved on this device.');
+  const localScope = [...root.querySelectorAll('.native-saved-rows > article')]
+    .every(row => row.querySelector('small')?.textContent.startsWith('You'));
   const calls = [], base = window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
   window.__TAURI_INTERNALS__.invoke = async (command, args, options) => { calls.push({command,args}); return base(command,args,options); };
   const composer = root.querySelector('textarea'); input(composer, 'Browser Native Text save');
@@ -44,7 +45,7 @@ export const nativeTextFlowExpression = String.raw`(async () => {
         && intent.channel === send.args.channel && intent.expectedContext === send.args.expectedContext && intent.text === send.args.text;
     } catch { return false; }
   });
-  const members = root.querySelector('button[aria-controls="native-member-list"]');
+  const members = document.querySelector('button[aria-controls="native-member-list"]');
   if (members.getAttribute('aria-expanded') === 'false') members.click();
   const namedButton = (scope, label) => [...(scope?.querySelectorAll('button') ?? [])]
     .find(button => button.textContent.trim() === label);
@@ -57,11 +58,17 @@ export const nativeTextFlowExpression = String.raw`(async () => {
   await wait(() => audit()?.textContent.includes('A retained edit from the same device.'), 'saved revision');
   const ownerAudit = audit().textContent.includes('Signed record details')
     && calls.filter(call => call.command === 'get_message_page' && 'auditAction' in call.args).length === 2;
+  namedButton(audit(), 'Held posts').click();
+  await wait(() => audit()?.textContent.includes('A late post held for review.'), 'held post audit');
+  const heldAudit = calls.some(call => call.command === 'get_message_page'
+    && call.args.heldAfter === null && call.args.limit === 2)
+    && audit().textContent.includes('Awaiting review')
+    && !audit().textContent.includes('A retained edit from the same device.');
   namedButton(audit(), 'Close').click();
   return { localScope, saved: !!send && /^[a-f0-9]{64}$/.test(send.args.retryToken),
     sealedFirst,
     composerRetired: composer.value === '', noLegacy: !calls.some(call => call.command === 'durable_send_context'),
-    ownerAudit,
+    ownerAudit, heldAudit,
     noUnavailableControls: !document.querySelector('.dm-circle,.inbox-circle,.orbit-btn,.join-channel,[title="Server settings"]'),
     noOverflow: document.documentElement.scrollWidth <= innerWidth };
 })()`;

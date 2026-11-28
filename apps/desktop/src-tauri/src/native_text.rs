@@ -48,6 +48,7 @@ pub(super) struct Registry {
     rejoin_network_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     ui_budget: NativeUiInvocationBudget,
     history_budget: NativeTextHistoryResponseBudget,
+    held_review_cursor: StdMutex<Option<history::held_posts::Cursor>>,
     listing: listing::Policy,
     #[cfg(test)]
     listing_reply_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
@@ -172,6 +173,7 @@ impl Default for Registry {
             rejoin_network_edge: StdMutex::new(None),
             ui_budget,
             history_budget,
+            held_review_cursor: StdMutex::new(None),
             listing: listing::Policy::default(),
             #[cfg(test)]
             listing_reply_edge: StdMutex::new(None),

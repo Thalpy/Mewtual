@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decodeNativeOriginalPage, decodeNativeOwnMessage, decodeNativeReceived, decodeNativeReceivedNotice, readNativeAudit, readNativeOriginals, readNativeOwnMessage, updateNativeReceived } from "./native-text-history.ts";
+import { decodeNativeOriginalPage, decodeNativeOwnMessage, decodeNativeReceived, decodeNativeReceivedNotice, readNativeAudit, readNativeHeldPosts, readNativeOriginals, readNativeOwnMessage, updateNativeReceived } from "./native-text-history.ts";
 const item={ordinal:"0",action:"01".repeat(32),signer:"02".repeat(32),channel:"9",presented_ms:"18446744073709551615",status:"pending",body:{kind:"create",text:"original",reply_to:null}};
 test("the founder audit reader binds each revision and drops replies for a departed view", async () => {
   const scope = { server: 1, channel: "9", context: "03".repeat(32) };
@@ -32,6 +32,31 @@ test("native own-history keeps lossless cursors and rejects foreign scope or mal
  for(const patch of [{backend:"legacy"},{scope:"group"},{next:"0"},{next:"01"},{next:"18446744073709551616"},{extra:true}])assert.throws(()=>decodeNativeOriginalPage({...page,...patch},"0",null,"9"));
  for(const patch of [{channel:"8"},{ordinal:"1"},{status:"received"},{body:{kind:"create",text:"",reply_to:null}},{body:{kind:"future"}},{body:{...item.body,text:"\ud800"}}])assert.throws(()=>decodeNativeOriginalPage({...page,items:[{...item,...patch}]},"0",null,"9"));
  assert.throws(()=>decodeNativeOriginalPage(page,"0","2","9"));
+});
+
+test("held review pages advance across an unavailable window and reject stale or mixed results", async () => {
+  const target = { server: 1, channel: "9", context: "03".repeat(32) };
+  const cursor = "04".repeat(32);
+  const reply = { backend: "text-v2", scope: "selected-held-posts", next: cursor, items: [], unavailable: 2 };
+  const first = await readNativeHeldPosts(async (command, args) => {
+    assert.equal(command, "get_message_page");
+    assert.deepEqual(args, { server: 1, channel: "9", expectedContext: target.context, heldAfter: null, limit: 2 });
+    return reply;
+  }, target, null, () => true);
+  assert.deepEqual(first, { items: [], next: cursor, unavailable: 2 });
+  await assert.rejects(readNativeHeldPosts(async () => reply, target, cursor, () => true));
+  await assert.rejects(readNativeHeldPosts(async () => ({ ...reply, items: null }), target, null, () => true));
+  const held = { caseId: cursor, action: item.action, signer: item.signer, body: item.body,
+    admission: "05".repeat(32), originalDigest: "06".repeat(32), removalHeader: "07".repeat(32), removalEpoch: "3" };
+  const second = { ...reply, next: null, items: [held], unavailable: 0 };
+  assert.deepEqual(await readNativeHeldPosts(async () => second, target, cursor, () => true),
+    { next: null, items: [held], unavailable: 0 });
+  await assert.rejects(readNativeHeldPosts(async () => ({ ...second, items: [held, held] }), target, cursor, () => true));
+  let current = true;
+  assert.equal(await readNativeHeldPosts(async () => {
+    current = false;
+    return second;
+  }, target, cursor, () => current), null);
 });
 test("empty filtered pages advance the context cursor and reuse the exact first end",async()=>{
  const requests:Record<string,unknown>[]=[];

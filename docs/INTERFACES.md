@@ -48,6 +48,15 @@ unavailable. ActionId cursors order each captured page independently of
 device timestamps. Refresh from the first page to include records whose
 IDs precede an earlier cursor.
 
+The same command offers a separate founder-held page using `heldAfter`
+(null for the first window) and a limit of 1 to 2. It returns the exact
+signed Create's display fields and Remove coordinates. `items: null`
+means storage is unavailable, and `unavailable` counts gaps in the
+window. A page may advance beyond a damaged record. A 32-byte
+continuation token expires five minutes after publication and binds
+the original session, row, channel and audit revision. The renderer
+restarts at the first window when a continuation becomes stale.
+
 The founder-only held-post storage entry accepts an exact original,
 the current verifier's removed-Create evidence and its host scope.
 It returns the same retained case for a verified semantic retry.

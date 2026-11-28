@@ -251,6 +251,8 @@ fn witness_requires_a_covered_body_and_completes_only_its_exact_prefix() {
             },
         )
         .unwrap()
+        .finish_files()
+        .unwrap()
     };
     let unwitnessed = read(None);
     assert!(unwitnessed.records.is_empty());
@@ -359,9 +361,143 @@ fn witness_requires_a_covered_body_and_completes_only_its_exact_prefix() {
                     .map_err(|_| refused())
             },
         )
+        .unwrap()
+        .finish_files()
         .unwrap();
     assert_eq!(calls, 2);
     assert_eq!(page.records.len(), 1);
     assert_eq!(page.records[0].case, remaining.id);
     assert_eq!(page.unavailable, 1);
+    drop(page);
+    std::fs::remove_file(&replaced).unwrap();
+    std::fs::rename(replaced.with_extension("parked"), &replaced).unwrap();
+    let file = replaced.file_stem().unwrap().to_str().unwrap();
+    let renamed_receipt = receipts.join(format!("{file}.receipt"));
+    let mut checks = 0;
+    let page = disk
+        .selected_review_window(
+            &KEY,
+            HeldReviewQuery {
+                after: Some([0; 32]),
+                limit: 2,
+            },
+            &session,
+            || {
+                checks += 1;
+                if checks == 4 {
+                    let bytes = std::fs::read(&renamed_receipt).unwrap();
+                    std::fs::rename(&renamed_receipt, renamed_receipt.with_extension("parked"))
+                        .unwrap();
+                    std::fs::write(&renamed_receipt, bytes).unwrap();
+                }
+                Ok(())
+            },
+            |record| {
+                catcoms_replication::chat::SignedAction::decode(record.original_bytes_data())
+                    .map_err(|_| refused())
+            },
+        )
+        .unwrap()
+        .finish_files()
+        .unwrap();
+    assert_eq!(
+        checks, 4,
+        "the final blocking check runs before file handoff"
+    );
+    assert_eq!(page.records.len(), 1);
+    assert_eq!(page.records[0].case, remaining.id);
+    assert_eq!(page.unavailable, 1);
+    drop(page);
+    std::fs::remove_file(&renamed_receipt).unwrap();
+    std::fs::rename(renamed_receipt.with_extension("parked"), &renamed_receipt).unwrap();
+    let prepared = disk
+        .selected_review_window(
+            &KEY,
+            HeldReviewQuery {
+                after: Some([0; 32]),
+                limit: 2,
+            },
+            &session,
+            || Ok(()),
+            |record| {
+                catcoms_replication::chat::SignedAction::decode(record.original_bytes_data())
+                    .map_err(|_| refused())
+            },
+        )
+        .unwrap();
+    // The App still rechecks its original founder outside the disk read.
+    // A replacement in that interval must be refused at file handoff.
+    let bytes = std::fs::read(&replaced).unwrap();
+    std::fs::rename(&replaced, replaced.with_extension("parked")).unwrap();
+    std::fs::write(&replaced, bytes).unwrap();
+    let checked = prepared.finish_files().unwrap();
+    assert_eq!(checked.records.len(), 1);
+    assert_eq!(checked.records[0].case, remaining.id);
+    assert_eq!(checked.unavailable, 1);
+}
+
+#[test]
+fn held_audit_continuation_and_publication_follow_the_original_revision() {
+    use std::sync::{Arc, Mutex};
+    let runs = Arc::new(Mutex::new(9));
+    let earlier = HeldAuditObservation::capture(&runs).unwrap();
+    let pool = CriticalCatalogReadPool::new(1024).unwrap();
+    let mut window = PreparedHeldWindow::empty(pool.try_reserve(1024).unwrap())
+        .finish_files()
+        .unwrap();
+    window.next = Some([7; 32]);
+    let (cancel, receiver) = tokio::sync::watch::channel(false);
+    let caller = RequestCancellation::new(receiver, None);
+    let audit = NativeTextHeldReviewPage::new(Some((window, earlier.clone())), scope(), caller);
+    let cursor = audit.continuation().unwrap();
+    assert_eq!(cursor.after_for(scope(), &earlier).unwrap(), [7; 32]);
+    let other = HeldAuditObservation::capture(&Arc::new(Mutex::new(9))).unwrap();
+    assert!(cursor.after_for(scope(), &other).is_err());
+    let mut different = scope();
+    different.channel += 1;
+    assert!(cursor.after_for(different, &earlier).is_err());
+    assert!(audit.with_publication(|| true).unwrap());
+    *runs.lock().unwrap() += 1;
+    let later = HeldAuditObservation::capture(&runs).unwrap();
+    assert!(cursor.after_for(scope(), &later).is_err());
+    assert!(audit
+        .with_publication::<()>(|| panic!("stale audit bytes must not be released"))
+        .is_err());
+    cancel.send_replace(true);
+    assert!(cursor.after_for(scope(), &earlier).is_err());
+}
+
+#[test]
+fn prepared_empty_audit_rechecks_the_original_marker_and_partition_absence() {
+    let root = tempfile::tempdir().unwrap();
+    let session = catcoms_storage::acquire_vault_session(root.path()).unwrap();
+    let pool = CriticalCatalogReadPool::new(16 * 1024).unwrap();
+    let hold_root = root.path().join("holds");
+    let marker_path = root.path().join("marker");
+    let marker_bytes = [19; 32];
+    std::fs::create_dir(&hold_root).unwrap();
+    ensure_exact_held(&marker_path, &marker_bytes).unwrap();
+    let partition = hold_root.join("new-channel");
+    let prepare = || {
+        let (file, native, _) = read_bounded_held(&marker_path, 32, false).unwrap();
+        PreparedHeldWindow::empty(pool.try_reserve(16 * 1024).unwrap()).with_root(
+            HoldRootRead {
+                root: HeldDirectory::open(hold_root.clone()).unwrap(),
+                marker: (file, native),
+                marker_path: marker_path.clone(),
+                marker_bytes,
+                absent_partition: Some(partition.clone()),
+            },
+            session.retain_for_physical_work(),
+        )
+    };
+    assert!(prepare().finish_files().unwrap().records.is_empty());
+    let marker_selected = prepare();
+    let previous_marker = marker_path.with_extension("parked");
+    std::fs::rename(&marker_path, &previous_marker).unwrap();
+    std::fs::write(&marker_path, marker_bytes).unwrap();
+    assert!(marker_selected.finish_files().is_err());
+    let empty_selected = prepare();
+    std::fs::create_dir(&partition).unwrap();
+    assert!(empty_selected.finish_files().is_err());
 }

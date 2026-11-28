@@ -1,7 +1,9 @@
 //! Read the confirmed hold inventory without entering the writer or
 //! repairing any of its files. Invalid cases remain visible as gaps.
 use super::*;
+use crate::store::persistence::v2_member_outbox::fs::observe_directory;
 use catcoms_replication::chat::SignedAction;
+use catcoms_storage::VaultPhysicalWorkLease;
 use std::{collections::BTreeMap, path::PathBuf};
 
 pub(in crate::store) struct HeldReviewQuery {
@@ -26,6 +28,39 @@ pub(in crate::store) struct SelectedHeldWindow {
     _fee: CatalogReadReservation,
 }
 
+/// Still inside the original local read operation. Root must perform its
+/// final blocking founder checks before handing any records to Native.
+pub(in crate::store) struct PreparedHeldWindow {
+    candidates: Vec<(SelectedHeldCase, SelectedCaseRead)>,
+    parents: Option<(HeldDirectory, Option<HeldDirectory>)>,
+    root: Option<HoldRootRead>,
+    next: Option<[u8; 32]>,
+    unavailable: usize,
+    _lease: Option<VaultPhysicalWorkLease>,
+    fee: CatalogReadReservation,
+}
+
+pub(in crate::store) struct HoldRootRead {
+    pub(in crate::store::persistence) root: HeldDirectory,
+    pub(in crate::store::persistence) marker: (File, SessionId),
+    pub(in crate::store::persistence) marker_path: PathBuf,
+    pub(in crate::store::persistence) marker_bytes: [u8; 32],
+    pub(in crate::store::persistence) absent_partition: Option<PathBuf>,
+}
+
+impl HoldRootRead {
+    fn require(&mut self) -> Result<(), AppError> {
+        self.root.require()?;
+        require_exact_held(&self.marker_path, &mut self.marker, &self.marker_bytes)?;
+        if let Some(path) = self.absent_partition.as_ref() {
+            if observe_directory(path)? != Presence::Absent {
+                return Err(refused());
+            }
+        }
+        self.root.require()
+    }
+}
+
 struct SelectedCaseRead {
     path: PathBuf,
     file: (File, SessionId),
@@ -40,14 +75,65 @@ impl SelectedCaseRead {
     }
 }
 
-impl SelectedHeldWindow {
+impl PreparedHeldWindow {
     pub(in crate::store) fn empty(fee: CatalogReadReservation) -> Self {
         Self {
-            records: Vec::new(),
+            candidates: Vec::new(),
+            parents: None,
+            root: None,
             next: None,
             unavailable: 0,
-            _fee: fee,
+            _lease: None,
+            fee,
         }
+    }
+
+    pub(in crate::store) fn with_root(
+        mut self,
+        root: HoldRootRead,
+        lease: VaultPhysicalWorkLease,
+    ) -> Self {
+        self.root = Some(root);
+        if self._lease.is_none() {
+            self._lease = Some(lease);
+        }
+        self
+    }
+
+    pub(in crate::store) fn finish_files(mut self) -> Result<SelectedHeldWindow, AppError> {
+        if let Some(root) = self.root.as_mut() {
+            root.require()?;
+        }
+        let require_parents = || {
+            if let Some((held, witnesses)) = &self.parents {
+                held.require()?;
+                if let Some(witnesses) = witnesses {
+                    witnesses.require()?;
+                }
+            }
+            Ok::<_, AppError>(())
+        };
+        require_parents()?;
+        let mut records = Vec::with_capacity(self.candidates.len());
+        // Detect replacement while a later row or the final source check
+        // was running. A changed case leaves a gap in this window.
+        for (record, mut proof) in self.candidates.drain(..) {
+            if proof.require().is_ok() {
+                records.push(record);
+            } else {
+                self.unavailable += 1;
+            }
+        }
+        require_parents()?;
+        if let Some(root) = self.root.as_mut() {
+            root.require()?;
+        }
+        Ok(SelectedHeldWindow {
+            records,
+            next: self.next,
+            unavailable: self.unavailable,
+            _fee: self.fee,
+        })
     }
 }
 
@@ -59,11 +145,11 @@ impl HoldDisk {
         session: &VaultSessionGuard,
         mut current: impl FnMut() -> Result<(), AppError>,
         mut verify: impl FnMut(&V2RemovedCreateRecord<'_>) -> Result<SignedAction, AppError>,
-    ) -> Result<SelectedHeldWindow, AppError> {
+    ) -> Result<PreparedHeldWindow, AppError> {
         if !(1..=8).contains(&query.limit) {
             return Err(refused());
         }
-        let _lease = session.retain_for_physical_work();
+        let lease = session.retain_for_physical_work();
         let work = self.pool.try_reserve(WORK)?;
         self.require(key, &work)?;
         current()?;
@@ -108,23 +194,19 @@ impl HoldDisk {
         }
         let next = last.filter(|_| candidates.next().is_some());
         current()?;
-        let mut records = Vec::with_capacity(checked.len());
-        // Later rows can take time to verify. Validate the original body
-        // and witness again for every candidate before releasing the window.
-        for (record, mut proof) in checked {
-            if proof.require().is_ok() {
-                records.push(record);
-            } else {
-                unavailable += 1;
-            }
-        }
-        self.directory.require()?;
-        current()?;
-        Ok(SelectedHeldWindow {
-            records,
+        let witnesses = self
+            .witnesses
+            .as_ref()
+            .map(Witnesses::original_directory)
+            .transpose()?;
+        Ok(PreparedHeldWindow {
+            candidates: checked,
+            parents: Some((self.directory.try_clone()?, witnesses)),
+            root: None,
             next,
             unavailable,
-            _fee: invoice,
+            _lease: Some(lease),
+            fee: invoice,
         })
     }
 

@@ -11,7 +11,7 @@ use crate::store::persistence::v2_shared_history::{
     ARCHIVED_PROJECTION_WORK,
 };
 use crate::store::{
-    HeldReviewQuery, NativeTextFounderAudit, NativeTextHeldReviewPage,
+    NativeTextFounderAudit, NativeTextHeldReviewContinuation, NativeTextHeldReviewPage,
     NativeTextJoinedArchivedActions, NativeTextJoinedMemberProjection, ServerStore,
     V2MemberSaveRefusal, V2MemberSignRequest,
 };
@@ -23,14 +23,13 @@ impl NativeTextColdFounderSource {
     pub fn selected_held_review_window(
         &mut self,
         channel: u128,
-        after: Option<[u8; 32]>,
+        after: Option<&NativeTextHeldReviewContinuation>,
         limit: usize,
         caller: &RequestCancellation,
     ) -> Result<NativeTextHeldReviewPage, AppError> {
         let (_, observation, _fee) = self.prepare_member_subscription(channel, caller)?;
         let signal = observation.constrain(caller.clone());
         let scope = self.history_scope(channel)?;
-        let query = HeldReviewQuery { after, limit };
         let governed = self.governed.as_mut().ok_or_else(refused)?;
         let page =
             self.work
@@ -41,7 +40,8 @@ impl NativeTextColdFounderSource {
                         |verifier, _, removed, current| {
                             store.read_selected_review_window(
                                 scope,
-                                query,
+                                after,
+                                limit,
                                 || {
                                     if signal.is_cancelled() {
                                         return Err(refused());
@@ -63,7 +63,13 @@ impl NativeTextColdFounderSource {
                     )
                 })?;
         self.require_recovered_checkpoint(&signal)?;
-        Ok(NativeTextHeldReviewPage::new(page, signal))
+        let page = page
+            .map(|(prepared, revision)| prepared.finish_files().map(|page| (page, revision)))
+            .transpose()?;
+        if signal.is_cancelled() {
+            return Err(refused());
+        }
+        Ok(NativeTextHeldReviewPage::new(page, scope, signal))
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn selected_history_audit(

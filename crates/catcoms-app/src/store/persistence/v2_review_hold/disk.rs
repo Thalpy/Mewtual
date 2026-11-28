@@ -16,7 +16,9 @@ use std::{collections::BTreeSet, fs::File, path::Path};
 mod audit;
 mod receipt;
 pub use audit::SelectedHeldCase;
-pub(in crate::store) use audit::{HeldReviewQuery, SelectedHeldWindow};
+pub(in crate::store) use audit::{
+    HeldReviewQuery, HoldRootRead, PreparedHeldWindow, SelectedHeldWindow,
+};
 use receipt::Witnesses;
 
 const MAX_CASES: usize = 256;
