@@ -2333,6 +2333,28 @@ impl MetadataWork {
         self.with_joined_store(|store| pending.capture_registration_dependency(store))
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn select_warm_review_receiver(
+        &self,
+        pending: &mut JoinedPendingIo,
+        original: &mut Arc<
+            crate::store::persistence::governance_layout::joined::JoinedRegistrationDependency,
+        >,
+        require_current: impl FnOnce() -> Result<(), AppError>,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<bool, AppError> {
+        self.with_joined_store(|store| {
+            pending.select_warm_review_receiver(
+                store,
+                original,
+                || {
+                    self.require_joined_store()?;
+                    require_current()
+                },
+                rng,
+            )
+        })
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn register_joined(
         &self,
         name: String,

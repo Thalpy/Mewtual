@@ -64,11 +64,21 @@ export const nativeTextFlowExpression = String.raw`(async () => {
     && call.args.heldAfter === null && call.args.limit === 2)
     && audit().textContent.includes('Awaiting review')
     && !audit().textContent.includes('A retained edit from the same device.');
+  namedButton(audit(), 'Reject').click();
+  await wait(() => namedButton(audit(), 'Reopen'), 'rejected decision displayed');
+  const decision = calls.find(call => call.command === 'decide_native_chat_held_post');
+  const decisionControl = !!decision && Object.keys(decision.args).length === 11 && decision.args.choice === 'reject'
+    && calls.slice(0, calls.indexOf(decision)).some(call => {
+      if (call.command !== 'save_ui_state') return false;
+      const intents = Object.values(JSON.parse(call.args.json).nativeTextIntents ?? {});
+      return intents.some(intent => intent.kind === 'review' && intent.choice === 'reject'
+        && intent.caseId === decision.args.caseId && intent.token.slice(32) === decision.args.intent);
+    });
   namedButton(audit(), 'Close').click();
   return { localScope, saved: !!send && /^[a-f0-9]{64}$/.test(send.args.retryToken),
     sealedFirst,
     composerRetired: composer.value === '', noLegacy: !calls.some(call => call.command === 'durable_send_context'),
-    ownerAudit, heldAudit,
+    ownerAudit, heldAudit, decisionControl,
     noUnavailableControls: !document.querySelector('.dm-circle,.inbox-circle,.orbit-btn,.join-channel,[title="Server settings"]'),
     noOverflow: document.documentElement.scrollWidth <= innerWidth };
 })()`;

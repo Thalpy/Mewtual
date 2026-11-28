@@ -31,13 +31,29 @@ impl JoinedRegistrationDependency {
         expected_directory: &GovernanceDirectoryCapture,
         original: [BorrowedFile<'_>; FILES],
     ) -> Result<Arc<Self>, AppError> {
+        let bytes = registration_fee_bytes(original.map(|(_, bytes)| bytes.len()))?;
+        let fee = Self::reserve_capture(store, bytes)?;
+        Self::capture_prepaid(store, data, expected_directory, original, fee)
+    }
+
+    fn reserve_capture(
+        store: &ServerStore,
+        bytes: usize,
+    ) -> Result<CatalogReadReservation, AppError> {
         let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
-        let bytes = original
-            .iter()
-            .try_fold(32 * 1024usize, |total, (_, raw)| {
-                total.checked_add(raw.len()).ok_or_else(denied)
-            })?;
-        let fee = policy.current.archive.pending.pool.try_reserve(bytes)?;
+        policy.current.archive.pending.pool.try_reserve(bytes)
+    }
+
+    fn capture_prepaid(
+        store: &ServerStore,
+        data: NativeTextJoinedRegistrationData,
+        expected_directory: &GovernanceDirectoryCapture,
+        original: [BorrowedFile<'_>; FILES],
+        fee: CatalogReadReservation,
+    ) -> Result<Arc<Self>, AppError> {
+        let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        let bytes = registration_fee_bytes(original.map(|(_, raw)| raw.len()))?;
+        fee.validate(&policy.current.archive.pending.pool, bytes)?;
         let directory = capture_directory(store)?;
         if directory.identity != expected_directory.identity {
             return Err(denied());
@@ -94,9 +110,191 @@ impl JoinedRegistrationDependency {
         }
         validate_directory(store, &self.directory)
     }
+
+    fn with_review_catalog(
+        &self,
+        store: &ServerStore,
+        original: &OpenedArchiveObject,
+        current: &OpenedArchiveObject,
+        fee: CatalogReadReservation,
+    ) -> Result<Arc<Self>, AppError> {
+        let _reading = self.reading.try_lock().map_err(|_| denied())?;
+        let [previous, index, pending, welcome, outcome] = &self.files;
+        require_original_catalog_copy(previous, original)?;
+        if !Arc::ptr_eq(&self.mount, &store.registry_mount()) {
+            return Err(denied());
+        }
+        // Keep the four exact source objects and their original file
+        // identities. Only the typed ID12 writer can provide the new Current.
+        Self::capture_prepaid(
+            store,
+            self.data,
+            &self.directory,
+            [
+                (&current.0, &current.1),
+                (&index.0, &index.1),
+                (&pending.0, &pending.1),
+                (&welcome.0, &welcome.1),
+                (&outcome.0, &outcome.1),
+            ],
+            fee,
+        )
+    }
+}
+
+fn registration_fee_bytes(lengths: [usize; FILES]) -> Result<usize, AppError> {
+    lengths
+        .into_iter()
+        .try_fold(32 * 1024usize, |total, bytes| {
+            total.checked_add(bytes).ok_or_else(denied)
+        })
+}
+
+fn require_original_catalog_copy(
+    held: &OpenedArchiveObject,
+    expected: &OpenedArchiveObject,
+) -> Result<(), AppError> {
+    if held.1 != expected.1
+        || session_id(&held.0).map_err(io)? != session_id(&expected.0).map_err(io)?
+    {
+        return Err(denied());
+    }
+    Ok(())
 }
 
 impl JoinedPendingIo {
+    /// This exact mounted join admitted a review declaration whose physical
+    /// outcome the warm owner could not adopt. A retry must reopen it cold.
+    pub(in crate::store) fn require_warm_review_catalog(&self) -> Result<(), AppError> {
+        if self.review_reopen_required {
+            return Err(AppError::ChatV2JoinReviewReopen);
+        }
+        Ok(())
+    }
+
+    /// Install the exact first review receiver while the original warm join
+    /// still owns the metadata and no native row selection has been issued.
+    pub(in crate::store) fn select_warm_review_receiver(
+        &mut self,
+        store: &ServerStore,
+        original: &mut Arc<JoinedRegistrationDependency>,
+        before_write: impl FnOnce() -> Result<(), AppError>,
+        rng: &mut dyn catcoms_rt::CryptoRngCore,
+    ) -> Result<bool, AppError> {
+        use critical_namespaces::pending_join::Settle;
+
+        self.require_warm_review_catalog()?;
+        original.require(store)?;
+        if self.warm_registration_data(store)? != original.data() || store.has_rejoin_evidence()? {
+            return Err(denied());
+        }
+        let original_frame = *blake3::hash(&self.catalog.1).as_bytes();
+        let mut admitted = false;
+        let result = (|| {
+            let mut funding = None;
+            let Some((current, receiver)) = store.cover_warm_review_receiver(
+                &self.catalog,
+                |candidate_bytes| {
+                    let catalog = store
+                        .pending_join_catalog
+                        .try_lock()
+                        .map_err(|_| denied())?;
+                    require_idle_catalog(catalog.as_ref().ok_or_else(denied)?, original_frame)?;
+                    drop(catalog);
+                    let mut lengths = original.files.each_ref().map(|(_, raw)| raw.len());
+                    lengths[0] = candidate_bytes;
+                    let fee = JoinedRegistrationDependency::reserve_capture(
+                        store,
+                        registration_fee_bytes(lengths)?,
+                    )
+                    .map_err(|_| AppError::ChatV2ArchiveBusy)?;
+                    let inspect = store
+                        .reserve_pending_join_catalog_read()
+                        .map_err(|_| AppError::ChatV2ArchiveBusy)?;
+                    before_write()?;
+                    funding = Some((fee, inspect));
+                    admitted = true;
+                    Ok(())
+                },
+                rng,
+            )?
+            else {
+                return Ok(false);
+            };
+
+            let (fee, inspect) = funding.ok_or_else(denied)?;
+            let opened = store.inspect_prepaid_pending_join_catalog(inspect)?;
+            let actual = opened.current.as_ref().ok_or_else(denied)?;
+            if !matches!(opened.settle, Settle::None)
+                || opened.selected.framed != *blake3::hash(&current.1).as_bytes()
+                || session_id(actual).map_err(io)? != session_id(&current.0).map_err(io)?
+            {
+                return Err(denied());
+            }
+            let registration = original.with_review_catalog(store, &self.catalog, &current, fee)?;
+            let mut catalog_slot = store.pending_join_catalog.lock().map_err(|_| denied())?;
+            let catalog = catalog_slot.as_mut().ok_or_else(denied)?;
+            let mut index_slot = store.joined_pin_index.lock().map_err(|_| denied())?;
+            let index = index_slot.as_mut().ok_or_else(denied)?;
+            let mut review = store.review_receive_mount.lock().map_err(|_| denied())?;
+            require_idle_catalog(catalog, original_frame)?;
+            if review.is_some() {
+                return Err(denied());
+            }
+            // A join recovered before its Welcome can borrow a second held
+            // Current from SelectedPinIndex. Preserve that proof's original
+            // directory and require the exact same predecessor before moving it.
+            let replacement = index
+                .cold_catalog
+                .as_ref()
+                .map(|old| {
+                    require_original_catalog_copy(&old.current, &self.catalog)?;
+                    if old.directory.identity != self.directory.identity {
+                        return Err(denied());
+                    }
+                    let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+                    old._fee
+                        .validate(&policy.current.archive.pending.pool, current.1.len())?;
+                    Ok((
+                        current.0.try_clone().map_err(io)?,
+                        Zeroizing::new(current.1.to_vec()),
+                    ))
+                })
+                .transpose()?;
+            index.require_file(store)?;
+            require_pending_names(store, index.pending.as_ref())?;
+            opened.validate_original(store)?;
+            registration.require(store)?;
+            receiver.require(store)?;
+
+            // Everything below is an infallible update of the original
+            // owners under the same metadata cell. A revoked UI cannot
+            // publish the row, but also cannot leave a half-installed owner.
+            let retired_cold = index
+                .cold_catalog
+                .as_mut()
+                .zip(replacement)
+                .map(|(old, replacement)| std::mem::replace(&mut old.current, replacement));
+            catalog.current = opened.selected;
+            let retired_current = std::mem::replace(&mut self.catalog, current);
+            let retired_registration = std::mem::replace(original, registration);
+            *review = Some(receiver);
+            drop(review);
+            drop(index_slot);
+            drop(catalog_slot);
+            drop((retired_cold, retired_current, retired_registration));
+            Ok(true)
+        })();
+        self.review_reopen_required = admitted && result.is_err();
+        result.map_err(|error| {
+            if admitted {
+                AppError::ChatV2JoinReviewReopen
+            } else {
+                error
+            }
+        })
+    }
+
     pub(in crate::store) fn capture_registration_dependency(
         &self,
         store: &ServerStore,
@@ -129,6 +327,19 @@ impl JoinedPendingIo {
         proof.require(store)?;
         Ok(proof)
     }
+}
+
+fn require_idle_catalog(
+    catalog: &critical_namespaces::pending_join::Mounted,
+    original_frame: [u8; 32],
+) -> Result<(), AppError> {
+    if catalog.current.framed != original_frame
+        || catalog.pending.is_some()
+        || catalog.networks.iter().any(Option::is_some)
+    {
+        return Err(denied());
+    }
+    Ok(())
 }
 
 impl ColdJoinedSelection {

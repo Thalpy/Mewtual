@@ -4399,7 +4399,10 @@ Receipt enumeration checks the original row, channel, membership view and
 revision again at native publication. At most two selected entries are
 inspected per page. Only the requested channel's IDs can leave native. The
 fixed-width encrypted continuation can advance a filtered page without
-exposing another channel's index key.
+exposing another channel's index key. First Join can declare the receiver
+only after proving original warm registration. It preserves the exact
+Pending, pin, Welcome, Outcome and native registry. Storage admitted
+before a lock can finish without making the old native reply current.
 
 A main-window decision command takes exact held-case coordinates and an
 intent. It uses the recovered founder's own key and signed Case index.

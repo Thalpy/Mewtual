@@ -5,6 +5,7 @@ use catcoms_app::store::{
     NativeTextJoinedRowSelection, NativeTextJoinedSelectionPreparation, NativeTextSourceCommand,
     NativeUiInvocationMetadata, MAX_NATIVE_TEXT_INVITE_PACKET_BYTES,
 };
+use catcoms_app::AppError;
 use catcoms_rt::RequestCancellation;
 use std::net::IpAddr;
 use tauri::ipc::InvokeResponseBody;
@@ -12,6 +13,7 @@ use tauri::ipc::InvokeResponseBody;
 const INPUT: &str = "Enter a valid Chat V2 invite and an approved host IP address.";
 const BUSY: &str = "Chat is busy. Retry the same invitation.";
 const FAILED: &str = "Joining did not finish. Retry the same Chat V2 invitation.";
+const REOPEN: &str = "Reopen the vault to finish setting up approved chat history.";
 const CREDITS: usize = 8;
 
 type SelectionPreparation = NativeTextJoinedSelectionPreparation<OsCryptoRng>;
@@ -376,7 +378,7 @@ async fn complete(
                 &original.account,
                 &mut OsCryptoRng,
             )
-            .map_err(|_| FAILED)
+            .map_err(registered_join_error)
     })
     .await
     .map_err(|_| FAILED)??;
@@ -386,13 +388,23 @@ async fn complete(
     .await?;
     let original = invocation.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        // The same parked original provisions its receiver before the
+        // first row and background workers can observe the joined state.
         prepared
-            .select_registered(&original.account)
+            .select_registered_with_review_storage(&original.account, &mut OsCryptoRng)
             .map(|selection| (selection, parked))
-            .map_err(|_| FAILED.to_owned())
+            .map_err(|error| registered_join_error(error).to_owned())
     })
     .await
     .map_err(|_| FAILED)?
+}
+
+fn registered_join_error(error: AppError) -> &'static str {
+    match error {
+        AppError::ChatV2JoinReviewReopen => REOPEN,
+        AppError::ChatV2ArchiveBusy => BUSY,
+        _ => FAILED,
+    }
 }
 
 async fn prepare_reconnect(

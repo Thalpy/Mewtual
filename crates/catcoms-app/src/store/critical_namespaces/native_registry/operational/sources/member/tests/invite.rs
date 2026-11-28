@@ -144,6 +144,16 @@ fn mounted_founder_holds_a_removed_create_from_the_original_survivor_over_tcp() 
     run_mounted_successor(MountedSuccessor::RemovedReview);
 }
 
+#[test]
+fn mounted_join_review_selects_before_first_row_publication_after_pending_reopen() {
+    run_mounted_successor(MountedSuccessor::WarmReview);
+}
+
+#[test]
+fn mounted_join_review_selected_cut_reopens_same_original_without_a_live_row() {
+    run_mounted_successor(MountedSuccessor::WarmReviewCut);
+}
+
 fn run_mounted_successor(successor: MountedSuccessor) {
     // These debug fixtures exercise three paid vaults and cold restore on one
     // caller thread. Match the removal fixture's stack for both scenarios.
@@ -167,6 +177,8 @@ enum MountedSuccessor {
     MissedHistory,
     Remove,
     RemovedReview,
+    WarmReview,
+    WarmReviewCut,
     UnsettledCreate,
     ReceiveCapacity,
     JoinedLedgerReplay,
@@ -463,6 +475,8 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         (false, Some(MountedSuccessor::OfflineDelivery)) => 0xe780,
         (false, Some(MountedSuccessor::Remove)) => 0xe790,
         (false, Some(MountedSuccessor::RemovedReview)) => 0xe830,
+        (false, Some(MountedSuccessor::WarmReview)) => 0xe840,
+        (false, Some(MountedSuccessor::WarmReviewCut)) => 0xe850,
         (false, Some(MountedSuccessor::MissedHistory)) => 0xe7a0,
         (false, Some(MountedSuccessor::UnsettledCreate)) => 0xe7b0,
         (false, Some(MountedSuccessor::ReceiveCapacity)) => 0xe7d0,
@@ -566,7 +580,12 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         .unwrap();
     let local_transport = waiting.local_transport_data();
     assert!(waiting.receive().await.is_err());
-    let (original, vault) = if recover_stage {
+    let warm_review = matches!(
+        successor,
+        Some(MountedSuccessor::WarmReview | MountedSuccessor::WarmReviewCut)
+    );
+    let mut warm_review_pool = None;
+    let (original, vault) = if recover_stage || warm_review {
         let mut retirement = original.prepare_retirement().unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while retirement.try_retire().unwrap()
@@ -581,6 +600,9 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         drop(original);
         drop(vault);
         let mut current = current_policy();
+        if warm_review {
+            warm_review_pool = Some(current.archive.pending.pool.clone());
+        }
         current.archive = current
             .archive
             .with_checkpoint_join_execution(2, 10_000)
@@ -864,6 +886,160 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
     let mut founder_archive_edit = None;
     let mut founder_reply = None;
     let mut founder_debt = None;
+    if warm_review {
+        use crate::store::persistence::governance_layout::joined::review_receive::{
+            with_receiver_fault, with_receiver_hook, ReceiverFault,
+        };
+        let row = register(&mut rng).unwrap();
+        let current = dir
+            .path()
+            .join(crate::store::critical_namespaces::Slot::Current.name());
+        let previous = std::fs::read(&current).unwrap();
+        let review = dir.path().join("chat-v2-review-received");
+        let pins = only_named(dir.path(), "chat-critical-namespaces.joined-pin.index");
+        let welcome = only_named(
+            dir.path(),
+            "chat-critical-namespaces.joined-welcome-entry.bin",
+        );
+        let originals = [&pins, &path, &welcome, &outcome_path, &index]
+            .map(|path| std::fs::read(path).unwrap());
+        assert!(!review.exists());
+
+        if successor == Some(MountedSuccessor::WarmReviewCut) {
+            let (interrupted, reached) =
+                with_receiver_fault(ReceiverFault::CatalogSelected, || {
+                    inspect().select_registered_with_review_storage(&fresh, &mut rng)
+                });
+            assert!(reached && matches!(interrupted, Err(AppError::ChatV2JoinReviewReopen)));
+            assert!(matches!(
+                inspect().select_registered(&fresh),
+                Err(AppError::ChatV2JoinReviewReopen)
+            ));
+            assert!(matches!(
+                register(&mut rng),
+                Err(AppError::ChatV2JoinReviewReopen)
+            ));
+        } else {
+            let pool = warm_review_pool.unwrap();
+            let pressure = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let exhaust = || {
+                let held = pressure.clone();
+                let pool = pool.clone();
+                move || {
+                    let remaining = pool.capacity() - pool.charged_for_test();
+                    *held.borrow_mut() = Some(pool.try_reserve(remaining).unwrap());
+                    assert_eq!(pool.charged_for_test(), pool.capacity());
+                }
+            };
+            let (unpaid, reached) =
+                with_receiver_hook(ReceiverFault::CatalogPreflight, exhaust(), || {
+                    inspect().select_registered_with_review_storage(&fresh, &mut rng)
+                });
+            assert!(reached && matches!(unpaid, Err(AppError::ChatV2ArchiveBusy)));
+            assert!(!review.exists());
+            assert_eq!(std::fs::read(&current).unwrap(), previous);
+            drop(pressure.borrow_mut().take());
+            assert_eq!(register(&mut rng).unwrap(), row);
+
+            let (cancel, revoked) = tokio::sync::watch::channel(true);
+            assert!(inspect()
+                .select_registered_with_review_storage(
+                    &RequestCancellation::new(revoked, None),
+                    &mut rng,
+                )
+                .is_err());
+            drop(cancel);
+            assert!(!review.exists());
+            assert_eq!(std::fs::read(&current).unwrap(), previous);
+
+            let (cancel, late) = tokio::sync::watch::channel(false);
+            let scope = RequestCancellation::new(late, None);
+            let exhaust = exhaust();
+            let (result, reached) = with_receiver_hook(
+                ReceiverFault::CatalogStage,
+                move || {
+                    exhaust();
+                    cancel.send_replace(true);
+                },
+                || inspect().select_registered_with_review_storage(&scope, &mut rng),
+            );
+            // The original admitted local declaration was coherent even
+            // though that old UI call could not publish its row.
+            assert!(
+                reached
+                    && result
+                        .is_err_and(|error| !matches!(error, AppError::ChatV2JoinReviewReopen))
+            );
+            drop(pressure.borrow_mut().take());
+            assert_eq!(
+                inspect()
+                    .inspect_registration(&invite, token, &fresh)
+                    .unwrap(),
+                Some(registration)
+            );
+            let mut unchanged = rng.clone();
+            let view = inspect()
+                .select_registered_with_review_storage(&fresh, &mut rng)
+                .unwrap();
+            assert_eq!(view.id_data(), row.id);
+            assert_eq!(view.request_data(), registration.request);
+            assert_eq!(view.member_outbox_context_id_data(), original_member_outbox);
+            assert!(view.same_original(
+                &inspect()
+                    .select_registered_with_review_storage(&fresh, &mut rng)
+                    .unwrap()
+            ));
+            assert!(inspect().governed_roster(&view, &fresh).is_ok());
+            assert_eq!(register(&mut rng).unwrap(), row);
+            assert_eq!(rng.next_u64(), unchanged.next_u64());
+        }
+        assert_ne!(std::fs::read(&current).unwrap(), previous);
+        assert!(review.join("manifest.current").is_file());
+        assert_eq!(
+            [&pins, &path, &welcome, &outcome_path, &index]
+                .map(|path| std::fs::read(path).unwrap()),
+            originals
+        );
+
+        let mut retirement = original.prepare_retirement().unwrap();
+        drop(installation);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while retirement.try_retire().unwrap()
+                == crate::store::NativeTextSourceRetirementStatus::Pending
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop((retirement, original, vault));
+        let cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+            dir.path(),
+            SECRET,
+            &mut rng,
+            current_policy(),
+        )
+        .unwrap();
+        assert_eq!(cold.row_count_data().unwrap(), 1);
+        assert_eq!(
+            cold.recovered_join_registration_data().unwrap(),
+            Some(registration)
+        );
+        assert!(cold
+            .actual_store_for_test()
+            .unwrap()
+            .has_mounted_review_receiver()
+            .unwrap());
+        assert!(!cold
+            .select_review_storage_before_joined_startup(&mut rng)
+            .unwrap());
+        assert_eq!(
+            [&pins, &path, &welcome, &outcome_path, &index]
+                .map(|path| std::fs::read(path).unwrap()),
+            originals
+        );
+        return;
+    }
     if successor == Some(MountedSuccessor::MissedHistory) {
         assert_eq!(register(&mut rng).unwrap().id, 1);
         assert!(!outbox_path.exists());

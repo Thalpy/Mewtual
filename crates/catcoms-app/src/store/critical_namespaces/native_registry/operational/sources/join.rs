@@ -1506,9 +1506,27 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         self,
         negative: &RequestCancellation,
     ) -> Result<NativeTextJoinedRowSelection, AppError> {
+        self.select_registered_inner(negative, None)
+    }
+
+    /// The first native UI selection can provision private review storage
+    /// without replacing the parked SDK node or opening any new route.
+    pub fn select_registered_with_review_storage(
+        self,
+        negative: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextJoinedRowSelection, AppError> {
+        self.select_registered_inner(negative, Some(rng))
+    }
+
+    fn select_registered_inner(
+        self,
+        negative: &RequestCancellation,
+        review_rng: Option<&mut dyn CryptoRngCore>,
+    ) -> Result<NativeTextJoinedRowSelection, AppError> {
         self.original.require_current(negative)?;
         let pending = self.original.pending.upgrade().ok_or_else(refused)?;
-        let _owner = pending.state.try_lock().map_err(|_| refused())?;
+        let mut owner = pending.state.try_lock().map_err(|_| refused())?;
         let mounted = self.mounted.upgrade().ok_or_else(refused)?;
         let mut slot = mounted.try_lock().map_err(|_| refused())?;
         let runtime = slot.as_mut().ok_or_else(refused)?;
@@ -1517,7 +1535,26 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             .or_else(|| runtime.registration.as_ref().map(|proof| proof.data()))
             .ok_or_else(refused)?;
         let metadata = self.original.work.as_ref().ok_or_else(refused)?;
+        if runtime.recovered.is_none() {
+            owner
+                .io
+                .as_ref()
+                .ok_or_else(refused)?
+                .require_warm_review_catalog()?;
+        }
         let (row, name) = runtime.observe_selected(metadata, data)?;
+        if let Some(rng) =
+            review_rng.filter(|_| runtime.recovered.is_none() && runtime.selection.is_none())
+        {
+            let warm = owner.io.as_mut().ok_or_else(refused)?;
+            let original = runtime.registration.as_mut().ok_or_else(refused)?;
+            metadata.select_warm_review_receiver(
+                warm,
+                original,
+                || self.original.require_current(negative),
+                rng,
+            )?;
+        }
         self.original.require_current(negative)?;
         runtime.select(
             row,
@@ -1565,6 +1602,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             } else {
                 let pending = pending.io.as_ref().ok_or_else(refused)?;
                 pending.require_original_join_intent(invite.binding(), token)?;
+                pending.require_warm_review_catalog()?;
                 if runtime.registration.is_none() {
                     runtime.registration = Some(metadata.capture_join_registration(pending)?);
                 }

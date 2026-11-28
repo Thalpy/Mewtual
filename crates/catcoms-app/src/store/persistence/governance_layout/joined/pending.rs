@@ -236,6 +236,7 @@ pub(in crate::store) struct JoinedPendingIo {
     directory: GovernanceDirectoryCapture,
     catalog: OpenedArchiveObject,
     welcome: Option<welcome::WarmWelcome>,
+    review_reopen_required: bool,
     _fee: CatalogReadReservation,
     _catalog_fee: CatalogReadReservation,
 }
@@ -589,6 +590,7 @@ impl ServerStore {
                 Zeroizing::new(original_catalog.current.1.to_vec()),
             ),
             welcome: None,
+            review_reopen_required: false,
             _fee: fee,
             _catalog_fee: catalog_fee,
         };
@@ -672,6 +674,7 @@ impl ServerStore {
             directory: inventory.directory,
             catalog,
             welcome: None,
+            review_reopen_required: false,
             _fee: fee,
             _catalog_fee: catalog_fee,
         };

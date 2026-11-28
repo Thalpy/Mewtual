@@ -172,7 +172,11 @@ action body is duplicated inside a decision; it remains in the retained action a
 ### Recipient journal
 
 The native joined source covers signed public headers in critical namespace
-ID12. Startup can declare it on the original recovered joined vault before
+ID12. The first native Join can declare it after durable registration, before
+publishing the original joined row. It reserves the replacement metadata
+proofs and receiver mount before writing. The same parked node, signer and
+registration remain live. A physical cut that the warm owner cannot adopt
+requires reopening the original vault. Startup can also declare it before
 the first same-vault rejoin declaration. The declaration checks the registered
 row against the original joined pin, retains the native registry and shared
 history files, and covers the authenticated empty selector before replacing

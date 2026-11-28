@@ -9,8 +9,11 @@ freezing that review lane. The ordinary chat archive keeps its own selector.
 An authenticated admission tag lets cold startup settle an interrupted
 metadata write from its original pin and exact write-ahead file.
 
-Native startup provisions the receiver on an eligible recovered joined
-vault. The first ID9 declaration preserves ID12. Existing ID9 vaults keep
+The first native join provisions the receiver after registering the
+original row and before publishing it. A pre-write capacity refusal can
+retry the same join. An interrupted catalog write requires cold recovery
+of that same vault. Native startup also provisions eligible recovered
+joined vaults. The first ID9 declaration preserves ID12. Existing ID9 vaults keep
 their exact catalog and require a separate migration for the receiver.
 A pending same-vault rejoin takes precedence over fresh receiver
 provisioning. The retired session can still finish its original catalog
@@ -51,9 +54,9 @@ A generic failure keeps that request for retry. Native can confirm that
 an already superseded request never reached admission, which lets the
 dialog clear the retry and show the current decision.
 
-First-session initialization, cold route restoration and combined
-acceptance remain open. The desktop
-Chat V2 switch remains off.
+First-session founder setup, cold route restoration, existing ID9
+migration and combined acceptance remain open. The desktop Chat V2
+switch remains off.
 
 ## View held posts in founder chat history
 

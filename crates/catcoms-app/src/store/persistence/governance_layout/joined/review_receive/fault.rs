@@ -5,6 +5,7 @@ type Hook = (ReceiverFault, Box<dyn FnOnce()>);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::store) enum ReceiverFault {
+    CatalogPreflight,
     CatalogClaim,
     CatalogStage,
     CatalogSelected,

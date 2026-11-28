@@ -18,6 +18,8 @@ use catcoms_rt::CryptoRngCore;
 const SCRATCH_NAME: &str = "chat-critical-namespaces.review-receiver.claim";
 const _: () = assert!(MAX_SEED_BYTES <= governance::codec::MAX_SEED_FRAME);
 
+type CoveredReceiver = (OpenedArchiveObject, Option<SelectedReviewReceiver>);
+
 struct Parent {
     current: OpenedArchiveObject,
     pins: OpenedArchiveObject,
@@ -138,11 +140,40 @@ impl ServerStore {
         &self,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<bool, AppError> {
+        Ok(self
+            .cover_initial_review_receiver(None, |_| Ok(()), rng)?
+            .is_some())
+    }
+
+    pub(in crate::store::persistence::governance_layout::joined) fn cover_warm_review_receiver(
+        &self,
+        original: &OpenedArchiveObject,
+        before_write: impl FnOnce(usize) -> Result<(), AppError>,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<Option<(OpenedArchiveObject, SelectedReviewReceiver)>, AppError> {
+        self.cover_initial_review_receiver(Some(original), before_write, rng)?
+            .map(|(current, mount)| Ok((current, mount.ok_or_else(denied)?)))
+            .transpose()
+    }
+
+    fn cover_initial_review_receiver(
+        &self,
+        warm: Option<&OpenedArchiveObject>,
+        before_write: impl FnOnce(usize) -> Result<(), AppError>,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<Option<CoveredReceiver>, AppError> {
         let (fee, inventory) = prepare_inventory(self)?;
         if inventory.seed.is_some() || inventory.stage.is_some() {
             return Err(denied());
         }
-        let (_, current) = inventory.current.as_ref().ok_or_else(denied)?;
+        let (file, current) = inventory.current.as_ref().ok_or_else(denied)?;
+        if let Some((original_file, original)) = warm {
+            if original != current
+                || session_id(original_file).map_err(io)? != session_id(file).map_err(io)?
+            {
+                return Err(denied());
+            }
+        }
         let key = Zeroizing::new(self.keys.db_key()?);
         let plain = Zeroizing::new(unseal(&key, &unframe(current)?)?);
         let parsed = self.parse_joined_catalog_descriptors(&plain)?;
@@ -150,12 +181,14 @@ impl ServerStore {
             // A damaged private journal must never make ordinary chat
             // unavailable. The review operation will retry the same owner
             // and return the original storage refusal.
-            if let Ok(mount) = self.review_receive_mount.try_lock() {
-                if let Some(selected) = mount.as_ref() {
-                    let _ = selected.recover_admitted(self);
+            if warm.is_none() {
+                if let Ok(mount) = self.review_receive_mount.try_lock() {
+                    if let Some(selected) = mount.as_ref() {
+                        let _ = selected.recover_admitted(self);
+                    }
                 }
             }
-            return Ok(false);
+            return Ok(None);
         }
         // An unpublished ID9 Stage still binds this exact Current. Leave
         // the optional receiver absent so native startup can return the
@@ -164,7 +197,7 @@ impl ServerStore {
             || parsed.shared_history.is_none()
             || self.has_rejoin_evidence()?
         {
-            return Ok(false);
+            return Ok(None);
         }
         require_absent(self)?;
         let parent = Parent::capture(self, inventory, &key, fee)?;
@@ -175,7 +208,22 @@ impl ServerStore {
             |marker, rng| ManifestKey::new(&key, marker).seal_initial(rng),
             rng,
         )?;
+        let seed = ReceiverDeclarationSeed::open(&key, &prepared.seed)?;
+        let data = seed.validate(&key, &parent.data())?;
+        #[cfg(test)]
+        if warm.is_some() {
+            super::fault::cut(ReceiverFault::CatalogPreflight)?;
+        }
+        let mount_fee = warm
+            .map(|_| {
+                SelectedReviewReceiver::reserve_mount(self).map_err(|_| AppError::ChatV2ArchiveBusy)
+            })
+            .transpose()?;
         parent.require_current(self)?;
+        before_write(data.candidate.len())?;
+        // The following local transaction owns its exact original Current
+        // and every distinct output. Once admitted, finish those bytes even
+        // if the caller closes. Its native publication still checks the UI.
         let mut scratch = cover_file(&parent.root, SCRATCH_NAME, &prepared.seed, true)?;
         parent.root.sync()?;
         scratch.require(&parent.root, SCRATCH_NAME, &prepared.seed)?;
@@ -185,11 +233,8 @@ impl ServerStore {
         {
             return Err(denied());
         }
-        let seed = ReceiverDeclarationSeed::open(&key, &prepared.seed)?;
-        let data = seed.validate(&key, &parent.data())?;
         drop(scratch);
-        finish(self, &parent, (&key, data), original, true)?;
-        Ok(true)
+        finish(self, &parent, (&key, data), original, true, mount_fee).map(Some)
     }
 }
 
@@ -242,7 +287,7 @@ pub(in crate::store::persistence::governance_layout::joined) fn recover(
     let seed = ReceiverDeclarationSeed::open(&key, &original.1)?;
     let parent = Parent::capture(store, inventory, &key, fee)?;
     let data = seed.validate(&key, &parent.data())?;
-    finish(store, &parent, (&key, data), original, scratch).map(Some)
+    finish(store, &parent, (&key, data), original, scratch, None).map(|(current, _)| Some(current))
 }
 
 fn require_unstarted(root: &HeldDirectory) -> Result<(), AppError> {
@@ -263,7 +308,8 @@ fn finish(
     (key, data): (&[u8; 32], ReceiverDeclarationData<'_>),
     claim: OpenedArchiveObject,
     scratch: bool,
-) -> Result<OpenedArchiveObject, AppError> {
+    mount_fee: Option<CatalogReadReservation>,
+) -> Result<CoveredReceiver, AppError> {
     let root = &parent.root;
     let claim_path = root.child(governance::GOVERNANCE_SEED);
     let scratch_path = root.child(SCRATCH_NAME);
@@ -358,6 +404,23 @@ fn finish(
     {
         return Err(denied());
     }
+    let mount = if let Some(fee) = mount_fee {
+        let plaintext = Zeroizing::new(unseal(key, &unframe(&current.1)?)?);
+        let parsed = store.parse_joined_catalog_descriptors(&plaintext)?;
+        let descriptor = parsed.review_receive.ok_or_else(denied)?;
+        let mount = SelectedReviewReceiver::capture_prepaid(store, descriptor, key, fee)?;
+        if session_id(&mount.marker.0).map_err(io)? != marker.identity()
+            || !mount.directory.same_original(&directory)
+        {
+            return Err(denied());
+        }
+        marker.require(root, MARKER_NAME, &data.marker)?;
+        initial.require(&directory, data.initial)?;
+        parent.require_leaves(store)?;
+        Some(mount)
+    } else {
+        None
+    };
     installed.require(root, current_name, data.candidate)?;
-    Ok(current)
+    Ok((current, mount))
 }

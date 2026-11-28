@@ -4722,6 +4722,10 @@ async fn native_text_connected_join(block_delete_archive: bool) {
     assert_eq!(original["name"], "My joined group");
     assert_eq!(original["display_name"], "Member");
     assert_eq!(original["channel"], found["channel"]);
+    assert!(
+        joiner_path.join("chat-v2-review-received").is_dir(),
+        "the first native joined result already has its original receiver"
+    );
     timeout(Duration::from_secs(5), startup.arrived.notified())
         .await
         .expect("Join published before starting the original row workers");
@@ -4804,6 +4808,20 @@ async fn native_text_connected_join(block_delete_archive: bool) {
         body["expectedContext"] = row["context"].clone();
         body
     };
+    let reviewed = command_value_after_busy(
+        &joiner_window,
+        &joiner_queue,
+        "get_message_page",
+        archive_request(&original, serde_json::json!({ "reviewedAfter": null })),
+    )
+    .await;
+    assert_eq!(
+        reviewed,
+        serde_json::json!({
+            "backend": "text-v2", "scope": "reviewed-archive-index",
+            "status": "current", "ids": [], "next": null
+        })
+    );
     let empty_archive = serde_json::json!({
         "backend":"text-v2","scope":"received-archive-index","available":true,"ids":[],"more":false,
     });

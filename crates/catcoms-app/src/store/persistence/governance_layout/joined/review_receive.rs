@@ -40,6 +40,7 @@ pub(super) const MANIFEST_NAME: &str = "manifest.current";
 
 pub(super) const MARKER_NAME: &str = "chat-critical-namespaces.review-receiver.marker";
 pub(super) const DIRECTORY_NAME: &str = "chat-v2-review-received";
+const MOUNT_FEE: usize = 80 * 1024;
 
 pub(super) fn require_absent(store: &ServerStore) -> Result<(), AppError> {
     require_no_claim_stage(store)?;
@@ -200,13 +201,27 @@ impl HeldManifest {
 }
 
 impl SelectedReviewReceiver {
+    fn reserve_mount(store: &ServerStore) -> Result<CatalogReadReservation, AppError> {
+        let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        policy.current.archive.pending.pool.try_reserve(MOUNT_FEE)
+    }
+
     pub(super) fn capture(
         store: &ServerStore,
         descriptor: &[u8],
         key: &[u8; 32],
     ) -> Result<Self, AppError> {
+        Self::capture_prepaid(store, descriptor, key, Self::reserve_mount(store)?)
+    }
+
+    fn capture_prepaid(
+        store: &ServerStore,
+        descriptor: &[u8],
+        key: &[u8; 32],
+        fee: CatalogReadReservation,
+    ) -> Result<Self, AppError> {
         let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
-        let fee = policy.current.archive.pending.pool.try_reserve(80 * 1024)?;
+        fee.validate(&policy.current.archive.pending.pool, MOUNT_FEE)?;
         let expected = critical_namespaces::review_receive_namespace::marker_data(key, descriptor)?;
         let marker =
             read(&fixed(store, false, MARKER_NAME)?, expected.len())?.ok_or_else(denied)?;

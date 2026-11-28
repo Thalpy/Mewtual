@@ -310,8 +310,24 @@ impl ServerStore {
     }
 
     pub(in crate::store) fn inspect_pending_join_catalog(&self) -> Result<Opened, AppError> {
+        self.inspect_prepaid_pending_join_catalog(self.reserve_pending_join_catalog_read()?)
+    }
+
+    pub(in crate::store) fn reserve_pending_join_catalog_read(
+        &self,
+    ) -> Result<CatalogReadReservation, AppError> {
         let policy = self.pending_join_policy.as_ref().ok_or_else(refused)?;
-        let read = policy.pool.try_reserve(READ_FEE)?;
+        policy.pool.try_reserve(READ_FEE)
+    }
+
+    /// The first-session declaration reserves its exact successor read
+    /// before admitting any on-disk write.
+    pub(in crate::store) fn inspect_prepaid_pending_join_catalog(
+        &self,
+        read: CatalogReadReservation,
+    ) -> Result<Opened, AppError> {
+        let policy = self.pending_join_policy.as_ref().ok_or_else(refused)?;
+        read.validate(&policy.pool, READ_FEE)?;
         let current = self.read_pending_join_catalog_slot(Slot::Current, &read)?;
         let stage = self.read_pending_join_catalog_slot(Slot::Stage, &read)?;
         let (selected, settle) = match (&current, &stage) {
