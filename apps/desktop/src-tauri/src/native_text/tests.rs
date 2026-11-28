@@ -3512,6 +3512,27 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
     let review_cover =
         std::fs::read(&review_marker).expect("cold founder provisions review storage");
     assert_eq!(review_cover.len(), 32);
+    let mut held = serde_json::json!({
+        "server": found["server"], "channel": found["channel"], "expectedContext": found["context"],
+        "heldAfter": null, "limit": 2,
+    });
+    let empty = command_value_after_busy(
+        &main,
+        &queue,
+        "get_message_page",
+        history::BUSY,
+        held.clone(),
+    )
+    .await;
+    assert_eq!(
+        empty,
+        serde_json::json!({
+            "backend": "text-v2", "scope": "selected-held-posts", "items": [],
+            "next": null, "unavailable": 0,
+        })
+    );
+    held["heldAfter"] = serde_json::json!("93".repeat(32));
+    refused(command_after_busy(&main, &queue, "get_message_page", history::BUSY, held).await);
     if let Some(history) = &retained_history {
         check_retained_removal_history(&main, &queue, &found, history).await;
         check_reply_to_removed_author(&main, &queue, &found, &history.visible, 92).await;

@@ -48,6 +48,15 @@ unavailable. ActionId cursors order each captured page independently of
 device timestamps. Refresh from the first page to include records whose
 IDs precede an earlier cursor.
 
+The same command offers a separate founder-held page using `heldAfter`
+(null for the first window) and a limit of 1 to 2. It returns the exact
+signed Create's display fields and Remove coordinates. `items: null`
+means storage is unavailable, and `unavailable` counts gaps in the
+window. A page may advance beyond a damaged record. A 32-byte
+continuation token expires five minutes after publication and binds
+the original session, row, channel and audit revision. The renderer
+restarts at the first window when a continuation becomes stale.
+
 The founder-only held-post storage entry accepts an exact original,
 the current verifier's removed-Create evidence and its host scope.
 It returns the same retained case for a verified semantic retry.
@@ -950,14 +959,19 @@ refuses with bytes preserved. V6 is sticky; exact v4 negative/stage exceptions r
 journal/archive namespace or active native issuer is supported. Thirteen App/four Storage tests
 are authored and UNRUN during the compilation pause. [Contract and rollback limits](communication-recovery/CHAT-CRITICAL-NAMESPACE-CATALOG-V6.md).
 
-## Exact v2 review-decision data (5 November; inactive)
+## Chat V2 review-decision data
 
 `owner_bodies::ReviewDecisionBody` binds one complete target, stable case ID, intent nonce, decision
 and exact previous body ID in at most665bytes. It checks data transitions and actual action/header
 signatures, not selected-current case state or owner/root provenance. A later selected Approve can
 support REVIEWED admission without mutating a frozen LOG cut; Reject/Reopen are never positive.
-No opaque approval/admission issuer, native command or journal is added. Nine regressions remain
-unrun during the pause. [Exact contract](communication-recovery/CHAT-OWNER-V2-REVIEW-DECISION.md).
+The distinct `ExactReviewDecisionBody` adds the complete signed original digest and exact selected
+Remove Header and epoch. Its predecessor is the previous exact wrapper body ID. Approval checks
+rederived reply ancestry under the current verifier. `ReviewStreamEntry` supplies the separately
+signed position and exact membership anchor, using the pinned founder key. The audit record
+proof can recheck the signed original and frozen removal without evaluating parent readiness
+or storage durability. Stream selection, durable decisions and native commands remain to be
+implemented. [Exact contract](communication-recovery/CHAT-OWNER-V2-REVIEW-DECISION.md).
 
 ## Guarded current chat projection core (5 November; authored, unexecuted)
 

@@ -118,10 +118,17 @@ impl ReviewDecisionBody {
     /// active governor must reject a stale Reject after an approval and any initial rejection
     /// of a known already-finalized action. Approval never has a rejection/reopen successor.
     pub fn verify_new_transition_from(&self, previous: Option<&Self>) -> Result<(), ChatError> {
+        self.verify_transition(previous.map(|previous| (previous, previous.id())))
+    }
+
+    pub(super) fn verify_transition(
+        &self,
+        previous: Option<(&Self, OwnerBodyId)>,
+    ) -> Result<(), ChatError> {
         match (previous, self.spec.previous) {
             (None, None) if self.spec.decision != ReviewDecision::Reopen => Ok(()),
-            (Some(previous), Some(id))
-                if previous.id() == id
+            (Some((previous, selected)), Some(id))
+                if selected == id
                     && previous.case_id() == self.case_id()
                     && matches!(
                         (previous.spec.decision, self.spec.decision),

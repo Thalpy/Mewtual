@@ -1,4 +1,4 @@
-import type { NativeAuditRecord, NativeOriginal, NativeOwnRevision, NativeReceived } from "./native-text-history.ts";
+import type { NativeAuditRecord, NativeHeldPost, NativeOriginal, NativeOwnRevision, NativeReceived } from "./native-text-history.ts";
 
 /** Development-only IPC data for the actual Native Text App route. This models
  * local saves and a recovered projection. A new fixture owns a
@@ -19,6 +19,12 @@ export function createVisualNativeTextFixture(empty = false) {
       presented_ms: "1787227201001", parents: [archived.action],
       body: { kind: "edit", create: archived.action, text: "A retained edit from the same device." } },
   ] : [];
+  const held: NativeHeldPost = {
+    caseId: "da".repeat(32), action: "db".repeat(32), signer: "dc".repeat(32),
+    admission: "dd".repeat(32), originalDigest: "de".repeat(32), removalHeader: "df".repeat(32),
+    removalEpoch: "3",
+    body: { kind: "create", text: "A late post held for review.", reply_to: null },
+  };
   const rows: NativeOriginal[] = empty ? [] : [
     { ordinal: "0", action: "b1".repeat(32), signer: "c1".repeat(32), channel: "1", presented_ms: "1787227200000", status: "pending",
       body: { kind: "create", text: "A message saved on this device.", reply_to: null } },
@@ -50,6 +56,13 @@ export function createVisualNativeTextFixture(empty = false) {
     if (["get_message_page", "send_message", "edit_message", "delete_message"].includes(command)) {
       if (args.server !== 1 || args.channel !== "1" || args.expectedContext !== server.context || !servers.length) throw new Error("Unknown Native Text fixture conversation");
       if (command === "get_message_page") {
+        if ("heldAfter" in args) {
+          if (args.heldAfter !== null || args.limit !== 2) {
+            throw new Error("Invalid Native Text fixture held-post request");
+          }
+          return result({ backend: "text-v2", scope: "selected-held-posts",
+            next: null, items: [structuredClone(held)], unavailable: 0 });
+        }
         if ("auditAction" in args) {
           if (args.limit !== 8 || args.auditAfter !== null || (args.auditAction !== null && args.auditAction !== archived?.action)) {
             throw new Error("Invalid Native Text fixture audit request");

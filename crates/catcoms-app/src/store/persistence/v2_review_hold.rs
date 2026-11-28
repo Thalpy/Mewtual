@@ -8,10 +8,12 @@ use catcoms_replication::chat::{
     ActionId, V2GeneralPrefixVerifier, V2RemovedCreateEvidence, V2RemovedCreateRecord,
     MAX_REMOVED_CREATE_RECORD_BYTES,
 };
-use catcoms_rt::CryptoRngCore;
+use catcoms_rt::{CryptoRngCore, RequestCancellation};
+use std::sync::{Arc, Mutex, Weak};
 use zeroize::Zeroizing;
 
 pub(in crate::store::persistence) mod disk;
+pub use disk::SelectedHeldCase as NativeTextHeldCase;
 
 const KEY_DOMAIN: &str = "catcoms/private-chat-v2-removed-create-vault-key/v1";
 const LEAF_DOMAIN: &str = "catcoms/private-chat-v2-removed-create-leaf/v1";
@@ -125,6 +127,124 @@ impl HoldScope {
 pub(super) struct OpenedHold {
     plain: Zeroizing<Vec<u8>>,
     pub(super) identity: HeldCase,
+}
+
+#[derive(Clone)]
+pub(in crate::store) struct HeldAuditObservation {
+    owner: Weak<Mutex<u64>>,
+    expected: u64,
+}
+
+impl HeldAuditObservation {
+    pub(super) fn capture(owner: &Arc<Mutex<u64>>) -> Result<Self, AppError> {
+        let expected = *owner.try_lock().map_err(|_| refused())?;
+        Ok(Self {
+            owner: Arc::downgrade(owner),
+            expected,
+        })
+    }
+
+    fn with_current<T>(&self, read: impl FnOnce() -> T) -> Result<T, AppError> {
+        let owner = self.owner.upgrade().ok_or_else(refused)?;
+        let current = owner.try_lock().map_err(|_| refused())?;
+        if *current != self.expected {
+            return Err(refused());
+        }
+        Ok(read())
+    }
+}
+
+/// Process-local continuation for one selected vault, channel and audit
+/// revision. Native lends it only to the original authorized view.
+#[derive(Clone)]
+pub struct NativeTextHeldReviewContinuation {
+    scope: SharedHistoryScope,
+    after: [u8; 32],
+    observation: HeldAuditObservation,
+    signal: RequestCancellation,
+}
+
+impl NativeTextHeldReviewContinuation {
+    pub(super) fn after_for(
+        &self,
+        scope: SharedHistoryScope,
+        observation: &HeldAuditObservation,
+    ) -> Result<[u8; 32], AppError> {
+        if self.scope != scope
+            || self.observation.expected != observation.expected
+            || !self.observation.owner.ptr_eq(&observation.owner)
+            || self.signal.is_cancelled()
+        {
+            return Err(refused());
+        }
+        Ok(self.after)
+    }
+}
+
+/// Paid, read-only data from the original mounted founder. The negative
+/// follows the selected membership and the caller. Native still orders its
+/// final publication against lock and original registry-row replacement.
+pub struct NativeTextHeldReviewPage {
+    window: Option<(disk::SelectedHeldWindow, HeldAuditObservation)>,
+    scope: SharedHistoryScope,
+    signal: RequestCancellation,
+}
+
+catcoms_rt::redacted_debug! { NativeTextHeldReviewPage; NativeTextHeldReviewContinuation; }
+
+impl NativeTextHeldReviewPage {
+    pub(in crate::store) fn new(
+        window: Option<(disk::SelectedHeldWindow, HeldAuditObservation)>,
+        scope: SharedHistoryScope,
+        signal: RequestCancellation,
+    ) -> Self {
+        Self {
+            window,
+            scope,
+            signal,
+        }
+    }
+
+    /// Recheck the original hold revision through the final synchronous
+    /// release. This acquires a readiness check without performing file I/O.
+    pub fn with_publication<T>(&self, publish: impl FnOnce() -> T) -> Result<T, AppError> {
+        let check = || {
+            if self.signal.is_cancelled() {
+                return Err(refused());
+            }
+            Ok(publish())
+        };
+        match self.window.as_ref() {
+            Some((_, observation)) => observation.with_current(check)?,
+            None => check(),
+        }
+    }
+
+    pub fn continuation(&self) -> Option<NativeTextHeldReviewContinuation> {
+        let (page, observation) = self.window.as_ref()?;
+        Some(NativeTextHeldReviewContinuation {
+            scope: self.scope,
+            after: page.next?,
+            observation: observation.clone(),
+            signal: self.signal.clone(),
+        })
+    }
+
+    /// None means the hold namespace is unavailable. A complete empty page
+    /// requires a selected namespace and an observed empty window.
+    pub fn with_records<T>(
+        &self,
+        read: impl FnOnce(Option<&[NativeTextHeldCase]>, usize) -> T,
+    ) -> Result<T, AppError> {
+        let value = self.with_publication(|| match self.window.as_ref() {
+            Some((page, _)) => read(Some(page.records.as_slice()), page.unavailable),
+            None => read(None, 0),
+        })?;
+        if self.signal.is_cancelled() {
+            return Err(refused());
+        }
+        Ok(value)
+    }
 }
 
 #[cfg(test)]

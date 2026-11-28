@@ -105,6 +105,15 @@ of the ordinary archive and own outbox establish local ancestry or
 absence without applying unrelated pending writes. Only the
 founder-only hold storage receives a new unproven original.
 
+The founder-held audit requires a local authenticated receipt over
+the exact retained ciphertext and selected ID10 marker. The writer
+covers the body and its directory before making that receipt. A gap
+in receipt storage leaves the exact body available for retry and
+withholds it from the audit. The read keeps the original file handles
+through the founder checkpoint checks, verifies their exact bytes and
+names again, then releases the physical lease. Native final publication
+orders the same audit revision and installed row against session lock.
+
 A holder's archive page exposes eligible IDs to a reciprocally approved
 peer on the original authenticated connection. Its continuation gives no
 raw offset, author ID or unoffered ActionId. The cursor is replayable on

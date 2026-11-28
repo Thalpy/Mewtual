@@ -1,8 +1,8 @@
 # V2 exact review decision body
 
-Concrete implemented prerequisite with clear design and actual-diff reviews. This closes the fourth supported header body's data
-grammar, not the actual governing verifier, UI decision journal, owner transaction or live command.
-Compilation/tests/builds remain paused. Existing v1 action/owner facts are unchanged.
+The ReviewDecision Header kind has a semantic decision data format and a separate exact
+held-post format. Governing selection, the owner transaction and native decisions still
+require the production journal. Existing v1 action and owner fact encodings are unchanged.
 
 ## Case and body grammar
 
@@ -19,6 +19,62 @@ All byte fields are u32-length-prefixed. Extra/short/unknown fields refuse; Reop
 decision refuses. Maximum body665bytes. Body ID uses the shared owner-body-id/v2 domain.
 The case ID excludes decision/nonce/previous fields so the same exact action has a stable case;
 the decision body ID commits them all, so a changed intent cannot borrow an exact saved result.
+
+### Exact held-post format
+
+`ExactReviewDecisionBody` uses a separate `mewtual/chat/held-review-decision/v1\0` domain.
+It encloses the canonical semantic decision, the digest of the complete signed original,
+the selected Remove Header ID, and that Remove's MLS epoch. It allows Creates and replies.
+The signed Header binds the wrapper's body ID. Two genuine signatures with the same
+semantic ActionId name the same case but different exact originals. An exact successor
+must refer to the previous wrapper ID and retain the original digest and Remove coordinates.
+
+The matching helpers operate on a decoded hold record or rederived evidence. Approval needs
+rederived evidence with verified reply ancestry. The signer must rederive under the actual
+physical selection and require the current verifier to recognize the evidence. A decoded
+record or matching wrapper supplies no freshness or positive admission.
+
+### Founder review stream
+
+A separate stream keeps review writes independent of MLS Add and Remove. The active
+membership selector requires an epoch increment and a new MLS authenticator, and the joined
+runtime includes its selected membership Header in ordinary message envelope scope. A review
+decision needs neither a new MLS commit nor a change to that scope.
+
+`ReviewStreamEntry` signs its versioned domain, a hash of the original pinned founder
+genesis, the stream sequence and predecessor, the actual selected membership Header
+and MLS epoch, and the exact decision body ID. The first entry has sequence one and
+a zero predecessor. Later entries use their immediate predecessor's signed-data ID.
+Every representation undergoes its own full-key signature check. Distinct valid entry
+IDs at a stream position supply fork evidence even when the decision bodies are absent.
+The original anchor and selected membership lineage come from the independently verified
+vault or join pin.
+
+Production selection needs a separate critical journal with its own head, intent outcomes
+and resource limits. It must cover the exact original, body and resulting head before it
+publishes an approval. An observed founder fork pauses further review effects and retains
+the signed evidence. Ordinary message admission and selected membership stay independent.
+Only approved originals and the proof needed to check them are eligible for ordinary
+delivery. Full rejected and reopened case details remain in the founder audit.
+
+The signed frame provides format and linkage checks. The journal, historical membership
+proof, selected case lookup, fork persistence and delivery admission remain open.
+
+### Covered founder audit
+
+After the existing hold writer covers the exact body and its directory, it can
+write a fixed authenticated receipt in a separate sibling directory. The receipt
+binds the selected ID10 marker, channel key, opaque case label and exact retained
+ciphertext. Older writers still use their original catalog and file names. An
+unavailable receipt cannot stop the exact body from being held.
+
+The founder audit reads at most eight cases per window. It checks the covering
+receipt, exact body and authenticated frozen Remove, and keeps both original
+files held until every candidate in the window has been checked again. It can
+advance past unavailable cases without repairing them or reporting a complete
+page. A legacy hold that later entered ordinary history still needs separate
+confirmation to gain a receipt. Native cursor custody and final disclosure are
+separate boundaries.
 
 An explicit selected Review Approve supplies a separate EXACT REVIEWED admission route after a
 removal. It does not append to/change the frozen accepted-log cut or prove accepted-before-removal.
@@ -70,16 +126,13 @@ mandatory control sequence capacity BEFORE dispatch/signing. The665-byte body ca
 physical/runtime invoice. Actual save-before-install/publication, archive/index/state validation,
 opaque projection/approval issuance, admin workflow and crash/compatibility tests remain open.
 
-Required authored tests: exact maximum and independent frame/CID/case identity; real action/header
-binding and signature variants; every valid/invalid decision pair; wrong/foreign/stale case and
-previous IDs; nonce/decision/previous changes alter body ID but not case; short/extra/wrong option/
-fixed-field/count/legacy frames; exact retry distinction; missing governing/current-head authority
-is not fabricated by a successful data check. No execution is claimed during the pause.
-
 ## Source evidence
 
-`owner_bodies::ReviewDecisionBody` now implements strict outer/target framing, case/body identities,
-exact new-transition checks and action/header bindings. Nine regressions are authored/unrun, using
-real action/header signatures and the existing genuine action-signature variants. Source formatting
-and whitespace checks pass. The governor, selected-current case lookup, covering producer, durable
-intent/abandon journal, opaque approval/admission issuance and admin UI remain unimplemented.
+Core regressions cover the semantic format, the separate original and Remove bindings, wrapper
+predecessors, terminal approval, verified reply ancestry and the pinned stream signature and
+sequence. Thirteen focused Windows Core tests passed. One uses two independently valid
+signatures for a single reply and checks that the selected decision matches its original
+only. The audited record proof returns the signed original after rechecking the selected
+frozen removal and live verifier. The eventual UI still needs its original-source final
+publication guard. End-to-end acceptance needs a covered journal, exact intent recovery,
+selected approval admission and a native admin view.

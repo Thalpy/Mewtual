@@ -2674,6 +2674,41 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     assert!(!sweep.count_result_once(action).unwrap());
                     drop(turn);
                     assert!(cold.archived_message_projection(channel, action, &fresh, &mut history_rng).unwrap().is_none());
+                    drop((sweep, provider));
+                    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                        while !cold.try_retire().unwrap() {
+                            tokio::task::yield_now().await;
+                        }
+                    }).await.expect("the founder retires the original TCP actor before reopening the audit");
+                    drop(cold);
+                    cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+                        founder_dir.path(), SECRET, &mut history_rng, current_policy(),
+                    ).unwrap().prepare_recovered_founder().map_err(|(_, error)| error).unwrap();
+                    let audit = cold.selected_held_review_window(channel, None, 2, &fresh).unwrap();
+                    assert!(audit.continuation().is_none());
+                    audit.with_records(|records, unavailable| {
+                        assert_eq!(unavailable, 0);
+                        let [record] = records.unwrap() else {
+                            panic!("the audit sees the one exact covered hold after reopen");
+                        };
+                        assert_eq!(record.signed.id(), action);
+                        assert_eq!(record.admission, third_own);
+                        assert_eq!(record.removal, (removed_head, removed_epoch));
+                        assert!(matches!(
+                            &record.signed.spec().body,
+                            Body::Create { text, reply_to: None }
+                                if text == "Only the surviving member saw this post"
+                        ));
+                    }).unwrap();
+                    drop(audit);
+                    let directory = std::fs::read_dir(founder_dir.path().join("chat-v2-removed-holds"))
+                        .unwrap().next().unwrap().unwrap().path();
+                    let parked = directory.with_extension("parked");
+                    std::fs::rename(&directory, &parked).unwrap();
+                    std::fs::create_dir(&directory).unwrap();
+                    assert!(cold.selected_held_review_window(channel, None, 2, &fresh).is_err());
+                    std::fs::remove_dir(&directory).unwrap();
+                    std::fs::rename(&parked, &directory).unwrap();
                 }
                 let (_cancel, signal) = tokio::sync::watch::channel(true);
                 let closed = RequestCancellation::new(signal, None);
@@ -6381,10 +6416,29 @@ async fn review_hold_native_open_requires_a_real_founder_and_the_held_marker() {
                 creation: [74; 32],
                 channel: 75,
             };
-            let directory = store.review_hold_partition_for_test(scope).unwrap();
-            std::fs::rename(&directory, directory.with_extension("parked")).unwrap();
-            std::fs::create_dir(&directory).unwrap();
-            assert!(store.review_hold_partition_for_test(scope).is_err());
+            let directory = store
+                .review_hold_partition_for_test(scope, || Ok(()))
+                .unwrap();
+            // Windows cannot rename the parent while its child is held
+            // open. Replacing the child exercises the same cached branch
+            // and its recheck after the original parent sync.
+            let displaced = directory.with_extension("parked");
+            let mut snapped = false;
+            assert!(store
+                .review_hold_partition_for_test(scope, || {
+                    snapped = true;
+                    std::fs::rename(&directory, &displaced).unwrap();
+                    std::fs::create_dir(&directory).unwrap();
+                    Ok(())
+                })
+                .is_err());
+            assert!(
+                snapped,
+                "a cached partition still crosses the parent barrier"
+            );
+            assert!(store
+                .review_hold_partition_for_test(scope, || Ok(()))
+                .is_err());
             let parked = marker_path.with_extension("parked");
             std::fs::rename(&marker_path, &parked).unwrap();
             std::fs::write(&marker_path, marker).unwrap();

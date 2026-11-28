@@ -12,6 +12,7 @@ mod admission;
 mod connected;
 mod publication;
 mod receiving;
+mod review_audit;
 pub use admission::{
     NativeTextMemberAdmissionFailure, NativeTextMemberFinalPreparation, NativeTextMemberSaveJob,
 };
