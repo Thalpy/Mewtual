@@ -209,15 +209,22 @@ mod tests {
             original_digest: "05".repeat(32),
             removal_header: "06".repeat(32),
             removal_epoch: u64::MAX.to_string(),
-            body: BodyData::Create { text: &text, reply_to: Some("07".repeat(32)) },
+            body: BodyData::Create {
+                text: &text,
+                reply_to: Some("07".repeat(32)),
+            },
         };
-        let body = encode(&Page {
-            backend: "text-v2",
-            scope: "selected-held-posts",
-            next: Some("08".repeat(32)),
-            items: Some(vec![item(), item()]),
-            unavailable: 512,
-        }, HELD_RESPONSE_LIMIT).unwrap();
+        let body = encode(
+            &Page {
+                backend: "text-v2",
+                scope: "selected-held-posts",
+                next: Some("08".repeat(32)),
+                items: Some(vec![item(), item()]),
+                unavailable: 512,
+            },
+            HELD_RESPONSE_LIMIT,
+        )
+        .unwrap();
         assert!(body.len() > 2 * 64 * 1024 * 5);
         assert!(body.len() <= HELD_RESPONSE_LIMIT);
     }
