@@ -60,6 +60,24 @@ pub(super) struct SelectedPending {
 }
 
 impl SelectedPending {
+    fn registration_data(&self) -> Result<Option<NativeTextJoinedRegistrationData>, AppError> {
+        let selected = self
+            .welcome
+            .as_ref()
+            .and_then(welcome::RecoveredWelcome::selected_data);
+        let (Some(transport), Some(selected)) = (self._pending.transport_data()?, selected) else {
+            return Ok(None);
+        };
+        let (request, context) = self._pending.pending_data();
+        NativeTextJoinedRegistrationData::from_selection(
+            request.request_bytes_data(),
+            context,
+            transport,
+            selected,
+        )
+        .map(Some)
+    }
+
     pub(super) fn finish_core(&mut self) -> Result<(), AppError> {
         if let Some(welcome) = self.welcome.as_mut() {
             welcome.finish_core()?;
@@ -711,25 +729,30 @@ impl ServerStore {
         let Some(pending) = original.pending.as_ref() else {
             return Ok(None);
         };
-        let selected = pending
-            .welcome
-            .as_ref()
-            .and_then(welcome::RecoveredWelcome::selected_data);
-        let receipt = if let (Some(transport), Some(selected)) =
-            (pending._pending.transport_data()?, selected)
-        {
-            let (request, context) = pending._pending.pending_data();
-            Some(NativeTextJoinedRegistrationData::from_selection(
-                request.request_bytes_data(),
-                context,
-                transport,
-                selected,
-            )?)
-        } else {
-            None
-        };
+        let receipt = pending.registration_data()?;
         original.require(self)?;
         Ok(receipt)
+    }
+
+    /// Borrow the request of this exact recovered registration after
+    /// Welcome. The pre-Welcome retry API intentionally refuses this state.
+    pub(in crate::store) fn with_recovered_registration_request<T>(
+        &self,
+        receipt: NativeTextJoinedRegistrationData,
+        inspect: impl FnOnce(&[u8]) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        self.validate_mounted_governance_layout()?;
+        let guard = self.joined_pin_index.lock().map_err(|_| denied())?;
+        let original = guard.as_ref().ok_or_else(denied)?;
+        original.require(self)?;
+        let pending = original.pending.as_ref().ok_or_else(denied)?;
+        if pending.registration_data()? != Some(receipt) {
+            return Err(denied());
+        }
+        let (request, _) = pending._pending.pending_data();
+        let result = inspect(request.request_bytes_data())?;
+        original.require(self)?;
+        Ok(result)
     }
 
     pub(in crate::store) fn recovered_join_transport_seed(

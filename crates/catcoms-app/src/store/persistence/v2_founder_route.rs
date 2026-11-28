@@ -219,12 +219,9 @@ impl ServerStore {
         // ID9/A2 is a distinct authority family. Neither old file presence
         // nor an equal founder label may attach this A1 hint to it.
         crate::store::critical_namespaces::joined_pin::require_a1_founder_route_profile(self)?;
-        if self.recovered_join_registration_data()? != Some(original) {
-            return Err(refused());
-        }
-        let mut request = Zeroizing::new(Vec::with_capacity(MAX_V2_JOIN_REQUEST_PACKET_BYTES));
-        self.copy_recovered_join_request(&mut request)?;
-        with_binding_from_request(&request, original, inspect)
+        self.with_recovered_registration_request(original, |request| {
+            with_binding_from_request(request, original, inspect)
+        })
     }
 
     fn with_warm_a1_invite<T>(
