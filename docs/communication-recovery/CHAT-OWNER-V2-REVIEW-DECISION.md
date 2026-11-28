@@ -179,6 +179,9 @@ history files, and covers the authenticated empty selector before replacing
 Current. A2 binds the complete encrypted catalog. A vault with an existing
 ID9 keeps that catalog, while a future ID9 declaration preserves all ID12
 descriptor bytes.
+When a rejoin Stage or other rejoin evidence already exists, startup
+defers the new receiver. The retired owner can reopen and select its
+original rejoin Stage against the unchanged catalog.
 
 The selector uses the original genesis pin and vault for each group's stable
 identity. It keeps an exact ordinal chain and each case's latest covered

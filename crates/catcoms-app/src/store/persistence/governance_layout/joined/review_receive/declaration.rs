@@ -157,7 +157,13 @@ impl ServerStore {
             }
             return Ok(false);
         }
-        if parsed.rejoin_declared || parsed.shared_history.is_none() {
+        // An unpublished ID9 Stage still binds this exact Current. Leave
+        // the optional receiver absent so native startup can return the
+        // retired owner that can resume the original rejoin.
+        if parsed.rejoin_declared
+            || parsed.shared_history.is_none()
+            || self.has_rejoin_evidence()?
+        {
             return Ok(false);
         }
         require_absent(self)?;

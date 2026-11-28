@@ -12,6 +12,9 @@ metadata write from its original pin and exact write-ahead file.
 Native startup provisions the receiver on an eligible recovered joined
 vault. The first ID9 declaration preserves ID12. Existing ID9 vaults keep
 their exact catalog and require a separate migration for the receiver.
+A pending same-vault rejoin takes precedence over fresh receiver
+provisioning. The retired session can still finish its original catalog
+Stage against the same Current.
 
 The joined source can save the exact original named by a selected Approve.
 It first checks the signed header and case, the removed Admission and any

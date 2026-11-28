@@ -2645,13 +2645,63 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     cold.recovered_join_outcome_data().unwrap(),
                     Some((third_head, third_epoch))
                 );
-                let started = cold.bind_recovered_native_runtime(
-                    third_rng,
-                    Box::new(catcoms_rt::SystemClock),
-                    &fresh,
-                );
-                if let Ok(mut old) = started {
-                    assert!(old.complete_recovery(&fresh).is_err());
+                if late.is_some() {
+                    // This evicted peer has never mounted the optional review receiver.
+                    // A clean, exact ID9 Stage must take precedence when it restarts.
+                    let current = third_dir.path().join("chat-critical-namespaces.bin");
+                    let stage = third_dir.path().join("chat-critical-namespaces.rejoin.stage");
+                    let review_marker =
+                        third_dir.path().join("chat-critical-namespaces.review-receiver.marker");
+                    let before = std::fs::read(&current).unwrap();
+                    assert!(!stage.exists() && !review_marker.exists());
+                    let open_retired = |storage: crate::store::NativeTextJoinedStorage| {
+                        let recovery = storage.into_native_startup_membership(
+                            ((Arc::new(AtomicU64::new(7)), Arc::new(AtomicU64::new(0)),
+                              Arc::new(AtomicBool::new(false))), None),
+                            budget.clone(), &policy(), &fresh,
+                            (third_rng.clone(), Box::new(SystemClock)),
+                            (third_rng.clone(), Box::new(SystemClock)),
+                        ).unwrap();
+                        let crate::store::NativeTextJoinedRecovery::Removed(retired) = recovery else {
+                            panic!("the old joined peer must remain retired");
+                        };
+                        retired
+                    };
+                    let mut working_rng = third_rng.clone();
+                    let mut retired = open_retired(cold);
+                    assert!(retired.stage_rejoin_catalog(&mut working_rng).unwrap());
+                    let staged = std::fs::read(&stage).unwrap();
+                    assert_ne!(staged, before);
+                    assert_eq!(std::fs::read(&current).unwrap(), before);
+                    drop(retired);
+                    let cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+                        third_dir.path(), SECRET, &mut working_rng, current_policy(),
+                    ).unwrap();
+                    let mut retry = working_rng.clone();
+                    assert!(!cold.select_review_storage_before_joined_startup(&mut retry).unwrap());
+                    assert_eq!(std::fs::read(&current).unwrap(), before);
+                    assert_eq!(std::fs::read(&stage).unwrap(), staged);
+                    assert!(!review_marker.exists());
+                    let mut retired = open_retired(cold);
+                    assert!(retired.stage_rejoin_catalog(&mut retry).unwrap());
+                    assert_eq!(std::fs::read(&stage).unwrap(), staged);
+                    assert!(retired.select_rejoin_catalog(&mut retry).unwrap());
+                    assert_eq!(std::fs::read(&current).unwrap(), staged);
+                    assert!(!stage.exists() && !review_marker.exists());
+                    assert_eq!(
+                        rand_core::RngCore::next_u64(&mut retry),
+                        rand_core::RngCore::next_u64(&mut working_rng),
+                        "deferral and exact staged retry draw no randomness"
+                    );
+                } else {
+                    let started = cold.bind_recovered_native_runtime(
+                        third_rng,
+                        Box::new(catcoms_rt::SystemClock),
+                        &fresh,
+                    );
+                    if let Ok(mut old) = started {
+                        assert!(old.complete_recovery(&fresh).is_err());
+                    }
                 }
                 assert_eq!(std::fs::read(original_eviction).unwrap(), covered);
                 // Drain the previous listener before trying to reconnect the
