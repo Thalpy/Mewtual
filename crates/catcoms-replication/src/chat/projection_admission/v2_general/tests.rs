@@ -1948,6 +1948,7 @@ fn removed_reply_requires_verified_dependencies_and_never_admits_a_delete() {
     use crate::chat::owner_bodies::{
         ExactReviewDecisionBody, ExactReviewOriginal, ReviewDecision, ReviewDecisionBody,
         ReviewSpec, ReviewStreamEntry, ReviewStreamPosition, ReviewStreamRecord,
+        UnsignedReviewStreamEntry,
     };
     use crate::chat::owner_facts::OwnerFactId;
     let mut f = Fixture::new();
@@ -2125,6 +2126,38 @@ fn removed_reply_requires_verified_dependencies_and_never_admits_a_delete() {
     assert_eq!(reopened.entry_data(), &entry);
     assert_eq!(reopened.decision_data(), &approve);
     assert_eq!(reopened.held_data().original_bytes_data(), &original);
+    assert!(matches!(
+        ReviewStreamRecord::decode_public_approval(&trusted, entry.id(), &packed),
+        Err(ChatError::Dependency)
+    ));
+    let position = entry.position_data();
+    let public_signed = |body| {
+        let prepared = UnsignedReviewStreamEntry::prepare_public(&trusted, position, body).unwrap();
+        let signature = f.owner.key.sign(prepared.signing_bytes());
+        prepared.attach_signature(&trusted, signature).unwrap()
+    };
+    let public_approval = public_signed(&approve);
+    let public_frame =
+        ReviewStreamRecord::encode(&trusted, &public_approval, &approve, &record).unwrap();
+    let public =
+        ReviewStreamRecord::decode_public_approval(&trusted, public_approval.id(), &public_frame)
+            .unwrap();
+    assert_eq!(public.held_data().original_bytes_data(), &original);
+    assert!(matches!(
+        ReviewStreamRecord::decode_public_approval(&trusted, entry.id(), &public_frame),
+        Err(ChatError::Scope)
+    ));
+    let public_rejection = public_signed(&reject);
+    let rejected_frame =
+        ReviewStreamRecord::encode(&trusted, &public_rejection, &reject, &record).unwrap();
+    assert!(matches!(
+        ReviewStreamRecord::decode_public_approval(
+            &trusted,
+            public_rejection.id(),
+            &rejected_frame
+        ),
+        Err(ChatError::Scope)
+    ));
     assert!(matches!(
         ReviewStreamRecord::encode(&trusted, &entry, &approve, &other_record),
         Err(ChatError::Scope)

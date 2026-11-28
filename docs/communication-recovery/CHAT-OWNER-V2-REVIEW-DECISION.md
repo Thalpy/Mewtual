@@ -50,6 +50,21 @@ IDs at a stream position supply fork evidence even when the decision bodies are 
 The original anchor and selected membership lineage come from the independently verified
 vault or join pin.
 
+Fresh intents cover the version 2 entry. It also signs a fixed 97-byte
+case step with the case ID, a commitment to the exact original and
+Remove, the preceding exact case decision ID and the choice. The same
+step verifier can check Reject, Reopen and Approve across interleaved
+cases using the selected stream tip and selected case tip. It can read
+each choice, sequence and stable case ID without receiving the earlier
+decision bodies or post text. A full approval record must match the
+exact signed public entry and contain the original it approves.
+
+Version 1 remains readable for local recovery, with the original bytes,
+signature and semantic ID. A version 1 first entry cannot establish a
+public stream, and a public suffix cannot skip it. These private journals
+remain readable locally. The public format and checks do not yet send or
+select decisions on another member's device.
+
 The private journal record frames the versioned domain, the signed stream
 entry, the exact decision and the retained original as four bounded,
 length-prefixed fields. Its decoder checks the pinned signature, the

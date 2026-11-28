@@ -20,6 +20,14 @@ and real signature do not authenticate its claimed removal or store
 scope. A future host must obtain those from its own selected prefix and
 encrypted case selection, then enforce current authorization for access.
 
+The public review header authenticates the choice, a stable case ID and
+commitment, and the exact case predecessor under the original founder
+pin. This exposes decision choice, order and case correlation when served.
+Private Reject and Reopen bodies are never valid approval records. The
+recipient still has to prove the membership anchor, selected case and
+original Remove before selecting an effect. Version 1 private headers
+provide no public case transition evidence.
+
 Chat V2 history discovery can reveal IDs and the scanned ordinal range of a
 current member's outbox to a peer with an explicitly approved signed contact
 and the current channel exporter. The native Source binds contact Admission

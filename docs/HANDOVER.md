@@ -105,6 +105,13 @@ exact retry of the earlier Reject. It also checks that a decision in
 one case leaves the other case's revision independent. Approval delivery,
 native admin controls and activation remain open.
 
+Fresh review signatures now cover the choice, the exact case predecessor
+and a commitment to the original and its Remove. This gives peers enough
+signed data to verify case transitions without reading rejected or
+reopened posts. Original version 1 signatures and old retries still use
+their exact saved bytes. An older private stream cannot seed the public
+one. Peer delivery and approval selection are still in development.
+
 ## Rejoin from the retired native session
 
 The rejoin form passes a signed invite and the numeric IP that the user

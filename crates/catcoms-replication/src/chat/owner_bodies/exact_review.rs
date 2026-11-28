@@ -351,7 +351,7 @@ mod tests {
             UnsignedReviewStreamEntry::read_position_data(prepared.signing_bytes()).unwrap(),
             position
         );
-        let mut foreign_position = *prepared.signing_bytes();
+        let mut foreign_position = prepared.signing_bytes().to_vec();
         foreign_position[0] ^= 1;
         assert!(UnsignedReviewStreamEntry::read_position_data(&foreign_position).is_err());
         let cached_raw: [u8; 64] = encoded[UNSIGNED_REVIEW_STREAM_ENTRY_BYTES..]

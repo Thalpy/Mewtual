@@ -4,7 +4,7 @@ use super::*;
 use catcoms_replication::chat::{
     owner_bodies::{
         ExactReviewDecisionBody, ReviewStreamPosition, UnsignedReviewStreamEntry,
-        UNSIGNED_REVIEW_STREAM_ENTRY_BYTES,
+        MAX_UNSIGNED_REVIEW_STREAM_ENTRY_BYTES,
     },
     FounderGenesisAnchorData, V2GeneralPrefixVerifier, V2RemovedCreateEvidence,
 };
@@ -26,7 +26,7 @@ impl PreparedV2FounderRecoveredAdd {
             &ExactReviewDecisionBody,
             &V2RemovedCreateEvidence,
         ),
-        covered_preimage: &[u8; UNSIGNED_REVIEW_STREAM_ENTRY_BYTES],
+        covered_preimage: &[u8],
         (native, cut, ends): (
             &NativeChatSourceObservation,
             &mut NativeChatPreparedKeyCut,
@@ -63,11 +63,8 @@ impl PreparedV2FounderRecoveredAdd {
             header: header.id(),
             state: header.spec().state,
         };
-        let exact = UnsignedReviewStreamEntry::prepare(&pin, position, decision)
+        let exact = UnsignedReviewStreamEntry::rederive(&pin, position, decision, covered_preimage)
             .map_err(|_| unavailable())?;
-        if exact.signing_bytes() != covered_preimage {
-            return Err(unavailable());
-        }
         cut.require_never_entered_data(native, NativeChatKeyPurpose::ReviewDecision)
             .map_err(|_| unavailable())?;
         // RT can retain an End before its final cancellation check. That
@@ -81,7 +78,7 @@ impl PreparedV2FounderRecoveredAdd {
             .sign_retained_ed25519_bounded(
                 &self.signer,
                 exact.signing_bytes(),
-                UNSIGNED_REVIEW_STREAM_ENTRY_BYTES,
+                MAX_UNSIGNED_REVIEW_STREAM_ENTRY_BYTES,
             )
             .map_err(|_| unavailable())
     }

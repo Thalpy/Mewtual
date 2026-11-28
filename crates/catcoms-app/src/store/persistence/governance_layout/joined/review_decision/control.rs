@@ -14,8 +14,7 @@ use crate::store::persistence::v2_member_outbox::fs::{
 };
 use catcoms_replication::chat::{
     owner_bodies::{
-        ExactReviewDecisionBody, ReviewStreamEntry, ReviewStreamPosition,
-        UnsignedReviewStreamEntry, UNSIGNED_REVIEW_STREAM_ENTRY_BYTES,
+        ExactReviewDecisionBody, ReviewStreamEntry, ReviewStreamPosition, UnsignedReviewStreamEntry,
     },
     FounderGenesisAnchorData,
 };
@@ -295,7 +294,7 @@ impl DecisionControl {
         (store, mount): (&ServerStore, &SelectedReviewDecision),
         spec: ReviewSigningSpec<'_>,
         mut recheck: impl FnMut(Option<ReviewStreamPosition>) -> Result<(), AppError>,
-        sign: impl FnOnce(&[u8; UNSIGNED_REVIEW_STREAM_ENTRY_BYTES]) -> Result<[u8; 64], AppError>,
+        sign: impl FnOnce(&[u8]) -> Result<[u8; 64], AppError>,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<ReviewStreamEntry, AppError> {
         let (selected_base, next_sequence) = self.data.prior.as_ref().map_or_else(
@@ -305,7 +304,6 @@ impl DecisionControl {
         if next_sequence != spec.position.sequence {
             return Err(denied());
         }
-        let position = (spec.pin, spec.position, Some(selected_base));
         let prepared = if let Some(original) = &self.data.slots[ControlRole::Intent as usize] {
             let plain = self.key.open_intent(&original.bytes)?;
             let intent = ReviewIntent::decode(&plain)?;
@@ -332,17 +330,19 @@ impl DecisionControl {
             prepared
         } else {
             recheck(None)?;
+            let prepared =
+                UnsignedReviewStreamEntry::prepare_public(spec.pin, spec.position, spec.decision)
+                    .map_err(|_| denied())?;
             let input = ReviewIntent::seal(
                 &self.key,
                 spec.request_digest,
                 spec.decision,
                 spec.held,
-                position,
+                (&prepared, Some(selected_base)),
                 rng,
             )?;
             self.cover_new(store, mount, ControlRole::Intent, input)?;
-            UnsignedReviewStreamEntry::prepare(spec.pin, spec.position, spec.decision)
-                .map_err(|_| denied())?
+            prepared
         };
         let intent = self.frame(ControlRole::Intent).ok_or_else(denied)?;
         let parent = AttemptParent::from_authenticated_frame(intent)?;

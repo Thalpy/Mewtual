@@ -8,7 +8,7 @@ const RECORD_DOMAIN: &[u8] = b"mewtual/chat/removed-post-decision-record/v1\0";
 pub const MAX_REVIEW_STREAM_RECORD_BYTES: usize = 4
     + RECORD_DOMAIN.len()
     + 4
-    + REVIEW_STREAM_ENTRY_BYTES
+    + MAX_REVIEW_STREAM_ENTRY_BYTES
     + 4
     + MAX_EXACT_REVIEW_BODY_BYTES
     + 4
@@ -35,12 +35,13 @@ impl<'a> ReviewStreamRecord<'a> {
         let held = V2RemovedCreateRecord::decode(held_bytes)?;
         entry.verify_decision_for_pin(trusted, decision)?;
         decision.require_record_data(&held)?;
+        let header = entry.encode();
         let body = decision.encode();
         let mut packed = Encoder::with_capacity(
-            16 + RECORD_DOMAIN.len() + REVIEW_STREAM_ENTRY_BYTES + body.len() + held_bytes.len(),
+            16 + RECORD_DOMAIN.len() + header.len() + body.len() + held_bytes.len(),
         );
         packed.put_bytes(RECORD_DOMAIN)?;
-        packed.put_bytes(&entry.encode())?;
+        packed.put_bytes(&header)?;
         packed.put_bytes(&body)?;
         packed.put_bytes(held_bytes)?;
         Ok(Zeroizing::new(packed.finish()))

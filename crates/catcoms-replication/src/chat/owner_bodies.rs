@@ -19,8 +19,10 @@ pub use review::{
     ReviewCaseId, ReviewDecision, ReviewDecisionBody, ReviewSpec, MAX_REVIEW_BODY_BYTES,
 };
 pub use review_stream::{
-    ReviewStreamEntry, ReviewStreamEntryId, ReviewStreamPosition, ReviewStreamRecord,
-    UnsignedReviewStreamEntry, MAX_REVIEW_STREAM_RECORD_BYTES, REVIEW_STREAM_ENTRY_BYTES,
+    ReviewCaseStep, ReviewStreamEntry, ReviewStreamEntryId, ReviewStreamPosition,
+    ReviewStreamQuery, ReviewStreamRecord, UnsignedReviewStreamEntry,
+    MAX_REVIEW_STREAM_ENTRY_BYTES, MAX_REVIEW_STREAM_RECORD_BYTES,
+    MAX_UNSIGNED_REVIEW_STREAM_ENTRY_BYTES, REVIEW_STREAM_ENTRY_BYTES,
     UNSIGNED_REVIEW_STREAM_ENTRY_BYTES,
 };
 

@@ -4,7 +4,8 @@ use super::*;
 use catcoms_replication::chat::{
     owner_bodies::{
         ExactReviewDecisionBody, ReviewStreamEntry, ReviewStreamPosition,
-        UnsignedReviewStreamEntry, MAX_EXACT_REVIEW_BODY_BYTES, UNSIGNED_REVIEW_STREAM_ENTRY_BYTES,
+        UnsignedReviewStreamEntry, MAX_EXACT_REVIEW_BODY_BYTES,
+        MAX_UNSIGNED_REVIEW_STREAM_ENTRY_BYTES,
     },
     FounderGenesisAnchorData, V2RemovedCreateRecord, MAX_REMOVED_CREATE_RECORD_BYTES,
 };
@@ -25,7 +26,7 @@ pub(super) const MAX_INTENT_BYTES: usize = SEAL_BYTES
     + DIGEST_FIELD
     + DIGEST_FIELD
     + 4
-    + UNSIGNED_REVIEW_STREAM_ENTRY_BYTES
+    + MAX_UNSIGNED_REVIEW_STREAM_ENTRY_BYTES
     + 4
     + MAX_EXACT_REVIEW_BODY_BYTES
     + 4
@@ -86,7 +87,7 @@ pub(super) struct ReviewIntent<'a> {
     pub(super) selected_base: Option<[u8; 32]>,
     pub(super) decision: ExactReviewDecisionBody,
     pub(super) original: &'a [u8],
-    unsigned: &'a [u8; UNSIGNED_REVIEW_STREAM_ENTRY_BYTES],
+    unsigned: &'a [u8],
 }
 
 impl<'a> ReviewIntent<'a> {
@@ -95,15 +96,9 @@ impl<'a> ReviewIntent<'a> {
         request_digest: [u8; 32],
         decision: &ExactReviewDecisionBody,
         original: &[u8],
-        (pin, position, selected_base): (
-            &FounderGenesisAnchorData,
-            ReviewStreamPosition,
-            Option<[u8; 32]>,
-        ),
+        (unsigned, selected_base): (&UnsignedReviewStreamEntry, Option<[u8; 32]>),
         rng: &mut dyn CryptoRngCore,
     ) -> Result<Zeroizing<Vec<u8>>, AppError> {
-        let unsigned =
-            UnsignedReviewStreamEntry::prepare(pin, position, decision).map_err(|_| denied())?;
         let record = V2RemovedCreateRecord::decode(original).map_err(|_| denied())?;
         decision
             .require_record_data(&record)
@@ -131,7 +126,7 @@ impl<'a> ReviewIntent<'a> {
             }
             encoded.put_bytes(&base).map_err(|_| denied())?;
         }
-        for field in [unsigned.signing_bytes().as_slice(), &body, original] {
+        for field in [unsigned.signing_bytes(), &body, original] {
             encoded.put_bytes(field).map_err(|_| denied())?;
         }
         let sealed = key.seal(encoded, rng)?;
@@ -160,7 +155,7 @@ impl<'a> ReviewIntent<'a> {
         } else {
             None
         };
-        let unsigned = next(&mut input)?.try_into().map_err(|_| denied())?;
+        let unsigned = next(&mut input)?;
         let body = next(&mut input)?;
         let original = next(&mut input)?;
         input.finish().map_err(|_| denied())?;
@@ -169,6 +164,7 @@ impl<'a> ReviewIntent<'a> {
         {
             return Err(denied());
         }
+        UnsignedReviewStreamEntry::read_position_data(unsigned).map_err(|_| denied())?;
         let decision = ExactReviewDecisionBody::decode(body).map_err(|_| denied())?;
         let held = V2RemovedCreateRecord::decode(original).map_err(|_| denied())?;
         decision.require_record_data(&held).map_err(|_| denied())?;
@@ -186,12 +182,8 @@ impl<'a> ReviewIntent<'a> {
         pin: &FounderGenesisAnchorData,
         position: ReviewStreamPosition,
     ) -> Result<UnsignedReviewStreamEntry, AppError> {
-        let expected = UnsignedReviewStreamEntry::prepare(pin, position, &self.decision)
-            .map_err(|_| denied())?;
-        if expected.signing_bytes() != self.unsigned {
-            return Err(denied());
-        }
-        Ok(expected)
+        UnsignedReviewStreamEntry::rederive(pin, position, &self.decision, self.unsigned)
+            .map_err(|_| denied())
     }
 
     pub(super) fn position_data(&self) -> Result<ReviewStreamPosition, AppError> {
@@ -352,16 +344,10 @@ mod tests {
         };
         let key = JournalKey::new(&[27; 32], &[28; 32]);
         let wrong_mount = JournalKey::new(&[27; 32], &[29; 32]);
+        let legacy = UnsignedReviewStreamEntry::prepare(&pin, position, &decision).unwrap();
+        let public = UnsignedReviewStreamEntry::prepare_public(&pin, position, &decision).unwrap();
         let seal_intent = |rng: &mut ChaCha20Rng| {
-            ReviewIntent::seal(
-                &key,
-                [30; 32],
-                &decision,
-                &held,
-                (&pin, position, None),
-                rng,
-            )
-            .unwrap()
+            ReviewIntent::seal(&key, [30; 32], &decision, &held, (&legacy, None), rng).unwrap()
         };
         let intent = seal_intent(&mut rng);
         let plain = key.open_intent(&intent).unwrap();
@@ -374,15 +360,45 @@ mod tests {
             [30; 32],
             &decision,
             &held,
-            (&pin, position, Some([32; 32])),
+            (&public, Some([32; 32])),
             &mut rng,
         )
         .unwrap();
-        let bound = key.open_intent(&bound).unwrap();
+        let bound_plain = key.open_intent(&bound).unwrap();
+        let binding = ReviewIntent::decode(&bound_plain).unwrap();
+        assert_eq!(binding.selected_base, Some([32; 32]));
+        let bound_parent = AttemptParent::from_authenticated_frame(&bound).unwrap();
+        let bound_attempt = bound_parent.seal_attempt(&key, &mut rng).unwrap();
+        let bound_signature = founder.sign(public.signing_bytes());
+        let (bound_entry, bound_raw) = bound_parent
+            .retain_raw(
+                &key,
+                &bound_attempt,
+                bound_signature,
+                (&pin, binding.rederive(&pin, position).unwrap()),
+                &mut rng,
+            )
+            .unwrap();
+        assert!(bound_entry.case_step_data().is_some());
         assert_eq!(
-            ReviewIntent::decode(&bound).unwrap().selected_base,
-            Some([32; 32])
+            bound_parent
+                .recover_raw(
+                    &key,
+                    &bound_attempt,
+                    &bound_raw,
+                    (&pin, binding.rederive(&pin, position).unwrap()),
+                )
+                .unwrap(),
+            bound_entry
         );
+        assert!(bound_parent
+            .recover_raw(
+                &key,
+                &bound_attempt,
+                &bound_raw,
+                (&pin, checked.rederive(&pin, position).unwrap()),
+            )
+            .is_err());
         assert_eq!(checked.original, held.as_slice());
         assert_eq!(checked.decision, decision);
         assert!(checked
@@ -395,6 +411,40 @@ mod tests {
             )
             .is_err());
         let prepared = || checked.rederive(&pin, position).unwrap();
+        let legacy_bound = ReviewIntent::seal(
+            &key,
+            [30; 32],
+            &decision,
+            &held,
+            (&legacy, Some([32; 32])),
+            &mut rng,
+        )
+        .unwrap();
+        let legacy_parent = AttemptParent::from_authenticated_frame(&legacy_bound).unwrap();
+        let legacy_attempt = legacy_parent.seal_attempt(&key, &mut rng).unwrap();
+        let (legacy_entry, legacy_raw) = legacy_parent
+            .retain_raw(
+                &key,
+                &legacy_attempt,
+                founder.sign(legacy.signing_bytes()),
+                (&pin, prepared()),
+                &mut rng,
+            )
+            .unwrap();
+        let legacy_bound = key.open_intent(&legacy_bound).unwrap();
+        let binding = ReviewIntent::decode(&legacy_bound).unwrap();
+        assert_eq!(binding.selected_base, Some([32; 32]));
+        assert_eq!(
+            legacy_parent
+                .recover_raw(
+                    &key,
+                    &legacy_attempt,
+                    &legacy_raw,
+                    (&pin, binding.rederive(&pin, position).unwrap()),
+                )
+                .unwrap(),
+            legacy_entry
+        );
         let parent = AttemptParent::from_authenticated_frame(&intent).unwrap();
         let attempt = parent.seal_attempt(&key, &mut rng).unwrap();
         let second_attempt = parent.seal_attempt(&key, &mut rng).unwrap();
@@ -411,6 +461,7 @@ mod tests {
         let (entry, raw) = parent
             .retain_raw(&key, &attempt, signature, (&pin, prepared()), &mut rng)
             .unwrap();
+        assert!(entry.case_step_data().is_none());
         assert_eq!(
             parent
                 .recover_raw(&key, &attempt, &raw, (&pin, prepared()))

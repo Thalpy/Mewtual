@@ -2825,6 +2825,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     assert!(!entered_again, "the retained exact Raw must not sign again");
                     let selected = selected.unwrap();
                     assert_eq!(selected.position_data().sequence, 1);
+                    assert_eq!(selected.case_step_data().unwrap().choice_data(), ReviewDecision::Reject);
                     assert_eq!(selected.position_data().membership_header, removed_head);
                     assert_eq!(selected.position_data().membership_epoch, removed_epoch);
                     let raw = std::fs::read(&raw_path).unwrap();
@@ -3055,11 +3056,13 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     assert!(!entered);
                     let reopened = reopened.unwrap();
                     assert_eq!(reopened.position_data().sequence, 2);
+                    assert_eq!(reopened.case_step_data().unwrap().choice_data(), ReviewDecision::Reopen);
                     assert_eq!(reopened.position_data().previous, Some(selected.id()));
                     assert!(!pending.exists());
                     let approved = advance(exact_request([0xb5; 16], ReviewDecision::Approve)
                         .for_successor(reopened.decision_id_data())).unwrap();
                     assert_eq!(approved.position_data().sequence, 3);
+                    assert_eq!(approved.case_step_data().unwrap().choice_data(), ReviewDecision::Approve);
                     assert_eq!(approved.position_data().previous, Some(reopened.id()));
                     assert!(!pending.exists());
                     assert_eq!(std::fs::read_dir(record.parent().unwrap()).unwrap()
