@@ -4812,6 +4812,7 @@ async fn native_text_connected_join(block_delete_archive: bool) {
         &joiner_window,
         &joiner_queue,
         "get_message_page",
+        history::BUSY,
         archive_request(&original, serde_json::json!({ "reviewedAfter": null })),
     )
     .await;
