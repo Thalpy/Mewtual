@@ -3,7 +3,7 @@
 use super::dependencies::REPLY_FEE;
 use super::*;
 use crate::store::{
-    persistence::governance_layout::joined::review_receive::ApprovalSelection,
+    persistence::governance_layout::joined::review_receive::{pinned_founder, ApprovalSelection},
     NativeTextInvitePacketData, NativeTextReviewApprovalStatus, NativeTextReviewHeaderStatus,
 };
 use catcoms_net::{
@@ -11,8 +11,8 @@ use catcoms_net::{
     NativeChatMemberInventoryExchange,
 };
 use catcoms_replication::chat::{
+    join_bindings::GenesisAnchorBindingData,
     owner_bodies::{ReviewStreamQuery, ReviewStreamRecord},
-    owner_header::{OwnerStateCommitment, OwnerTenureId},
     FounderGenesisAnchorData, V2ReviewedCreateCheck,
 };
 use catcoms_rt::TransportError;
@@ -22,6 +22,30 @@ use catcoms_sync::{
 };
 
 type Refusal = V2MemberSaveRefusal;
+
+struct ReviewTarget {
+    founder: PeerId,
+    invite: [u8; 32],
+    pin: FounderGenesisAnchorData,
+}
+
+impl<R: CryptoRngCore> ReceiverSource<'_, R> {
+    fn review_poll_membership(
+        &self,
+    ) -> Result<(&GenesisAnchorBindingData, (OwnerHeaderId, u64)), Refusal> {
+        let verifier = self
+            .prefix
+            .selected_member_verifier()
+            .map_err(|_| Refusal::Stale)?;
+        let membership = verifier.replay_data();
+        let position = (membership.header().id(), membership.mls_epoch_data());
+        let binding = self
+            .node
+            .require_review_membership_anchor(self.prefix, position)
+            .map_err(|_| Refusal::Stale)?;
+        Ok((binding, position))
+    }
+}
 
 fn review_storage_refusal(error: AppError) -> Refusal {
     match error {
@@ -117,7 +141,88 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         caller: RequestCancellation,
         rng: &mut impl CryptoRngCore,
     ) -> Result<NativeTextJoinedReviewExchange, Refusal> {
-        let founder = invite.connected_peer_data();
+        let target = ReviewTarget {
+            founder: invite.connected_peer_data(),
+            invite: invite.binding().id_data(),
+            pin: pinned_founder(&invite.binding().spec_data().anchor),
+        };
+        self.prepare_review_delivery_to(selection, target, (contact, query), caller, rng)
+    }
+
+    /// Poll the selected public stream from the exact connected invite
+    /// founder. The current native source supplies both the pin and route.
+    /// No invite data or new dial is needed after that route is installed.
+    pub fn prepare_next_review_header(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        (contact, check_tip): (&[u8; V2_MEMBER_CONTACT_BYTES], bool),
+        caller: RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<NativeTextJoinedReviewExchange>, Refusal> {
+        let plan = self.with_member_receiver(selection, &caller, |source| {
+            let Some(founder) = source.founder else {
+                return Ok(None);
+            };
+            let (pin, _) = source.review_poll_membership()?;
+            let sequence = source
+                .store
+                .next_received_review_header(pin, check_tip)
+                .map_err(review_storage_refusal)?;
+            Ok(sequence.map(|sequence| {
+                (
+                    ReviewTarget {
+                        founder,
+                        invite: source.registration.invite,
+                        pin: pinned_founder(pin),
+                    },
+                    ReviewStreamQuery::Header(sequence),
+                )
+            }))
+        })?;
+        let Some((target, query)) = plan else {
+            return Ok(None);
+        };
+        self.prepare_review_delivery_to(selection, target, (contact, query), caller, rng)
+            .map(Some)
+    }
+
+    /// Check the durable position and connected original founder before
+    /// asking native code for a contact signed in this membership epoch.
+    pub fn review_header_contact_scope(
+        &self,
+        selection: &NativeTextJoinedRowSelection,
+        check_tip: bool,
+        caller: &RequestCancellation,
+    ) -> Result<Option<([u8; 32], u64)>, Refusal> {
+        let lane = self.dependency_lane()?;
+        self.with_member_receiver(selection, caller, |source| {
+            if !source
+                .founder
+                .is_some_and(|peer| lane.capture_inventory(peer).is_some())
+            {
+                return Ok(None);
+            }
+            let (binding, position) = source.review_poll_membership()?;
+            let sequence = source
+                .store
+                .next_received_review_header(binding, check_tip)
+                .map_err(review_storage_refusal)?;
+            Ok(sequence.map(|_| (*position.0.as_bytes(), position.1)))
+        })
+    }
+
+    fn prepare_review_delivery_to(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        ReviewTarget {
+            founder,
+            invite: invite_id,
+            pin,
+        }: ReviewTarget,
+        (contact, query): (&[u8; V2_MEMBER_CONTACT_BYTES], ReviewStreamQuery),
+        caller: RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextJoinedReviewExchange, Refusal> {
         let lane = self.dependency_lane()?;
         let (carrier, observation) = match query {
             ReviewStreamQuery::Header(_) => {
@@ -132,17 +237,6 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 let observation = exchange.observe_route();
                 (Carrier::Approval(exchange), observation)
             }
-        };
-        let invite_id = invite.binding().id_data();
-        let anchor = &invite.binding().spec_data().anchor;
-        let pin = FounderGenesisAnchorData {
-            group: anchor.group.clone(),
-            founder: anchor.founder,
-            profile: OwnerFactId::from_bytes(anchor.profile),
-            admission: OwnerFactId::from_bytes(anchor.admission),
-            tenure: OwnerTenureId::from_bytes(anchor.tenure),
-            header: OwnerHeaderId::from_bytes(anchor.header),
-            state: OwnerStateCommitment::from_bytes(anchor.state),
         };
         let (request, route, observed, auth, fee) =
             self.with_member_receiver(selection, &caller, |source| {

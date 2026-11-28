@@ -3229,10 +3229,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         header: catcoms_replication::chat::owner_header::OwnerHeaderId::from_bytes(anchor.header),
                         state: catcoms_replication::chat::owner_header::OwnerStateCommitment::from_bytes(anchor.state),
                     };
-                    let read = async |query, provider: &mut crate::store::NativeTextFounderDependencyProvider<rand_chacha::ChaCha20Rng>, rng: &mut OsCryptoRng, caller: &RequestCancellation| {
-                        let exchange = survivor().prepare_review_delivery(
-                            &selection, &invite, (&contact, query), caller.clone(), rng,
-                        ).unwrap();
+                    let read_exchange = async |exchange: crate::store::NativeTextJoinedReviewExchange, provider: &mut crate::store::NativeTextFounderDependencyProvider<rand_chacha::ChaCha20Rng>| {
                         let serve = async {
                             let incoming = provider.next().await.expect("the actual founder receives the public review query");
                             founder().serve_founder_dependency_request(provider, incoming).unwrap();
@@ -3242,6 +3239,25 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         ).await.unwrap();
                         wire.unwrap()
                     };
+                    let read = async |query, provider: &mut crate::store::NativeTextFounderDependencyProvider<rand_chacha::ChaCha20Rng>, rng: &mut OsCryptoRng, caller: &RequestCancellation| {
+                        let exchange = survivor().prepare_review_delivery(
+                            &selection, &invite, (&contact, query), caller.clone(), rng,
+                        ).unwrap();
+                        read_exchange(exchange, provider).await
+                    };
+                    let poll = async |check_tip, provider: &mut crate::store::NativeTextFounderDependencyProvider<rand_chacha::ChaCha20Rng>, rng: &mut OsCryptoRng| {
+                        assert!(survivor().review_header_contact_scope(&selection, check_tip, &fresh)
+                            .unwrap().is_some());
+                        let exchange = survivor().prepare_next_review_header(
+                            &selection, (&contact, check_tip), fresh.clone(), rng,
+                        ).unwrap().expect("the original row supplies a checked cursor and founder route");
+                        read_exchange(exchange, provider).await
+                    };
+                    let initial = poll(false, &mut provider, &mut history_rng).await;
+                    survivor().with_review_delivery(&selection, initial, &fresh, |reply| {
+                        assert!(matches!(reply, Some(V2ReviewDeliveryData::Header(header)) if header.as_ref() == &selected));
+                        Ok(())
+                    }).unwrap();
                     for entry in [&selected, &reopened, &approved, &other] {
                         let wire = read(ReviewStreamQuery::Header(entry.position_data().sequence), &mut provider, &mut history_rng, &fresh).await;
                         survivor().with_review_delivery(&selection, wire, &fresh, |reply| {
@@ -3310,6 +3326,13 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                             Some(Received::Duplicate));
                         assert_eq!(std::fs::read(foreign).unwrap(), b"CTV2");
                         assert_eq!(std::fs::read(moved_partial.unwrap()).unwrap(), b"CTV2");
+                    }
+                    for (check_tip, expected) in [(false, &other), (true, &approved)] {
+                        let response = poll(check_tip, &mut provider, &mut history_rng).await;
+                        survivor().with_review_delivery(&selection, response, &fresh, |reply| {
+                            assert!(matches!(reply, Some(V2ReviewDeliveryData::Header(header)) if header.as_ref() == expected));
+                            Ok(())
+                        }).unwrap();
                     }
                     for (entry, requested_channel) in [(&selected, channel), (&reopened, channel), (&approved, other_channel)] {
                         let wire = read(ReviewStreamQuery::Approval {

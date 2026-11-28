@@ -28,6 +28,10 @@ are verified. This receipt leaves ordinary history unchanged.
 An exact joined history lookup with a verified ordinary archive miss can
 read the covered approval and render it through the original native
 source. History discovery still needs to enumerate these receipt IDs.
+When the original founder connection is available, the joined worker
+polls the next selected header and occasionally rechecks the current tip.
+This shares a single inventory slot with ordinary discovery. Exact
+ordinary history requests retain their own lower slot.
 [Review flow](communication-recovery/CHAT-OWNER-V2-REVIEW-DECISION.md#founder-review-stream).
 
 Security prerequisite: an incoming subscription retries retained publication

@@ -4386,6 +4386,12 @@ cover its own receipt for that original. Exact-ID display uses the
 separate guarded archive path described above. History discovery and
 renderer invalidation after a review conflict remain open.
 
+The background header poll uses the same original connected founder and
+selected member prefix as the explicit request. The durable cursor is
+scoped to the original pin. A cached local signed card stays on its
+original native row and is revalidated against the selected membership
+on every send. There is no new dial or automatic approval body request.
+
 ## Chat history admission and retained audit (20 October, continuation)
 
 Legacy operation ingress now refuses a 32-byte Automerge actor that differs from its verified

@@ -8,6 +8,7 @@ use catcoms_app::store::{
 };
 use catcoms_replication::chat::ActionId;
 use catcoms_rt::TransportError;
+use catcoms_sync::V2_MEMBER_CONTACT_BYTES;
 use std::collections::VecDeque;
 use std::time::Duration;
 use tokio::task::JoinSet;
@@ -18,6 +19,8 @@ const REQUEST: Duration = Duration::from_secs(3);
 const PAGES_PER_SLICE: u8 = 4;
 const RETRY_MS: u64 = 5_000;
 const RESCAN_MS: u64 = 30_000;
+const REVIEW_POLL_MS: u64 = 5_000;
+const REVIEW_CHECK_TIP_MS: u64 = 30_000;
 const REPLAY_MS: u64 = 15_000;
 const MAX_ARCHIVE_SWEEP_PAGES: u16 = 256;
 const MAX_ARCHIVE_CONTINUATION_FAILURES: u8 = 3;
@@ -27,6 +30,49 @@ const MAX_ARCHIVE_ANCESTRY_REQUESTS: u8 = 24;
 const ARCHIVE_ANCESTRY_MS: u64 = 45_000;
 const EXACT_ENTRY_MS: u64 = 15_000;
 const MAX_EXACT_TURNS_BEFORE_DISCOVERY: u8 = 2;
+
+struct ReviewPollSchedule {
+    due: u64,
+    recheck_tip: u64,
+    owe_ordinary: bool,
+}
+
+impl ReviewPollSchedule {
+    fn new(now: u64) -> Self {
+        Self {
+            due: now,
+            recheck_tip: now.saturating_add(REVIEW_CHECK_TIP_MS),
+            owe_ordinary: false,
+        }
+    }
+
+    fn start(&mut self, now: u64, ordinary_due: bool) -> Option<bool> {
+        if now < self.due || (self.owe_ordinary && ordinary_due) {
+            return None;
+        }
+        self.owe_ordinary = true;
+        let check_tip = now >= self.recheck_tip;
+        if check_tip {
+            self.recheck_tip = now.saturating_add(REVIEW_CHECK_TIP_MS);
+        }
+        Some(check_tip)
+    }
+
+    fn finish(&mut self, now: u64) {
+        self.due = now.saturating_add(REVIEW_POLL_MS);
+    }
+}
+
+struct ReviewContact {
+    membership: ([u8; 32], u64),
+    card: [u8; V2_MEMBER_CONTACT_BYTES],
+    _payment: NativeUiInvocationMetadata,
+}
+
+enum InventoryResult {
+    Ordinary(PeerSweep),
+    Review(Option<ReviewContact>),
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HistoryTurn {
@@ -282,6 +328,8 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
     // lane has its own paid lower slot and retains the original route.
     let mut inventory = JoinSet::new();
     let mut inventory_peer = None;
+    let mut review_schedule = ReviewPollSchedule::new(SystemClock.monotonic_ms());
+    let mut review_contact = None;
     let mut peer_turn_finished = false;
     loop {
         let first_slice = replay
@@ -306,9 +354,15 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
         }
         let state = app.state::<AppState>();
         if let Some(finished) = inventory.try_join_next() {
-            inventory_peer = None;
-            if let Ok(sweep) = finished {
-                peers.push_back(sweep);
+            if inventory_peer.take().is_none() {
+                // Even a failed or slow review turn leaves ordinary
+                // discovery an opportunity before starting another.
+                review_schedule.finish(SystemClock.monotonic_ms());
+            }
+            match finished {
+                Ok(InventoryResult::Ordinary(sweep)) => peers.push_back(sweep),
+                Ok(InventoryResult::Review(contact)) => review_contact = contact,
+                Err(_) => {}
             }
         }
         if let Some((mut sweep, parked)) = replay.take() {
@@ -397,6 +451,24 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
             }
         }
         let now = SystemClock.monotonic_ms();
+        if inventory.is_empty() {
+            let ordinary_due = peers
+                .iter()
+                .any(|sweep| sweep.due_turn(now, true) == Some(HistoryTurn::Discovery));
+            if let Some(check_tip) = review_schedule.start(now, ordinary_due) {
+                let app = app.clone();
+                let source = source.clone();
+                let cached = review_contact.take();
+                // An exact history exchange can continue while this
+                // inventory request waits for the original founder.
+                inventory.spawn(async move {
+                    InventoryResult::Review(
+                        poll_review_header(&app.state::<AppState>(), &source, check_tip, cached)
+                            .await,
+                    )
+                });
+            }
+        }
         let Some((index, kind)) = select_due_turn(
             peers
                 .iter()
@@ -409,12 +481,13 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
         peer_due = now.saturating_add(TURN.as_millis() as u64);
         let mut sweep = peers.remove(index).expect("selected due history peer");
         if kind == HistoryTurn::Discovery {
+            review_schedule.owe_ordinary = false;
             inventory_peer = Some((sweep.peer, sweep.archive));
             let app = app.clone();
             let source = source.clone();
             inventory.spawn(async move {
                 let _ = scan_inventory(&app.state::<AppState>(), &source, &mut sweep).await;
-                sweep
+                InventoryResult::Ordinary(sweep)
             });
             continue;
         }
@@ -427,6 +500,81 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
             peer_turn_finished = true;
         }
     }
+}
+
+async fn poll_review_header(
+    state: &AppState,
+    source: &Arc<Source>,
+    check_tip: bool,
+    cached: Option<ReviewContact>,
+) -> Option<ReviewContact> {
+    let Some(membership) = with_row_until(
+        state,
+        source,
+        (Some(local_turn_deadline()), TURN),
+        move |original, row, _, scope| {
+            original
+                .review_header_contact_scope(&row, check_tip, &scope)
+                .ok()
+                .flatten()
+        },
+    )
+    .await
+    .flatten() else {
+        // A transient refusal does not invalidate the bytes for this
+        // original row or justify signing them again on the next turn.
+        return cached;
+    };
+    let contact = match cached.filter(|contact| contact.membership == membership) {
+        // Sync revalidates this card with the selected member prefix on
+        // every request. The original native row retains one listener.
+        Some(current) => current,
+        None => {
+            let payment = state.native_text.ui_budget.prepare().ok()?;
+            let card = with_row_until(
+                state,
+                source,
+                (Some(local_turn_deadline()), TURN),
+                |original, row, _, scope| original.sign_member_contact(&row, &scope).ok(),
+            )
+            .await
+            .flatten()?;
+            ReviewContact {
+                membership,
+                card,
+                _payment: payment,
+            }
+        }
+    };
+    let card = contact.card;
+    let Some(exchange) = with_row_until(
+        state,
+        source,
+        (Some(local_turn_deadline()), TURN),
+        move |original, row, _, scope| {
+            original
+                .prepare_next_review_header(&row, (&card, check_tip), scope, &mut OsCryptoRng)
+                .ok()
+                .flatten()
+        },
+    )
+    .await
+    .flatten() else {
+        return Some(contact);
+    };
+    let Ok(Ok(response)) = tokio::time::timeout(REQUEST, exchange.receive()).await else {
+        return Some(contact);
+    };
+    let _ = with_row_until(
+        state,
+        source,
+        (Some(local_turn_deadline()), TURN),
+        move |original, row, _, scope| {
+            original.select_review_delivery_header(&row, response, &scope, &mut OsCryptoRng)
+        },
+    )
+    .await;
+    Some(contact)
 }
 
 async fn reconcile_archive_change(
@@ -1015,6 +1163,19 @@ async fn with_row_until<T: Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slow_review_turns_leave_a_turn_for_due_ordinary_discovery() {
+        let mut schedule = ReviewPollSchedule::new(1);
+        assert_eq!(schedule.start(1, true), Some(false));
+        schedule.finish(10_000);
+        assert_eq!(schedule.start(14_999, false), None);
+        assert_eq!(schedule.start(15_000, true), None);
+        schedule.owe_ordinary = false;
+        assert_eq!(schedule.start(15_000, true), Some(false));
+        schedule.finish(35_000);
+        assert_eq!(schedule.start(40_000, false), Some(true));
+    }
 
     #[test]
     fn ready_exact_history_has_bounded_preference_over_inventory() {

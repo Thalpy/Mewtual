@@ -19,6 +19,7 @@ use catcoms_replication::chat::{
 
 const READ_WORK: usize =
     3 * MAX_VIEW_FILES * MAX_INDEX_FRAME_BYTES + 6 * approval::MAX_APPROVAL_FRAME + 128 * 1024;
+const POLL_WORK: usize = 128 * 1024;
 
 pub(in crate::store) struct SelectedReceivedApproval {
     pub(in crate::store) raw: Zeroizing<Vec<u8>>,
@@ -27,6 +28,54 @@ pub(in crate::store) struct SelectedReceivedApproval {
 }
 
 impl SelectedReviewReceiver {
+    /// Read the durable public polling position. A covered WAL can settle
+    /// first, but an ambiguous or frozen lane never becomes a fresh poll.
+    pub(super) fn next_header_poll(
+        &self,
+        store: &ServerStore,
+        binding: &GenesisAnchorBindingData,
+        check_tip: bool,
+    ) -> Result<Option<u64>, AppError> {
+        self.recover_admitted(store)?;
+        let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        let _fee = policy.current.archive.pending.pool.try_reserve(POLL_WORK)?;
+        let _lease = store._session.retain_for_physical_work();
+        let scope = ReviewScope::derive_data(&store.chat_vault_domain()?, binding)?;
+        let key = Zeroizing::new(store.keys.db_key()?);
+        let marker = self.marker.1.as_slice().try_into().map_err(|_| denied())?;
+        let mut manifest = self.read_manifest(store, &ManifestKey::new(&key, marker))?;
+        let lane_key = ReceiverKey::new(&key, marker, scope.as_bytes());
+        let mut lane = manifest
+            .data
+            .selected(scope)
+            .map(|selected| HeldLane::read(&self.directory, (scope, selected), &lane_key))
+            .transpose()?;
+        let sequence = if let Some(lane) = lane.as_mut() {
+            if lane.head.is_frozen() {
+                None
+            } else if check_tip {
+                Some(lane.head.sequence)
+            } else {
+                lane.head.sequence.checked_add(1)
+            }
+        } else {
+            absent(&self.directory.child(&lane_directory_name(scope)))?;
+            Some(1)
+        };
+        manifest.require_current(&self.directory)?;
+        if let Some(lane) = lane.as_mut() {
+            lane.require(&self.directory)?;
+        }
+        self.require_settled()?;
+        self.require(store)?;
+        Ok(sequence)
+    }
+
+    fn require_settled(&self) -> Result<(), AppError> {
+        absent(&self.directory.child(WAL_NAME))?;
+        absent(&self.directory.child(MANIFEST_STAGE))
+    }
+
     pub(super) fn read_approval(
         &self,
         store: &ServerStore,
@@ -34,11 +83,7 @@ impl SelectedReviewReceiver {
         (channel, action): (u128, ActionId),
     ) -> Result<Option<SelectedReceivedApproval>, AppError> {
         self.require(store)?;
-        let require_settled = || -> Result<(), AppError> {
-            absent(&self.directory.child(WAL_NAME))?;
-            absent(&self.directory.child(MANIFEST_STAGE))
-        };
-        require_settled()?;
+        self.require_settled()?;
         let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
         let fee = policy.current.archive.pending.pool.try_reserve(READ_WORK)?;
         let _lease = store._session.retain_for_physical_work();
@@ -51,7 +96,7 @@ impl SelectedReviewReceiver {
         let Some(selected) = manifest.data.selected(scope) else {
             absent(&self.directory.child(&lane_directory_name(scope)))?;
             manifest.require_current(&self.directory)?;
-            require_settled()?;
+            self.require_settled()?;
             return Ok(None);
         };
         let mut lane = HeldLane::read(&self.directory, (scope, selected), &lane_key)?;
@@ -67,7 +112,7 @@ impl SelectedReviewReceiver {
         let Some(indexed) = row else {
             lane.require(&self.directory)?;
             manifest.require_current(&self.directory)?;
-            require_settled()?;
+            self.require_settled()?;
             return Ok(None);
         };
         let ciphertext = lane.approval(&indexed.receipt)?;
@@ -96,7 +141,7 @@ impl SelectedReviewReceiver {
         }
         lane.require(&self.directory)?;
         manifest.require_current(&self.directory)?;
-        require_settled()?;
+        self.require_settled()?;
         self.require(store)?;
         let observation = self
             .publication

@@ -58,6 +58,21 @@ struct HeldManifest {
 }
 
 impl ServerStore {
+    pub(in crate::store) fn next_received_review_header(
+        &self,
+        binding: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
+        check_tip: bool,
+    ) -> Result<Option<u64>, AppError> {
+        let mounted = self
+            .review_receive_mount
+            .try_lock()
+            .map_err(review_lock_error)?;
+        let Some(mounted) = mounted.as_ref() else {
+            return Ok(None);
+        };
+        mounted.next_header_poll(self, binding, check_tip)
+    }
+
     pub(in crate::store) fn has_mounted_review_receiver(&self) -> Result<bool, AppError> {
         Ok(self
             .review_receive_mount

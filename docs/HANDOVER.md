@@ -30,8 +30,14 @@ original archive absence and receipt selection both stay current through
 publication. Normal archive discovery and history refresh still need a way
 to enumerate approved originals.
 
-First-session initialization for a new join, automatic polling and approval
-fetch, admin actions and combined acceptance are still open. The desktop
+The joined desktop worker polls signed headers from the original founder
+connection. It resumes from the selected journal, occasionally rechecks
+the last header, and shares inventory turns with ordinary history. It
+uses the original route when that route is already available. Cold A1
+startup still needs a way to restore this route without the invite.
+
+First-session initialization, automatic approval fetch, admin actions,
+receipt enumeration and combined acceptance are still open. The desktop
 Chat V2 switch remains off.
 
 ## View held posts in founder chat history

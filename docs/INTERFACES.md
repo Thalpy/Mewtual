@@ -68,9 +68,11 @@ This uses the original invite founder's current authenticated connection.
 The founder independently checks the requester's current signed member
 contact. Header reads use the inventory scheduling slot. The approval
 response carries the exact signed post and frozen Remove coordinates.
-An empty reply gives no durable conclusion about the stream. These Rust
-interfaces supply checked data for future recipient storage and have no
-renderer command.
+An empty reply gives no durable conclusion about the stream. The joined
+worker uses the selected journal's next ordinal and may recheck its tip.
+It uses the already installed original founder route and retains no row
+permit across the network wait. Header coverage sends no renderer notice.
+An approval body still needs a separate exact request.
 
 The founder-only held-post storage entry accepts an exact original,
 the current verifier's removed-Create evidence and its host scope.

@@ -227,7 +227,13 @@ an ordinary message. An exact joined history read can use it after a
 verified ordinary miss. The detached display preserves the original
 signature and rechecks ordinary reply ancestry. The read checks both
 selectors again before publishing and cannot repair a pending receipt.
-Automatic review polling and receipt discovery remain open.
+The joined desktop polls signed headers over an already established
+original founder connection. It reads the durable ordinal from ID12, gives
+ordinary inventory a turn between review polls when needed, and checks
+the exact current membership card on every request. An empty response
+ends that attempt without advancing the journal. A cold A1 vault needs
+its original founder route restored before polling begins. Automatic
+approval fetching and receipt discovery remain open.
 
 ## Exact case transitions
 
