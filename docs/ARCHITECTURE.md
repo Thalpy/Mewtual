@@ -1,5 +1,13 @@
 # Mewtual; Architecture
 
+The opt-in ID13 archive draft serves ordinary relay inventory directly from a
+retained selected root, with at most eight raw rows per turn and two exact paid
+offers per approved peer. Local maintenance selects the same mounted disk;
+remote reads never settle its WAL. The original ID8 relay and separately paid,
+still-capped removed-review compatibility catalogue remain unchanged. The
+indexed default switch, larger quotas and churn-tolerant continuation remain
+out of scope. [Storage draft](communication-recovery/CHAT-V2-SHARED-ARCHIVE-SUCCESSOR.md).
+
 The disabled Chat V2 joined source can discover missed IDs one bounded page
 at a time on an approved member's existing native connection. Discovery uses
 the peer's selected outbox and leaves fetching and admission to the existing

@@ -41,11 +41,11 @@ pub(in crate::store::persistence) const INDEXED_ACTION_PAGE_RETAINED_FEE: usize 
 pub(in crate::store::persistence) type IndexedActionPageFilter = Option<OwnerFactId>;
 
 #[derive(Debug)]
-pub(in crate::store::persistence) enum IndexedActionPageError {
+pub(in crate::store) enum IndexedActionPageError {
     Stale,
-    /// This branch's pool API cannot distinguish exhausted credit from a
-    /// damaged account. Do not infer typed Busy or discard a cursor from
-    /// this error; native integration must use a classified pool refusal.
+    /// Carries typed Busy only for a classified healthy-account pressure or
+    /// contended guard. Other errors are structural; neither may be laundered
+    /// into an empty page or a fresh authoritative cursor.
     Unavailable(AppError),
 }
 impl From<AppError> for IndexedActionPageError {
@@ -82,7 +82,7 @@ catcoms_rt::redacted_debug! { IndexedActionCursor; }
 
 /// Metadata from one proven root. `rows_data` does not prove present-time
 /// source authorization. The cursor and weak tails drain before its fee.
-pub(in crate::store::persistence) struct IndexedActionPage {
+pub(in crate::store) struct IndexedActionPage {
     rows: Vec<SharedArchiveIndexValueData>,
     cursor: IndexedActionCursor,
     scanned: usize,
@@ -91,6 +91,21 @@ pub(in crate::store::persistence) struct IndexedActionPage {
 }
 catcoms_rt::redacted_debug! { IndexedActionPage; }
 impl IndexedActionPage {
+    /// Selected locator DATA only. The mounted relay still opens each exact
+    /// signed original and checks the current author's delegation before offer.
+    pub(in crate::store) fn relay_entries_data(
+        &self,
+    ) -> impl ExactSizeIterator<Item = ArchiveRelayEntry> + '_ {
+        self.rows.iter().map(|row| ArchiveRelayEntry {
+            action: row.action,
+            admission: row.admission,
+        })
+    }
+
+    pub(in crate::store) fn has_more_data(&self) -> bool {
+        self.more
+    }
+
     pub(in crate::store::persistence) fn rows_data(&self) -> &[SharedArchiveIndexValueData] {
         &self.rows
     }
@@ -155,6 +170,27 @@ impl PageRoot {
 }
 
 impl SharedHistoryDisk {
+    pub(in crate::store::persistence) fn require_indexed_relay_page(
+        &self,
+        key: &[u8; 32],
+        page: &IndexedActionPage,
+        session: &VaultSessionGuard,
+    ) -> PageResult<()> {
+        self.require_key(key)?;
+        let owner = self.indexed.as_ref().ok_or_else(refused)?;
+        let selected = &page.cursor.selected;
+        if selected.scope != self.scope.id()
+            || selected.layout != owner.layout
+            || !selected.gate.ptr_eq(&Arc::downgrade(&self.gate))
+            || !selected.head.ptr_eq(&Arc::downgrade(&owner.head))
+            || !selected.directory.ptr_eq(&Arc::downgrade(&owner.directory))
+            || !selected.retiring.ptr_eq(&Arc::downgrade(&owner.retiring))
+        {
+            return Err(IndexedActionPageError::Stale);
+        }
+        page.require_current_data(session)
+    }
+
     /// Scan at most eight raw selected locator rows, including excluded
     /// rows. An empty filtered result can still have a progressing cursor.
     /// This never inventories the directory, settles a WAL or reads a body.
@@ -169,7 +205,11 @@ impl SharedHistoryDisk {
         work.validate(&self.pool, INDEXED_ACTION_PAGE_WORK_FEE)?;
         // Reserve the independent retained tail before any read/row/Weak
         // allocation; do not keep the large transient class on every peer.
-        let retained = work.reserve_more(INDEXED_ACTION_PAGE_RETAINED_FEE)?;
+        let retained = self
+            .pool
+            .try_reserve_classified(INDEXED_ACTION_PAGE_RETAINED_FEE, || {
+                AppError::ChatV2ArchiveBusy
+            })?;
         self.require_key(key)?;
         let owner = self.indexed.as_ref().ok_or_else(refused)?;
         // These path capacities are part of this explicit read class. A

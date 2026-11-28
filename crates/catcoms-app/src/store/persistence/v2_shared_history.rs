@@ -23,8 +23,9 @@ use zeroize::Zeroizing;
 
 pub(in crate::store::persistence) mod disk;
 pub(in crate::store) use disk::indexed::{
-    prepare_empty_indexed_history_head, verify_empty_indexed_history_head, INDEXED_HEAD_CAP,
-    INDEXED_HEAD_NAME,
+    prepare_empty_indexed_history_head, verify_empty_indexed_history_head,
+    IndexedActionPage as SelectedSharedHistoryRelayPage,
+    IndexedActionPageError as SharedHistoryRelayPageError, INDEXED_HEAD_CAP, INDEXED_HEAD_NAME,
 };
 mod replay;
 pub(in crate::store) use disk::{

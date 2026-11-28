@@ -38,6 +38,11 @@ Archive pages use separate authenticated request and reply domains. They
 carry sorted ActionIds and an opaque continuation pinned to the original
 approved connection and scope. Page-derived exact requests keep that
 connection and approval. The native worker schedules both sweep types.
+The opt-in indexed backing drafts the same wire pages directly from its exact
+selected root, retaining only current/previous offers per peer. A continuation
+whose root changed refuses and must restart. This does not change the normal
+ID8 backing, the exact known-ID fetch contract, or the separate capped
+removed-review catalogue; indexed relay validation is still pending.
 An archive stage can issue an opaque missing-parent ticket after an exact
 local miss. Only its original page can use the ticket. The worker drops
 the original stage before requesting the parent and compares the child's

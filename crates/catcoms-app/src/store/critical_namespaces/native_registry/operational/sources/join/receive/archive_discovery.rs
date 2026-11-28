@@ -17,6 +17,7 @@ use zeroize::Zeroizing;
 const CATALOGUE_FEE: usize = MAX_SHARED_HISTORY_RECORDS * size_of::<ArchiveRelayEntry>() + 8192;
 const CATALOGUE_REFRESH_MS: u64 = 20_000;
 pub(super) const CURSOR_IDLE_MS: u64 = 300_000;
+mod indexed;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct RelayScope {
@@ -65,6 +66,10 @@ pub(in crate::store::critical_namespaces::native_registry::operational::sources:
 {
     catalogue: Option<Arc<ArchiveCatalogue>>,
     sweeps: [Option<RelaySweep>; MAX_APPROVED_MEMBER_PEERS],
+    // Mode DATA comes only from local selected-mount maintenance. Every remote
+    // page independently rechecks that mount; this flag grants no authority.
+    indexed_scope: Option<RelayScope>,
+    indexed_sweeps: [Option<indexed::IndexedSweep>; MAX_APPROVED_MEMBER_PEERS],
     pub(super) review: ReviewRelayState,
 }
 
@@ -85,8 +90,37 @@ struct PreparedRelayPage {
     next: Option<V2ArchiveHistoryCursor>,
 }
 
+/// Readiness of the ordinary indexed lane is installed separately. Healthy
+/// compatibility work still asks the native scheduler for its immediate next
+/// bounded turn; only optional failure leaves ordinary readiness undisturbed.
+#[derive(Debug, PartialEq, Eq)]
+enum CompatibilityTurn {
+    Complete,
+    More,
+    Deferred,
+}
+fn compatibility_turn(
+    result: Result<bool, AppError>,
+    indexed: bool,
+) -> Result<CompatibilityTurn, V2MemberSaveRefusal> {
+    match result {
+        Ok(true) => Ok(CompatibilityTurn::Complete),
+        Ok(false) => Ok(CompatibilityTurn::More),
+        Err(_) if indexed => Ok(CompatibilityTurn::Deferred),
+        Err(_) => Err(V2MemberSaveRefusal::Failed),
+    }
+}
+
 impl ArchiveRelayState {
     fn expire(&mut self, current: RelayScope, now: u64) {
+        for slot in &mut self.indexed_sweeps {
+            if slot
+                .as_ref()
+                .is_some_and(|sweep| sweep.expired(current, now))
+            {
+                *slot = None;
+            }
+        }
         for slot in &mut self.sweeps {
             if slot.as_ref().is_some_and(|sweep| {
                 sweep.due <= now
@@ -221,6 +255,49 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     .map_err(|_| Refusal::Failed)?;
                 let scope = source.relay_scope(channel)?;
                 let now = source.node.member_history_time_ms();
+                let still_authorized =
+                    || waiting.authorized() && !caller.is_cancelled() && !approval.is_cancelled();
+                let indexed = selection
+                    .original
+                    .archive_relay
+                    .try_lock()
+                    .map_err(|_| Refusal::Busy)?
+                    .indexed_scope
+                    == Some(scope);
+                if indexed {
+                    let plan = source.prepare_indexed_relay_page(
+                        selection,
+                        RelayRequest {
+                            peer,
+                            admission,
+                            connection,
+                            approval: approval.clone(),
+                            scope,
+                            cursor: query.cursor(),
+                            now,
+                        },
+                        rng,
+                        still_authorized,
+                    )?;
+                    // prepare has released its relay mutex before exporter,
+                    // AEAD, effect observation or native response work.
+                    let page = plan.wire_page()?;
+                    let reply = access
+                        .seal_archive_page(peer, &query, &page, rng)
+                        .map_err(|_| Refusal::Failed)?;
+                    let (observed, auth) = source.effect_data()?;
+                    if !still_authorized() {
+                        return Err(Refusal::Cancelled);
+                    }
+                    plan.require_current(source.store, source.history_scope(channel))?;
+                    selection
+                        .original
+                        .archive_relay
+                        .try_lock()
+                        .map_err(|_| Refusal::Busy)?
+                        .finish_indexed_page(&plan, source.node.member_history_time_ms())?;
+                    return Ok((reply, approval, observed, auth, fee));
+                }
                 let prepared = selection
                     .original
                     .archive_relay
@@ -244,8 +321,6 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     .prefix
                     .selected_member_verifier()
                     .map_err(|_| Refusal::Stale)?;
-                let still_authorized =
-                    || waiting.authorized() && !caller.is_cancelled() && !approval.is_cancelled();
                 if !still_authorized() {
                     return Err(Refusal::Cancelled);
                 }
@@ -342,6 +417,20 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
         }
         let scope = self.relay_scope(channel)?;
         let now = self.node.member_history_time_ms();
+        let archive = self.history_scope(channel);
+        let indexed = self
+            .store
+            .prepare_shared_history_relay(archive)
+            .map_err(|_| Refusal::Failed)?;
+        let verifier = self
+            .prefix
+            .selected_member_verifier()
+            .map_err(|_| Refusal::Stale)?;
+        let review_needed = self
+            .prefix
+            .retired_history_data()
+            .iter()
+            .any(|author| verifier.removed_review_coordinates(author).is_ok());
         {
             let mut relay = selection
                 .original
@@ -350,33 +439,57 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
                 .map_err(|_| Refusal::Busy)?;
             relay.expire(scope, now);
             relay.review.expire(scope, now);
-            if relay.catalogue.as_ref().is_some_and(|value| {
+            if indexed {
+                // Establish ordinary readiness before any optional removed-only
+                // compatibility work. That separately paid, still-capped cache
+                // neither gates readiness nor supplies ordinary page DATA. Its
+                // old one-turn locator census can still occupy this same row.
+                relay.indexed_scope = Some(scope);
+                relay.catalogue = None;
+                for slot in &mut relay.sweeps {
+                    *slot = None;
+                }
+                if !review_needed
+                    || relay
+                        .review
+                        .catalogue_fresh(scope, now, CATALOGUE_REFRESH_MS)
+                {
+                    return Ok(true);
+                }
+            } else if relay.catalogue.as_ref().is_some_and(|value| {
                 value.scope == scope && now.saturating_sub(value.created_ms) < CATALOGUE_REFRESH_MS
             }) {
                 return Ok(true);
             }
         }
-        let archive = self.history_scope(channel);
-        if !self
-            .store
-            .advance_shared_history_relay_index(archive)
-            .map_err(|_| Refusal::Failed)?
-        {
-            return Ok(false);
+        match compatibility_turn(
+            self.store.advance_shared_history_relay_index(archive),
+            indexed,
+        )? {
+            CompatibilityTurn::Complete => {}
+            CompatibilityTurn::More => return Ok(false),
+            CompatibilityTurn::Deferred => return Ok(true),
         }
-        let verifier = self
-            .prefix
-            .selected_member_verifier()
-            .map_err(|_| Refusal::Stale)?;
-        let fee = self
-            .metadata
-            .reserve_join_node(CATALOGUE_FEE)
-            .map_err(|_| Refusal::Busy)?;
-        let mut review = self
-            .metadata
-            .reserve_join_node(CATALOGUE_FEE)
-            .ok()
-            .map(|fee| (Vec::with_capacity(MAX_SHARED_HISTORY_RECORDS), fee));
+        let fee = if indexed {
+            None
+        } else {
+            Some(
+                self.metadata
+                    .reserve_join_node(CATALOGUE_FEE)
+                    .map_err(|_| Refusal::Busy)?,
+            )
+        };
+        let mut review = review_needed
+            .then(|| {
+                self.metadata
+                    .reserve_join_node(CATALOGUE_FEE)
+                    .ok()
+                    .map(|fee| (Vec::with_capacity(MAX_SHARED_HISTORY_RECORDS), fee))
+            })
+            .flatten();
+        if indexed && review.is_none() {
+            return Ok(true);
+        }
         let mut retired_admissions = Vec::new();
         if review.is_some() {
             retired_admissions.extend(
@@ -388,21 +501,28 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
             );
             retired_admissions.sort_unstable();
         }
-        let mut entries = Vec::with_capacity(MAX_SHARED_HISTORY_RECORDS);
-        if !self
+        let mut entries = if indexed {
+            Vec::new()
+        } else {
+            Vec::with_capacity(MAX_SHARED_HISTORY_RECORDS)
+        };
+        let inspected = self
             .store
             .inspect_shared_history_relay_index(archive, |entry| {
                 if verifier.observe_live_member(entry.admission).is_ok() {
-                    entries.push(entry);
+                    if !indexed {
+                        entries.push(entry);
+                    }
                 } else if let Some((retired, _)) = &mut review {
                     if retired_admissions.binary_search(&entry.admission).is_ok() {
                         retired.push(entry);
                     }
                 }
-            })
-            .map_err(|_| Refusal::Failed)?
-        {
-            return Ok(false);
+            });
+        match compatibility_turn(inspected, indexed)? {
+            CompatibilityTurn::Complete => {}
+            CompatibilityTurn::More => return Ok(false),
+            CompatibilityTurn::Deferred => return Ok(true),
         }
         if caller.is_cancelled() {
             return Err(Refusal::Cancelled);
@@ -412,14 +532,16 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
             .archive_relay
             .try_lock()
             .map_err(|_| Refusal::Busy)?;
-        relay.catalogue = Some(Arc::new(ArchiveCatalogue {
-            entries,
-            scope,
-            created_ms: now,
-            _fee: fee,
-        }));
+        if let Some(fee) = fee {
+            relay.catalogue = Some(Arc::new(ArchiveCatalogue {
+                entries,
+                scope,
+                created_ms: now,
+                _fee: fee,
+            }));
+        }
         if let Some((entries, fee)) = review {
-            relay.review.replace_catalogue(entries, scope, fee);
+            relay.review.replace_catalogue(entries, scope, now, fee);
         }
         Ok(true)
     }

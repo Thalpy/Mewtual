@@ -94,9 +94,40 @@ The focused Windows run passed 22 tests on the current Chat V2 base.
 It covered the exact declaration and restart, conflicting rejoin
 evidence before promotion, retained index and bundle identity, WAL
 recovery, and pages of at most eight scanned rows. A filtered empty
-page advances past the rows it scanned. The ordinary inventory still
-collects a capped result from these pages. Per-peer paging and target
-and Admission indexes remain necessary before raising the archive limit.
+page advances past the rows it scanned. Local projection and audit compatibility
+queries still collect a capped result from these pages.
+
+Ordinary indexed archive discovery now uses the actual
+mounted Store page reader. It scans at most eight raw locator rows per work
+debit and reopens each offered signed original under the current verifier.
+Each approved peer retains only its current and previous paid exact offer,
+bound to the same connection, Admission, governing head, epoch and channel.
+A filtered-empty page can still advance. Unknown/older tokens refuse; a changed
+selected root requires a new sweep rather than silently rebasing its cursor.
+The native request/reply format and known-ID exact fetch remain unchanged.
+The normal ID8 catalogue is unchanged. If eligible retired Admissions exist,
+their separately paid removed-review compatibility catalogue still uses the
+existing 2,048-record bound; ordinary indexed readiness does not wait for that
+optional catalogue or use it. No Admission-range index is introduced here.
+Healthy remaining compatibility work still requests immediate bounded local
+turns. Its initial capped locator census can occupy the same row worker for
+one blocking turn; the independent readiness flag is not a latency guarantee
+during that old compatibility operation.
+
+The Windows checks passed eight focused relay and physical cases and 18
+indexed engine and seed cases. These include real mounted Store pages and
+unit tests for two-offer lifetime and cancellation. A root that changes on
+every continuation can still restart the receiver and starve later IDs.
+Quiet-root completion is required now; churn-tolerant discovery, target and
+Admission indexes and native/real-network acceptance remain necessary before
+raising the archive limit or selecting this backing by default.
+
+The current binary wrote four mixed-version fixtures and reopened the three
+indexed fixtures. The separate Windows and Linux CI gate checks the pinned
+ID8 binary against a covered claim by itself, a complete catalog Stage, and
+selected ID13. Each refusal must preserve all fixture paths and bytes. The
+same offline probe must open the ID8 control before the new binary recovers
+the three indexed states. The older binary results are pending.
 
 ## Publication and recovery
 
@@ -141,6 +172,6 @@ or reopened review bodies remain in the founder's local journal.
   report per-turn work, paid memory and eligible unrelated progress.
   Confirm original history is recoverable when peers leave and return.
 
-The current 2,048-record quota and whole-catalog relay remain release
-constraints until the selected storage, projection and live relay are
-verified together.
+The current 2,048-record quota, compatibility projection and removed-review
+catalogues remain release constraints until selected storage, projection and
+live relay are verified together.

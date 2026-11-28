@@ -22,6 +22,7 @@ const MAX_PAGES: usize = MAX_SHARED_HISTORY_RECORDS.div_ceil(PAGE_SIZE);
 struct ReviewCatalogue {
     entries: Vec<ArchiveRelayEntry>,
     scope: RelayScope,
+    created_ms: u64,
     _fee: CatalogReadReservation,
 }
 
@@ -112,14 +113,22 @@ impl ReviewRelayState {
         &mut self,
         mut entries: Vec<ArchiveRelayEntry>,
         scope: RelayScope,
+        now: u64,
         fee: CatalogReadReservation,
     ) {
         entries.sort_unstable_by_key(|entry| (entry.admission, entry.action));
         self.catalogue = Some(Arc::new(ReviewCatalogue {
             entries,
             scope,
+            created_ms: now,
             _fee: fee,
         }));
+    }
+
+    pub(super) fn catalogue_fresh(&self, scope: RelayScope, now: u64, maximum_age: u64) -> bool {
+        self.catalogue.as_ref().is_some_and(|catalogue| {
+            catalogue.scope == scope && now.saturating_sub(catalogue.created_ms) < maximum_age
+        })
     }
 
     pub(super) fn expire(&mut self, scope: RelayScope, now: u64) {
@@ -461,6 +470,7 @@ mod tests {
                 }))
                 .collect(),
             scope,
+            0,
             pool.try_reserve(4096).unwrap(),
         );
         let mut rng = ChaCha20Rng::seed_from_u64(7);

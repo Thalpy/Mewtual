@@ -19,9 +19,8 @@ use catcoms_storage::private_chat_page::{open_private_chat_page, PreparedPrivate
 mod codec;
 mod index;
 mod page;
-pub(in crate::store::persistence) use page::{
-    IndexedActionPageError, INDEXED_ACTION_PAGE_WORK_FEE,
-};
+pub(in crate::store::persistence) use page::INDEXED_ACTION_PAGE_WORK_FEE;
+pub(in crate::store) use page::{IndexedActionPage, IndexedActionPageError};
 #[cfg(test)]
 use page::{INDEXED_ACTION_PAGE_RETAINED_FEE, INDEXED_ACTION_PAGE_SCAN};
 #[cfg(test)]

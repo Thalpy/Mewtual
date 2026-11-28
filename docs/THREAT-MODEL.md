@@ -39,6 +39,14 @@ originals and dependencies before selecting an archive write. Archive relay
 also requires an approved holder and the original author's still-open
 Admission matching the original signature and delegation. Exact relay
 requests read selected records without settling a pending archive write.
+The opt-in indexed relay draft keeps at most two paid offers per approved
+peer and scans eight raw rows per turn. It rechecks the exact retained Head,
+physical mount, original connection and current author delegation on retries.
+Tokens older than the retained windows or from a replaced connection refuse.
+An approved current member can observe aggregate raw progress through empty
+filtered pages; those pages expose neither filtered ActionIds nor bodies.
+Repeated concurrent archive selections can still starve a sweep by forcing
+restarts; the existing quota and disabled/default-ID8 boundary remain in place.
 Relay replies and own-outbox replies use separate domains. The writer
 checks each reachable ancestor against its exact selected local original and
 verified Admission. This keeps a new write from relying on memory-only

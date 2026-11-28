@@ -22,6 +22,7 @@ use catcoms_rt::RequestCancellation;
 use catcoms_storage::private_chat_page::PrivateChatPageId;
 
 mod indexed;
+mod relay;
 pub(in crate::store) use indexed::INDEXED_MARKER_NAME;
 
 pub(in crate::store) const MARKER_NAME: &str = "chat-critical-namespaces.shared-history.marker";

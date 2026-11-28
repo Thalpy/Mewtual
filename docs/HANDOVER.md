@@ -1,5 +1,19 @@
 # Mewtual; Handover
 
+## Indexed ordinary relay draft
+
+The isolated ID13 draft now links bounded selected-root pages through the
+existing mounted App/native archive request handler. It retains current and
+previous exact offers per approved connection, with independent work and
+retained payments, instead of an ordinary whole-archive catalogue. Legacy ID8
+and the separate capped removed-review compatibility path remain available.
+Source/connection/member cancellation and exact known-ID fetch are unchanged.
+Focused mounted Store and metadata-cache regressions are authored but have
+not been compiled or run for this increment; primary owns that queue and the
+full suites. Continuous archive writes can force repeated cursor restarts,
+so the 2,048 cap and default-ID8/off boundaries remain. No wire change or
+larger archive claim follows.
+
 ## Remember the original A1 founder identity
 
 During first registration, the original A1 owner can cover an encrypted
