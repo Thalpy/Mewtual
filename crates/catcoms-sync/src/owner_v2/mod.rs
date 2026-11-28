@@ -65,6 +65,10 @@ pub use member_dependencies::removed_review::{
     OpenedV2RemovedReviewRequest, PreparedV2RemovedReviewRequest, V2RemovedReviewOriginal,
     V2RemovedReviewPage, V2RemovedReviewQuery, V2RemovedReviewTarget,
 };
+pub(crate) use member_dependencies::review_delivery::ReviewEndpoint;
+pub use member_dependencies::review_delivery::{
+    OpenedV2ReviewDelivery, PreparedV2ReviewDelivery, V2ReviewDeliveryData, REVIEW_STREAM_CARRIER,
+};
 pub use member_dependencies::{
     OpenedV2MemberDependencyRequest, PreparedV2MemberDependencyRequest,
     V2FounderMemberDependencyAccess, V2MemberDependencyRoute, MAX_V2_DEPENDENCY_REPLY_BYTES,

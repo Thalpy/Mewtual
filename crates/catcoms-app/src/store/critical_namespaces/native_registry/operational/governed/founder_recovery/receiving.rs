@@ -23,7 +23,9 @@ use catcoms_net::{
 };
 use catcoms_replication::chat::{ActionId, ActionState, V2OrdinaryReceiveStatus, MAX_ACTION_BYTES};
 use catcoms_rt::Topic;
-use catcoms_sync::owner_v2::{V2MemberPublicationObservation, MAX_V2_MEMBER_TRANSPORT_BYTES};
+use catcoms_sync::owner_v2::{
+    OpenedV2ReviewDelivery, V2MemberPublicationObservation, MAX_V2_MEMBER_TRANSPORT_BYTES,
+};
 
 const INGRESS_FEE: usize = 2 * MAX_V2_MEMBER_TRANSPORT_BYTES + 8192;
 const FRAME_FEE: usize = 5 * MAX_V2_MEMBER_TRANSPORT_BYTES + 4096;
@@ -117,6 +119,12 @@ impl NativeTextColdFounderSource {
             return Err(refused());
         }
         self.restore_first_add(caller)?;
+        if incoming
+            .current_data()
+            .is_some_and(|(_, wire)| OpenedV2ReviewDelivery::recognizes(wire))
+        {
+            return self.prepare_review_delivery_reply(incoming, caller, rng);
+        }
         let scope = self.history_scope(channel)?;
         let (mount, fee) = self
             .work

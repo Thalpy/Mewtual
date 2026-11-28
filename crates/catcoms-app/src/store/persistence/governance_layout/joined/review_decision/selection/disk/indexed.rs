@@ -3,8 +3,10 @@
 use super::*;
 use crate::store::persistence::v2_text::private_index::ReviewIndexValueData;
 
+mod delivery;
 mod preflight;
 mod write;
+pub(in super::super::super) use delivery::require_quiet_selection;
 pub(in super::super::super) use preflight::IndexedReviewPredecessor;
 pub(in super::super::super) use preflight::IndexedReviewRequest;
 

@@ -32,7 +32,8 @@ pub use join::{
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
     NativeTextJoinedMemberSaveJob, NativeTextJoinedReceivedOriginal, NativeTextJoinedReconnect,
-    NativeTextJoinedRequestPreparation, NativeTextJoinedRowSelection,
+    NativeTextJoinedRequestPreparation, NativeTextJoinedReviewExchange,
+    NativeTextJoinedReviewResponse, NativeTextJoinedRowSelection,
     NativeTextJoinedSavedContactApprovals, NativeTextJoinedSelectionPreparation,
 };
 mod member;

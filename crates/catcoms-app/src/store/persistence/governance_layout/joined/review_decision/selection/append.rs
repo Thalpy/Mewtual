@@ -253,7 +253,8 @@ mod tests {
     use crate::store::NativeTextInitialReviewRequest;
     use catcoms_crypto::DeviceKeypair;
     use catcoms_replication::chat::owner_bodies::{
-        ReviewDecision, ReviewDecisionBody, ReviewStreamPosition, UnsignedReviewStreamEntry,
+        ReviewDecision, ReviewDecisionBody, ReviewStreamPosition, ReviewStreamQuery,
+        UnsignedReviewStreamEntry,
     };
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
@@ -307,6 +308,15 @@ mod tests {
         let mut snapshot = disk::indexed::IndexedDecisionSnapshot::read(&root, &key, &pin).unwrap();
         assert_eq!(snapshot.selected_data().1, predecessor.as_slice());
         assert_eq!(snapshot.selected_data().2, &tip);
+        assert!(snapshot
+            .read_public_record(
+                &root,
+                (&key, &pin),
+                ReviewStreamQuery::Header(1),
+                |_| Ok(()),
+                |_| panic!("a legacy private prefix must never disclose a full record"),
+            )
+            .is_err());
         let lookup = snapshot
             .lookup(&root, &key, &pin, DecisionIndexQuery::Case(first.case_id()))
             .unwrap();

@@ -1,9 +1,11 @@
 //! An epoch-bound member advertisement of an already owned TCP listener.
 use super::*;
-use catcoms_replication::chat::owner_header::OwnerBodyId;
+use catcoms_replication::chat::{owner_header::OwnerBodyId, V2LiveMemberObservation};
 
 const DOMAIN: &[u8] = b"mewtual/chat/v2/member-contact/v1\0";
 const PEER_BYTES: usize = 38;
+const INLINE_ED25519: &[u8; 6] = &[0, 36, 8, 1, 18, 32];
+const REVIEW_PROOF_BYTES: usize = 32 + 32 + 2 + 64;
 const PREIMAGE_BYTES: usize = DOMAIN.len() + 3 * 32 + 8 + PEER_BYTES + 2;
 pub const V2_MEMBER_CONTACT_BYTES: usize = PREIMAGE_BYTES + 64;
 
@@ -25,6 +27,8 @@ impl std::fmt::Debug for V2MemberContactData<'_> {
 }
 
 impl<'a> V2MemberContactData<'a> {
+    pub(crate) const REVIEW_REQUEST_PROOF_BYTES: usize = REVIEW_PROOF_BYTES;
+
     pub fn decode(raw: &'a [u8]) -> Result<Self, SyncError> {
         let raw: &[u8; V2_MEMBER_CONTACT_BYTES] =
             raw.try_into().map_err(|_| SyncError::Malformed)?;
@@ -62,6 +66,51 @@ impl<'a> V2MemberContactData<'a> {
 
     pub fn admission_data(&self) -> OwnerBodyId {
         self.admission
+    }
+
+    /// The authenticated review carrier already has the current Profile,
+    /// selected Header, and epoch. Keep the other signed fields, including
+    /// the real TCP identity and signature, under its request size cap.
+    pub(crate) fn review_request_proof(&self) -> [u8; REVIEW_PROOF_BYTES] {
+        let mut proof = [0; REVIEW_PROOF_BYTES];
+        proof[..32].copy_from_slice(self.admission.as_bytes());
+        proof[32..].copy_from_slice(&self.raw[DOMAIN.len() + 3 * 32 + 8 + INLINE_ED25519.len()..]);
+        proof
+    }
+
+    pub(crate) fn require_review_request_proof(
+        verifier: &V2GeneralPrefixVerifier,
+        requester: catcoms_rt::PeerId,
+        proof: &[u8; REVIEW_PROOF_BYTES],
+    ) -> Result<V2LiveMemberObservation, SyncError> {
+        let replay = verifier.replay_data();
+        let mut full = [0; V2_MEMBER_CONTACT_BYTES];
+        let mut next = full.as_mut_slice();
+        let profile = replay.profile().id();
+        let header = replay.header().id();
+        let epoch = replay.mls_epoch_data().to_be_bytes();
+        let fields: [&[u8]; 7] = [
+            DOMAIN,
+            profile.as_bytes(),
+            header.as_bytes(),
+            &proof[..32],
+            &epoch,
+            INLINE_ED25519,
+            &proof[32..],
+        ];
+        for field in fields {
+            let (front, rest) = next.split_at_mut(field.len());
+            front.copy_from_slice(field);
+            next = rest;
+        }
+        let contact = V2MemberContactData::decode(&full)?;
+        if blake3::hash(contact.peer).as_bytes() != requester.as_bytes() {
+            return Err(SyncError::JoinRejected);
+        }
+        contact.verify_selected(verifier)?;
+        verifier
+            .observe_live_member(OwnerFactId::from_bytes(*contact.admission.as_bytes()))
+            .map_err(|_| SyncError::JoinRejected)
     }
 
     /// Reprove the current signed holder against the actual connected peer.
@@ -105,7 +154,7 @@ impl<'a> V2MemberContactData<'a> {
 
 fn valid_peer_encoding(peer: &[u8; PEER_BYTES]) -> bool {
     // The mounted TCP identity is the canonical inline libp2p Ed25519 peer.
-    peer.starts_with(&[0, 36, 8, 1, 18, 32]) && peer[6..] != [0; 32]
+    peer.starts_with(INLINE_ED25519) && peer[INLINE_ED25519.len()..] != [0; 32]
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> ClosedV2JoinedNode<T, R> {

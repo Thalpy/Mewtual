@@ -2761,6 +2761,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         with_review_control_fault, ReviewControlFault,
                     };
                     use catcoms_replication::chat::owner_bodies::{ExactReviewOriginal, ReviewDecision};
+                    let survivor = &recovered_row;
                     let mount = |cold: crate::store::NativeTextColdFounderSource| {
                         let authorized = Arc::new(AtomicU64::new(0));
                         // The genuine MLS KeyPackage uses the system
@@ -3088,6 +3089,109 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     assert_eq!(other.position_data().previous, Some(approved.id()));
                     assert!(advance(exact_request([0xb6; 16], ReviewDecision::Reject)
                         .for_successor(approved.decision_id_data())).is_err());
+                    let founder = || sources.capture_member(
+                        &recovered_row, command(&vault, &founder_budget),
+                        sources.policy.prepare_member().unwrap(),
+                    );
+                    let mut governance = founder().open_connected_governing_requests(fresh.clone()).unwrap();
+                    survivor().prepare_reconnect(
+                        &selection, &invite, token, std::net::Ipv4Addr::LOCALHOST.into(), fresh.clone(),
+                    ).unwrap().connect(&scheduler).await.unwrap();
+                    let exchange = survivor().prepare_governing_exchange(&selection, fresh.clone()).unwrap();
+                    let serve = async {
+                        let Some(TransportEvent::Request { proto, data, responder, .. }) = governance.next().await
+                        else { panic!("the restarted founder receives the survivor's next epoch query"); };
+                        founder().serve_connected_governing_request(proto, &data, responder, fresh.clone()).unwrap();
+                    };
+                    let (governing, ()) = tokio::time::timeout(
+                        std::time::Duration::from_secs(12),
+                        async { tokio::join!(exchange.receive(), serve) },
+                    ).await.unwrap();
+                    let (current, epoch) = survivor().apply_governing_response(
+                        &selection, &governing.unwrap(), &fresh, &mut history_rng,
+                    ).unwrap();
+                    assert_eq!((current, epoch), (approved.position_data().membership_header, removed_epoch + 1));
+                    survivor().require_review_anchor_for_test(&selection, (removed_head, removed_epoch), &fresh).unwrap();
+                    survivor().require_review_anchor_for_test(&selection, (third_head, third_epoch), &fresh).unwrap();
+                    assert!(survivor().require_review_anchor_for_test(&selection, (third_head, removed_epoch), &fresh).is_err());
+                    assert!(survivor().require_review_anchor_for_test(&selection, (
+                        catcoms_replication::chat::owner_header::OwnerHeaderId::from_bytes([0xea; 32]), removed_epoch,
+                    ), &fresh).is_err());
+                    drop(governance);
+
+                    use catcoms_replication::chat::owner_bodies::{ReviewStreamQuery, ReviewStreamRecord};
+                    use catcoms_replication::chat::owner_facts::OwnerFactId;
+                    use catcoms_rt::OsCryptoRng;
+                    use catcoms_sync::owner_v2::V2ReviewDeliveryData;
+                    assert!(survivor().prepare_review_delivery(
+                        &selection, &invite, (&contact, ReviewStreamQuery::Header(1)),
+                        fresh.clone(), &mut history_rng,
+                    ).is_err(), "the original peer's previous epoch contact must be stale");
+                    let contact = survivor().sign_member_contact(&selection, &fresh).unwrap();
+                    // The founder's ordinary provider is attached to a
+                    // different channel from the retained approval.
+                    let other_channel = channel ^ 1;
+                    let mut provider = founder().attach_founder_dependency_provider(other_channel, fresh.clone()).unwrap();
+                    let anchor = &invite.binding().spec_data().anchor;
+                    let pin = catcoms_replication::chat::FounderGenesisAnchorData {
+                        group: anchor.group.clone(),
+                        founder: anchor.founder,
+                        profile: OwnerFactId::from_bytes(anchor.profile),
+                        admission: OwnerFactId::from_bytes(anchor.admission),
+                        tenure: catcoms_replication::chat::owner_header::OwnerTenureId::from_bytes(anchor.tenure),
+                        header: catcoms_replication::chat::owner_header::OwnerHeaderId::from_bytes(anchor.header),
+                        state: catcoms_replication::chat::owner_header::OwnerStateCommitment::from_bytes(anchor.state),
+                    };
+                    let read = async |query, provider: &mut crate::store::NativeTextFounderDependencyProvider<rand_chacha::ChaCha20Rng>, rng: &mut OsCryptoRng, caller: &RequestCancellation| {
+                        let exchange = survivor().prepare_review_delivery(
+                            &selection, &invite, (&contact, query), caller.clone(), rng,
+                        ).unwrap();
+                        let serve = async {
+                            let incoming = provider.next().await.expect("the actual founder receives the public review query");
+                            founder().serve_founder_dependency_request(provider, incoming).unwrap();
+                        };
+                        let (wire, ()) = tokio::time::timeout(
+                            std::time::Duration::from_secs(12), async { tokio::join!(exchange.receive(), serve) },
+                        ).await.unwrap();
+                        wire.unwrap()
+                    };
+                    for entry in [&selected, &reopened, &approved, &other] {
+                        let wire = read(ReviewStreamQuery::Header(entry.position_data().sequence), &mut provider, &mut history_rng, &fresh).await;
+                        survivor().with_review_delivery(&selection, wire, &fresh, |reply| {
+                            assert!(matches!(reply, Some(V2ReviewDeliveryData::Header(header)) if header.as_ref() == entry));
+                            Ok(())
+                        }).unwrap();
+                    }
+                    for (entry, requested_channel) in [(&selected, channel), (&reopened, channel), (&approved, other_channel)] {
+                        let wire = read(ReviewStreamQuery::Approval {
+                            sequence: entry.position_data().sequence, entry: entry.id(), channel: requested_channel,
+                        }, &mut provider, &mut history_rng, &fresh).await;
+                        survivor().with_review_delivery(&selection, wire, &fresh, |reply| {
+                            assert!(reply.is_none(), "the review service must not disclose that body");
+                            Ok(())
+                        }).unwrap();
+                    }
+                    let wire = read(ReviewStreamQuery::Approval {
+                        sequence: approved.position_data().sequence, entry: approved.id(), channel,
+                    }, &mut provider, &mut history_rng, &fresh).await;
+                    survivor().with_review_delivery(&selection, wire, &fresh, |reply| {
+                        let Some(V2ReviewDeliveryData::Approval(bytes)) = reply else {
+                            panic!("the covered approval must carry the original post");
+                        };
+                        let record = ReviewStreamRecord::decode_public_approval(&pin, approved.id(), bytes).unwrap();
+                        assert_eq!(record.held_data().target_data().spec().action, action);
+                        assert_eq!(record.held_data().target_data().spec().context.admission, third_own);
+                        assert_eq!(record.decision_data().original_data().remove_header, removed_head);
+                        Ok(())
+                    }).unwrap();
+                    let (cancel, revoked) = tokio::sync::watch::channel(false);
+                    let review_scope = RequestCancellation::new(revoked, None);
+                    let delivered = read(ReviewStreamQuery::Header(1), &mut provider, &mut history_rng, &review_scope).await;
+                    cancel.send(true).unwrap();
+                    assert!(survivor().with_review_delivery::<()>(&selection, delivered, &fresh, |_| {
+                        panic!("a response to a cancelled review scope must stay private")
+                    }).is_err());
+                    drop(provider);
                     retire(vault, sources, recovered_row).await;
                     // Lose every child of the original mounted journal,
                     // leaving its actual directory and catalog marker.

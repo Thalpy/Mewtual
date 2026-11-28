@@ -12,6 +12,7 @@ pub enum ReviewStreamQuery {
     Approval {
         sequence: u64,
         entry: ReviewStreamEntryId,
+        channel: u128,
     },
 }
 

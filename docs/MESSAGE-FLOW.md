@@ -15,6 +15,16 @@ offered original on the same approved connection. It will revisit a deferred
 entry when the required ancestors are available.
 [Chat V2 discovery flow](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
 
+The disabled Chat V2 path can exchange one founder review header or one
+covered approval over the current authenticated connection. Header reads
+use a group-wide exporter and proceed across the founder's open channels.
+An approval additionally names the post's channel and exact entry. The
+original founder retains Reject and Reopen bodies. The joined source
+checks the decision's exact membership anchor and the approval's Remove
+against its own selected prefix. Durable case selection and the receiver's
+own reply ancestry are still required for a chat effect.
+[Review flow](communication-recovery/CHAT-OWNER-V2-REVIEW-DECISION.md#founder-review-stream).
+
 Security prerequisite: an incoming subscription retries retained publication
 only for its exact canonical topic. Other retained originals preserve their
 ownership/order and normal periodic retry; wire and delivery claims below are

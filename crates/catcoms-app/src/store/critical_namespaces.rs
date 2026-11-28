@@ -112,7 +112,8 @@ pub use native_registry::{
     NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
-    NativeTextJoinedReceivedOriginal, NativeTextJoinedSelectionPreparation,
+    NativeTextJoinedReceivedOriginal, NativeTextJoinedReviewExchange,
+    NativeTextJoinedReviewResponse, NativeTextJoinedSelectionPreparation,
 };
 pub use native_registry::{
     NativeTextJoinedContactApprovalProof, NativeTextJoinedContactConsent,

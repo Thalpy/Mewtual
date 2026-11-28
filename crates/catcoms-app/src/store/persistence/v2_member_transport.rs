@@ -58,6 +58,7 @@ pub(in crate::store) const FOUNDER_DEPENDENCY_REPLY_FEE: usize =
 pub(in crate::store) struct FounderDependencyReply {
     pub(in crate::store) wire: bytes::Bytes,
     pub(in crate::store) observation: V2MemberPublicationObservation,
+    pub(in crate::store) requester: Option<catcoms_replication::chat::V2LiveMemberObservation>,
     pub(in crate::store) fee: CatalogReadReservation,
 }
 
@@ -242,6 +243,7 @@ pub(in crate::store) fn prepare_founder_dependency_reply<R: CryptoRngCore>(
     Ok(FounderDependencyReply {
         wire: bytes::Bytes::from(wire),
         observation: provider.into_observation(),
+        requester: None,
         fee,
     })
 }

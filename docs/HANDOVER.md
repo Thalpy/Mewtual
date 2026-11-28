@@ -110,7 +110,17 @@ and a commitment to the original and its Remove. This gives peers enough
 signed data to verify case transitions without reading rejected or
 reopened posts. Original version 1 signatures and old retries still use
 their exact saved bytes. An older private stream cannot seed the public
-one. Peer delivery and approval selection are still in development.
+one.
+
+The original founder can serve a covered header or approval over the
+connected dependency path. The joined source binds the original invite
+founder and live peer generation. It checks both the decision membership
+anchor and the approval's Remove against its selected prefix. The TCP
+fixture exchanges four headers across different open channels and shows
+that only the approved original is returned. Review reads and their
+bounded ancestry evidence are separate from ordinary membership selection.
+Durable recipient selection, ordinary projection and admin commands
+remain open. The Chat V2 switch is still off.
 
 ## Rejoin from the retired native session
 

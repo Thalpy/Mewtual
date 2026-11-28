@@ -40,6 +40,7 @@ mod dependencies;
 mod governing;
 mod history_discovery;
 mod removed_review;
+mod review_delivery;
 pub(super) use archive_discovery::ArchiveRelayState;
 pub use contact_recovery::NativeTextJoinedSavedContactApprovals;
 pub use dependencies::{
@@ -54,6 +55,7 @@ pub use governing::{
 pub use history_discovery::{
     NativeTextJoinedHistoryExchange, NativeTextJoinedHistoryPage, NativeTextJoinedHistoryResponse,
 };
+pub use review_delivery::{NativeTextJoinedReviewExchange, NativeTextJoinedReviewResponse};
 
 const INGRESS_FEE: usize = 8 * 1024;
 // Padded plaintext, canonical signed action and its original frame may overlap.

@@ -53,6 +53,7 @@ pub(super) struct RetainedDecisionRecord<'a> {
     pub(super) request_digest: [u8; 32],
     raw_digest: [u8; 32],
     pub(super) record: ReviewStreamRecord<'a>,
+    frame: &'a [u8],
 }
 
 impl<'a> RetainedDecisionRecord<'a> {
@@ -99,6 +100,7 @@ impl<'a> RetainedDecisionRecord<'a> {
             request_digest,
             raw_digest,
             record,
+            frame,
         })
     }
 

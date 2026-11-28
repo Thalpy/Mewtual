@@ -15,6 +15,23 @@ use catcoms_replication::chat::{
 };
 use catcoms_rt::{NativeChatKeyEnds, NativeChatPreparedKeyCut, NativeChatSourceObservation};
 
+pub(super) fn original_review_anchor(
+    source: &RetainedBootstrapSourceData,
+) -> FounderGenesisAnchorData {
+    let genesis = source.data().genesis_public_data();
+    let profile = genesis.profile_data();
+    let header = genesis.header_data();
+    FounderGenesisAnchorData {
+        group: profile.spec().group.clone(),
+        founder: profile.spec().founder,
+        profile: profile.id(),
+        tenure: profile.tenure(),
+        admission: genesis.admission_data().admission_id(),
+        header: header.id(),
+        state: header.spec().state,
+    }
+}
+
 impl NativeTextColdFounderSource {
     #[cfg(test)]
     pub(in crate::store) fn require_review_anchor_for_test(
@@ -53,18 +70,7 @@ impl NativeTextColdFounderSource {
         let (work, selection, source) = (&self.work, &self.selection, &self.source);
         let governed = self.governed.as_mut().ok_or_else(refused)?;
         let sdk = self.sdk.as_mut().ok_or_else(refused)?;
-        let genesis = source.data().genesis_public_data();
-        let profile = genesis.profile_data();
-        let header = genesis.header_data();
-        let pin = FounderGenesisAnchorData {
-            group: profile.spec().group.clone(),
-            founder: profile.spec().founder,
-            profile: profile.id(),
-            tenure: profile.tenure(),
-            admission: genesis.admission_data().admission_id(),
-            header: header.id(),
-            state: header.spec().state,
-        };
+        let pin = original_review_anchor(source);
         let current = || {
             if caller.is_cancelled() {
                 return Err(refused());

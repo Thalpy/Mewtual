@@ -62,8 +62,26 @@ exact signed public entry and contain the original it approves.
 Version 1 remains readable for local recovery, with the original bytes,
 signature and semantic ID. A version 1 first entry cannot establish a
 public stream, and a public suffix cannot skip it. These private journals
-remain readable locally. The public format and checks do not yet send or
-select decisions on another member's device.
+remain readable locally.
+
+The connected review request uses an independent group-wide exporter domain.
+It can read one signed header by sequence, or request the exact approved
+entry and channel. Both modes carry a current signed contact proof bound to
+the authenticated requester. The joiner uses the pinned original invite
+founder and the same authenticated connection generation for its response.
+A missing response or empty reply describes only that attempt.
+
+The founder serves a settled journal. It uses the immutable intent root
+selected by the current head to confirm the first and requested records,
+and refuses reads during a pending selection. The first record must use
+the public format. A header carries only its signed transition. An approval
+also rechecks the signed original and exact frozen Remove. The original
+reply dependencies were checked when selecting the approval. The receiver
+checks both exact historical coordinates against its own real joined
+prefix, including the steps before its original Join. It must still prove
+ordinary reply dependencies and select the case durably before it can add
+the original to its own archive. No UI worker selects or applies the public
+response yet.
 
 The private journal record frames the versioned domain, the signed stream
 entry, the exact decision and the retained original as four bounded,

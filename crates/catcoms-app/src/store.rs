@@ -117,8 +117,9 @@ pub use critical_namespaces::{
     NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
-    NativeTextJoinedReceivedOriginal, NativeTextJoinedReconnect,
-    NativeTextJoinedSavedContactApprovals, NativeTextJoinedSelectionPreparation,
+    NativeTextJoinedReceivedOriginal, NativeTextJoinedReconnect, NativeTextJoinedReviewExchange,
+    NativeTextJoinedReviewResponse, NativeTextJoinedSavedContactApprovals,
+    NativeTextJoinedSelectionPreparation,
 };
 pub use critical_namespaces::{
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,

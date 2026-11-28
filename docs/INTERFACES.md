@@ -57,6 +57,16 @@ continuation token expires five minutes after publication and binds
 the original session, row, channel and audit revision. The renderer
 restarts at the first window when a continuation becomes stale.
 
+The original joined source can request a signed review header by group
+sequence, or a covered approval by sequence, signed entry ID and channel.
+This uses the original invite founder's current authenticated connection.
+The founder independently checks the requester's current signed member
+contact. Header reads use the inventory scheduling slot. The approval
+response carries the exact signed post and frozen Remove coordinates.
+An empty reply gives no durable conclusion about the stream. These Rust
+interfaces supply checked data for future recipient storage and have no
+renderer command.
+
 The founder-only held-post storage entry accepts an exact original,
 the current verifier's removed-Create evidence and its host scope.
 It returns the same retained case for a verified semantic retry.

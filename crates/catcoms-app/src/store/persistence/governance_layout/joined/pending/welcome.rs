@@ -338,7 +338,8 @@ impl JoinedCore {
             + V2GeneralPrefixVerifier::metadata_layout_bytes()
             + ProjectionGroup::initial_metadata_layout_bytes()
             + 4 * std::mem::size_of::<JoinedCore>()
-            + PreparedV2JoinedPrefix::retired_history_layout_bytes();
+            + PreparedV2JoinedPrefix::retired_history_layout_bytes()
+            + PreparedV2JoinedPrefix::review_ancestry_layout_bytes();
         let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
         let bytes = CORE_FEE
             .checked_add(delivery.len().checked_mul(2).ok_or_else(denied)?)

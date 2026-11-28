@@ -8,12 +8,14 @@ use crate::store::persistence::v2_member_outbox::fs::{
 
 mod attempt;
 mod control;
+mod delivery;
 mod selection;
 #[cfg(test)]
 pub(in crate::store) use control::{with_review_control_fault, ReviewControlFault};
 pub(in crate::store) use control::{
     DecisionControl, PreparedIndexedReviewSource, PreparedReviewBase, ReviewSigningSpec,
 };
+pub(in crate::store) use delivery::ReviewDelivery;
 
 pub(super) const DIRECTORY_NAME: &str = "chat-v2-review-decisions";
 pub(super) const MARKER_NAME: &str = "chat-critical-namespaces.review-decision.marker";

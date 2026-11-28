@@ -59,15 +59,27 @@ pub struct NativeTextFounderMemberReceiver<R: CryptoRngCore> {
 }
 
 #[derive(Debug)]
-struct DependencyScope(RequestCancellation);
+struct DependencyScope(
+    RequestCancellation,
+    Option<catcoms_replication::chat::V2LiveMemberObservation>,
+);
 
 #[async_trait::async_trait]
 impl RequestAuthority for DependencyScope {
     fn authorized(&self) -> bool {
         !self.0.is_cancelled()
+            && self
+                .1
+                .as_ref()
+                .is_none_or(|requester| requester.is_live_cached())
     }
 
     async fn revoked(&self) {
+        if !self.authorized() {
+            return;
+        }
+        // The original founder publication observation also retires on
+        // selected epoch changes. The requester test repeats at delivery.
         self.0.clone().cancelled().await;
     }
 }
@@ -141,7 +153,7 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
             .constrain(caller)
             .retain_custody(Arc::new(IngressPayment { _fee: fee }));
         let requests = lane
-            .try_attach(Arc::new(DependencyScope(signal.clone())))
+            .try_attach(Arc::new(DependencyScope(signal.clone(), None)))
             .ok_or(Refusal::Busy)?;
         Ok(NativeTextFounderDependencyProvider {
             _owner: owner,
@@ -180,7 +192,7 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
         incoming
             .respond(
                 reply.wire,
-                Arc::new(DependencyScope(signal)),
+                Arc::new(DependencyScope(signal, reply.requester)),
                 Arc::new(IngressPayment { _fee: reply.fee }),
             )
             .map_err(|_| Refusal::Cancelled)
