@@ -27,6 +27,7 @@ impl NativeTextRosterMember {
 pub struct NativeTextRoster {
     members: Vec<NativeTextRosterMember>,
     can_remove: bool,
+    can_remember_founder_route: bool,
     _payment: CatalogReadReservation,
 }
 
@@ -37,6 +38,17 @@ impl NativeTextRoster {
 
     pub fn can_remove(&self) -> bool {
         self.can_remove
+    }
+
+    /// Whether this is an eligible original A1 row. The actual consent
+    /// command still proves the selected invite and exact outbound route.
+    pub fn can_remember_founder_route(&self) -> bool {
+        self.can_remember_founder_route
+    }
+
+    pub(super) fn with_founder_route_option(mut self, available: bool) -> Self {
+        self.can_remember_founder_route = available;
+        self
     }
 
     pub(super) fn with_founder_removal(mut self) -> Self {
@@ -90,6 +102,7 @@ impl NativeTextRoster {
         Ok(Self {
             members,
             can_remove: false,
+            can_remember_founder_route: false,
             _payment: payment,
         })
     }

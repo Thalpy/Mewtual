@@ -670,7 +670,7 @@ try {
       const result = await cdp.eval(nativeTextFlowExpression);
       failed |= !assertEqual("Native Text local save and entry: " + mode, result, mode === "empty"
         ? { localEntry:true, created:true, ownHistory:true, noLegacy:true, noUnavailableControls:true }
-        : { localScope:true, saved:true, sealedFirst:true, composerRetired:true, noLegacy:true, noUnavailableControls:true, noOverflow:true, ownerAudit:true, heldAudit:true });
+        : { localScope:true, saved:true, sealedFirst:true, composerRetired:true, noLegacy:true, noUnavailableControls:true, noOverflow:true, ownerAudit:true, heldAudit:true, decisionControl:true });
       if(mode==="1"){
         const remount=await cdp.eval(nativeTextRemountFlowExpression);
         failed |= !assertEqual("Native Text remount preserves the new journal and warm session",remount,
@@ -679,6 +679,45 @@ try {
       const capture = await cdp.send("Page.captureScreenshot", { format: "png" });
       if (capture.result?.data) writeFileSync(new URL(`../../../target/chat-v2-native-${mode}.png`, import.meta.url), Buffer.from(capture.result.data, "base64"));
     }
+  } else if (process.env.FLOW_SCENARIO === "native-text-founder-route") {
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width: 900, height: 640, deviceScaleFactor: 1, mobile: false });
+    await cdp.navigate(URL_UNDER_TEST + "&nativeText=joined");
+    await cdp.waitReady();
+    const result = await cdp.eval(`(async () => {
+      async function waitFor(read) {
+        const end = performance.now() + 5000;
+        while (performance.now() < end) {
+          const value = read();
+          if (value) return value;
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        throw new Error("Founder reconnect controls did not settle");
+      }
+      const summary = await waitFor(() => [...document.querySelectorAll("#native-member-list summary")]
+        .find(node => node.textContent.trim() === "Automatic founder reconnect"));
+      summary.click();
+      const panel = summary.closest("details");
+      const save = panel.querySelector('button[type="submit"]');
+      const requiresAddress = save.disabled;
+      const fields = [...panel.querySelectorAll("input")];
+      for (const [index, value] of ["ab0123", "2001:db8::1"].entries()) {
+        fields[index].value = value;
+        fields[index].dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      await waitFor(() => !save.disabled);
+      save.click();
+      const status = () => panel.querySelector('[role="status"]')?.textContent;
+      await waitFor(() => status() === "Founder address saved on this device.");
+      const clearedFields = fields.every(input => input.value === "");
+      panel.querySelector('button[type="button"]').click();
+      await waitFor(() => status() === "Founder address cleared.");
+      panel.scrollIntoView({ block: "end" });
+      return { requiresAddress, clearedFields, clearConfirmed: true };
+    })()`);
+    failed |= !assertEqual("Native Text explicit founder reconnect approval", result,
+      { requiresAddress: true, clearedFields: true, clearConfirmed: true });
+    const capture = await cdp.send("Page.captureScreenshot", { format: "png" });
+    if (capture.result?.data) writeFileSync(new URL("../../../target/chat-v2-founder-reconnect.png", import.meta.url), Buffer.from(capture.result.data, "base64"));
   } else if (process.env.FLOW_SCENARIO === "chat-ledger") {
     await cdp.send("Emulation.setDeviceMetricsOverride", { width: 900, height: 640, deviceScaleFactor: 1, mobile: false });
     await cdp.waitReady();
@@ -874,7 +913,8 @@ try {
   console.error(`FAIL harness: ${e.message}`);
   if (!connected && process.env.FLOW_CDP_TRACE === "1" && browserOutput) console.error(`Edge setup: ${browserOutput}`);
   const failureImage = { gate7: "gate7-pixa-failure", kept: "pr48-kept-failure",
-    "private-download": "pr48-private-download-failure", "chat-ledger": "chat-v2-admin-history-failure", "native-text":"chat-v2-native-failure" }[process.env.FLOW_SCENARIO];
+    "private-download": "pr48-private-download-failure", "chat-ledger": "chat-v2-admin-history-failure",
+    "native-text": "chat-v2-native-failure", "native-text-founder-route": "chat-v2-founder-reconnect-failure" }[process.env.FLOW_SCENARIO];
   if (failureImage && connected) {
     try { const capture = await connected.send("Page.captureScreenshot", { format: "png" }); if (capture.result?.data) writeFileSync(new URL(`../../../target/${failureImage}.png`, import.meta.url), Buffer.from(capture.result.data, "base64")); } catch { /* preserve original failure */ }
   }

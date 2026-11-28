@@ -44,7 +44,7 @@ impl std::fmt::Debug for TextRootData {
     }
 }
 impl TextRootData {
-    fn decode(d: &mut Decoder<'_>) -> Result<Self, AppError> {
+    pub(in crate::store::persistence) fn decode(d: &mut Decoder<'_>) -> Result<Self, AppError> {
         match d.get_u8().map_err(|_| refused())? {
             0 => Ok(Self::Empty),
             1 => {
@@ -67,7 +67,7 @@ impl TextRootData {
             _ => Err(refused()),
         }
     }
-    fn encode(self, e: &mut Encoder) -> Result<(), AppError> {
+    pub(in crate::store::persistence) fn encode(self, e: &mut Encoder) -> Result<(), AppError> {
         match self {
             Self::Empty => {
                 e.put_u8(0);

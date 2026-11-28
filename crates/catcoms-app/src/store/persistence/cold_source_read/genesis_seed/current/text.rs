@@ -476,6 +476,21 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> UnexposedV2Gene
         .map_err(crate::AppError::from)
     }
 
+    pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn sign_text_review(
+        &self,
+        store: &crate::store::ServerStore,
+        verifier: &catcoms_replication::chat::V2GeneralPrefixVerifier,
+        input: crate::store::critical_namespaces::native_registry::founder_review_intake::FounderReviewSign<'_>,
+    ) -> Result<catcoms_sync::owner_v2::V2FounderReviewSignOutcome, crate::AppError> {
+        use crate::store::critical_namespaces::refused;
+        self.require_text_original_data(store)
+            .map_err(|_| refused())?;
+        self.governed_text_node()
+            .ok_or_else(refused)?
+            .sign_selected_review_native(verifier, input.decision, input.preimage, input.key)
+            .map_err(crate::AppError::from)
+    }
+
     pub(in crate::store::persistence::cold_source_read::genesis_seed::current) fn sign_text_invite(
         &self,
         store: &crate::store::ServerStore,

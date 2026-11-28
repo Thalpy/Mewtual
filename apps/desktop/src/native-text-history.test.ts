@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decodeNativeOriginalPage, decodeNativeOwnMessage, decodeNativeReceived, decodeNativeReceivedNotice, readNativeAudit, readNativeHeldPosts, readNativeOriginals, readNativeOwnMessage, updateNativeReceived } from "./native-text-history.ts";
+import { decodeNativeOriginalPage, decodeNativeOwnMessage, decodeNativeReceived, decodeNativeReceivedNotice, readNativeAudit, readNativeHeldPosts, readNativeOriginals, readNativeOwnMessage, readNativeReviewedArchive, updateNativeReceived } from "./native-text-history.ts";
 const item={ordinal:"0",action:"01".repeat(32),signer:"02".repeat(32),channel:"9",presented_ms:"18446744073709551615",status:"pending",body:{kind:"create",text:"original",reply_to:null}};
 test("the founder audit reader binds each revision and drops replies for a departed view", async () => {
   const scope = { server: 1, channel: "9", context: "03".repeat(32) };
@@ -34,6 +34,33 @@ test("native own-history keeps lossless cursors and rejects foreign scope or mal
  assert.throws(()=>decodeNativeOriginalPage(page,"0","2","9"));
 });
 
+test("reviewed history advances a filtered page and reads each exact body independently", async () => {
+  const target = { server: 1, channel: "9", context: "03".repeat(32) };
+  const cursor = "a".repeat(438);
+  const index = { backend: "text-v2", scope: "reviewed-archive-index", status: "current", ids: [], next: cursor };
+  const action = "be".repeat(32);
+  const body = { action, certainty: "proven", replyAllowed: false, text: "Recovered approved post" };
+  const calls: Record<string, unknown>[] = [];
+  const invoke = async (_command: string, args: Record<string, unknown>) => {
+    calls.push(args);
+    if (args.reviewedAfter === null) return index;
+    if (args.reviewedAfter === cursor) return { ...index, ids: [action], next: null };
+    assert.equal(args.archivedAction, action);
+    return { backend: "text-v2", scope: "received-archive", item: body };
+  };
+  const first = await readNativeReviewedArchive(invoke, target, () => true, null);
+  assert.equal(first?.next, cursor);
+  assert.deepEqual(first?.items, []);
+  const next = await readNativeReviewedArchive(invoke, target, () => true, cursor);
+  assert.deepEqual(next?.items, [body]);
+  assert.equal(next?.next, null);
+  assert.equal(calls.length, 3);
+  await assert.rejects(readNativeReviewedArchive(async () => ({ ...index, ids: [action, action] }), target, () => true, null));
+  await assert.rejects(readNativeReviewedArchive(async () => ({ ...index, status: "stale" }), target, () => true, null));
+  const stale = await readNativeReviewedArchive(async () => ({ ...index, status: "stale", next: null }), target, () => true, cursor);
+  assert.equal(stale?.status, "stale");
+});
+
 test("held review pages advance across an unavailable window and reject stale or mixed results", async () => {
   const target = { server: 1, channel: "9", context: "03".repeat(32) };
   const cursor = "04".repeat(32);
@@ -47,11 +74,19 @@ test("held review pages advance across an unavailable window and reject stale or
   await assert.rejects(readNativeHeldPosts(async () => reply, target, cursor, () => true));
   await assert.rejects(readNativeHeldPosts(async () => ({ ...reply, items: null }), target, null, () => true));
   const held = { caseId: cursor, action: item.action, signer: item.signer, body: item.body,
-    admission: "05".repeat(32), originalDigest: "06".repeat(32), removalHeader: "07".repeat(32), removalEpoch: "3" };
+    admission: "05".repeat(32), originalDigest: "06".repeat(32), removalHeader: "07".repeat(32), removalEpoch: "3",
+    decision: { status: "undecided" } };
   const second = { ...reply, next: null, items: [held], unavailable: 0 };
   assert.deepEqual(await readNativeHeldPosts(async () => second, target, cursor, () => true),
     { next: null, items: [held], unavailable: 0 });
   await assert.rejects(readNativeHeldPosts(async () => ({ ...second, items: [held, held] }), target, cursor, () => true));
+  const selected = { ...held, decision: { status: "selected", choice: "approve",
+    decisionBodyId: "0a".repeat(32), streamEntryId: "0b".repeat(32) } };
+  assert.deepEqual(await readNativeHeldPosts(async () => ({ ...second, items: [selected] }), target, cursor, () => true),
+    { next: null, items: [selected], unavailable: 0 });
+  await assert.rejects(readNativeHeldPosts(async () => ({ ...second, items: [
+    { ...selected, decision: { ...selected.decision, decisionBodyId: "0".repeat(64) } },
+  ] }), target, cursor, () => true));
   let current = true;
   assert.equal(await readNativeHeldPosts(async () => {
     current = false;

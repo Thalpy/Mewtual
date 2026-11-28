@@ -341,6 +341,39 @@ mod tests {
             })
         };
         let first = sign(position, &rejected).unwrap();
+        let prepared = UnsignedReviewStreamEntry::prepare(&anchor, position, &rejected).unwrap();
+        let encoded = first.encode();
+        assert_eq!(
+            prepared.signing_bytes(),
+            &encoded[..UNSIGNED_REVIEW_STREAM_ENTRY_BYTES]
+        );
+        assert_eq!(
+            UnsignedReviewStreamEntry::read_position_data(prepared.signing_bytes()).unwrap(),
+            position
+        );
+        let mut foreign_position = prepared.signing_bytes().to_vec();
+        foreign_position[0] ^= 1;
+        assert!(UnsignedReviewStreamEntry::read_position_data(&foreign_position).is_err());
+        let cached_raw: [u8; 64] = encoded[UNSIGNED_REVIEW_STREAM_ENTRY_BYTES..]
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            prepared.attach_signature(&anchor, cached_raw).unwrap(),
+            first
+        );
+        let changed_epoch = UnsignedReviewStreamEntry::prepare(
+            &anchor,
+            ReviewStreamPosition {
+                membership_epoch: position.membership_epoch + 1,
+                ..position
+            },
+            &rejected,
+        )
+        .unwrap();
+        assert_eq!(
+            changed_epoch.attach_signature(&anchor, cached_raw),
+            Err(ChatError::Signature)
+        );
         first.verify_next_for_pin(&anchor, None).unwrap();
         first.verify_decision_for_pin(&anchor, &rejected).unwrap();
         let reopened = body(ReviewDecision::Reopen, Some(rejected.id()), original());

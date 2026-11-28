@@ -16,6 +16,7 @@ use catcoms_sync::{
 use catcoms_wire::{Decoder, Encoder};
 
 mod received;
+mod replay_catalog;
 pub(in crate::store) use received::{
     InstalledRejoin, RejoinIndexInputs, RejoinIndexOwner, RejoinIndexRecovery, RejoinPrefixInputs,
     RejoinPrefixOwner, RejoinReceivedInput, RejoinReceivedOwner, RejoinWelcomeKeyEntry,
@@ -25,6 +26,7 @@ pub use received::{
     NativeTextRejoinIndexReceipt, NativeTextRejoinOutcomeReceipt, NativeTextRejoinPrefixReceipt,
     NativeTextRejoinReceivedReceipt, NativeTextRejoinWelcomeStatus,
 };
+use replay_catalog::{InstalledReplayCatalog, RejoinReadCatalog};
 
 const ATTEMPT: &str = "chat-critical-namespaces.rejoin-attempt.bin";
 const PENDING: &str = "chat-critical-namespaces.rejoin-pending.bin";
@@ -483,11 +485,12 @@ fn decode_saved_attempt(
 impl ServerStore {
     fn recover_saved_rejoin_intent(
         &self,
-        inventory: &UpgradeInventory,
-        (registration, removal): (NativeTextJoinedRegistrationData, SelectedRejoinRemoval),
+        replay: &InstalledReplayCatalog<'_>,
         slot: &mut Option<RejoinPendingOwner>,
     ) -> Result<(Zeroizing<Vec<u8>>, [u8; 32]), AppError> {
-        let catalog = self.cover_selected_rejoin_catalog(registration, removal, inventory)?;
+        let catalog = RejoinReadCatalog::Installed(replay);
+        let (inventory, (registration, removal)) = catalog.parts();
+        let digest = catalog.digest(self)?;
         let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
         let pool = &policy.current.archive.pending.pool;
         let key = Zeroizing::new(self.keys.db_key()?);
@@ -502,10 +505,12 @@ impl ServerStore {
                 RejoinPendingOwner::Cold(cold) => cold.binding,
             };
             let files = owner.files(&binding)?;
+            catalog.require_leaf(ATTEMPT, files[0])?;
+            catalog.require_leaf(PENDING, files[1])?;
             require_held_rejoin_files(paths, files)?;
             let attempt = open_frame(&key, ATTEMPT_PURPOSE, files[0].1)?;
             let (_, invite) = decode_saved_attempt(&attempt)?;
-            if Binding::new(catalog, registration, removal, &invite, binding.token)? != binding {
+            if Binding::new(digest, registration, removal, &invite, binding.token)? != binding {
                 return Err(denied());
             }
             self.open_covered_rejoin_files(
@@ -524,6 +529,8 @@ impl ServerStore {
             (&attempt.0, attempt.1.as_slice()),
             (&pending.0, pending.1.as_slice()),
         ];
+        catalog.require_leaf(ATTEMPT, files[0])?;
+        catalog.require_leaf(PENDING, files[1])?;
         require_held_rejoin_files(paths, files)?;
         let plain = open_frame(&key, ATTEMPT_PURPOSE, files[0].1)?;
         let (original_pending, invite) = decode_saved_attempt(&plain)?;
@@ -536,7 +543,7 @@ impl ServerStore {
         let signed =
             V2JoinRequestPacketData::decode(source.request_bytes_data()).map_err(|_| denied())?;
         let token = signed.founder_add_data().request.spec_data().request_token;
-        let binding = Binding::new(catalog, registration, removal, &invite, token)?;
+        let binding = Binding::new(digest, registration, removal, &invite, token)?;
         if binding.context != context || plain != attempt_plain(&binding, &invite)? {
             return Err(denied());
         }

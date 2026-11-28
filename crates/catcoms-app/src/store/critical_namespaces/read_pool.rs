@@ -105,30 +105,37 @@ impl CriticalCatalogReadPool {
         &self,
         bytes: usize,
     ) -> Result<CatalogReadReservation, AppError> {
+        self.try_reserve_classified(bytes, refused)
+    }
+
+    /// Distinguish an otherwise healthy account's current pressure from an
+    /// invalid quote or unavailable account. Only the former is retryable.
+    pub(in crate::store) fn try_reserve_classified(
+        &self,
+        bytes: usize,
+        busy: impl FnOnce() -> AppError,
+    ) -> Result<CatalogReadReservation, AppError> {
         if bytes == 0 {
             return Err(refused());
         }
         let accepted = match self.inner.state.lock() {
-            Ok(mut state) => {
+            Ok(mut state) if !state.unavailable && bytes <= state.capacity => {
                 let used = state
                     .used
                     .checked_add(bytes)
-                    .filter(|used| !state.unavailable && *used <= state.capacity);
+                    .filter(|used| *used <= state.capacity);
                 if let Some(used) = used {
                     state.used = used;
-                    true
+                    Ok(())
                 } else {
-                    false
+                    Err(true)
                 }
             }
-            Err(error) => {
-                drop(error);
-                false
-            }
+            _ => Err(false),
         };
         // Even the diagnostic String allocation occurs OUTSIDE the account lock.
-        if !accepted {
-            return Err(refused());
+        if let Err(pressure) = accepted {
+            return Err(if pressure { busy() } else { refused() });
         }
         // No fee may be dropped while this mutex is held. Construct it AFTER unlocking; it
         // retains a strong reference, so closing a Store/caller cannot discard its account.

@@ -51,6 +51,7 @@ pub use publication::{
 };
 mod receive;
 pub use receive::{
+    NativeTextFounderRouteApproval, NativeTextFounderRouteAttempt, NativeTextFounderRouteGesture,
     NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,
     NativeTextJoinedArchivedActions, NativeTextJoinedDependencyAttachRefusal,
     NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
@@ -64,6 +65,10 @@ pub use receive::{
 };
 mod reconnect;
 pub use receive::NativeTextJoinedSavedContactApprovals;
+pub use receive::{
+    NativeTextJoinedReviewExchange, NativeTextJoinedReviewResponse,
+    NativeTextJoinedReviewedActions, NativeTextJoinedReviewedPage,
+};
 
 catcoms_rt::redacted_debug! { NativeTextJoinedContactConsent; ScopedContactConsent; }
 pub use reconnect::{NativeTextJoinedContactApprovalProof, NativeTextJoinedReconnect};
@@ -476,6 +481,9 @@ pub(super) struct MountedNode<R: CryptoRngCore> {
     recovered: Option<NativeTextJoinedRegistrationData>,
     selection: Option<NativeTextJoinedRowSelection>,
     founder_contact: OnceLock<PeerId>,
+    // One paid ciphertext continuation on this same parked A1 outcome.
+    // It cannot supply a host, dial, Source or native registration proof.
+    founder_route: Option<crate::store::persistence::v2_founder_route::FounderRouteWrite>,
     _payment: CatalogReadReservation,
 }
 
@@ -503,6 +511,7 @@ impl<R: CryptoRngCore> NativeTextSources<catcoms_net::MeshService, R> {
         receipt: NativeTextJoinedRegistrationData,
         transport: Arc<join_tcp::Transport>,
         payment: CatalogReadReservation,
+        founder: Option<PeerId>,
     ) -> Result<(), AppError> {
         let checked = node
             .as_ref()
@@ -530,7 +539,8 @@ impl<R: CryptoRngCore> NativeTextSources<catcoms_net::MeshService, R> {
             registration: None,
             recovered: Some(receipt),
             selection: None,
-            founder_contact: OnceLock::new(),
+            founder_contact: founder.map(OnceLock::from).unwrap_or_default(),
+            founder_route: None,
             _payment: payment,
         });
         Ok(())
@@ -619,6 +629,7 @@ impl<R: CryptoRngCore> NativeTextJoinedInstallation<R> {
                     recovered: None,
                     selection: None,
                     founder_contact: OnceLock::from(self.exchange.target),
+                    founder_route: None,
                     _payment: payment.take().unwrap(),
                 });
                 self.exchange.tcp.attached();
@@ -691,6 +702,7 @@ struct JoinedRowSelection {
     archive_relay: Mutex<receive::ArchiveRelayState>,
     contact_approval_generation: Mutex<watch::Sender<bool>>,
     contact_forget_generation: Mutex<watch::Sender<bool>>,
+    founder_route_consent: Mutex<receive::FounderRouteConsentState>,
     next_governing_peer: AtomicUsize,
     keys: Arc<OnceLock<NativeChatSourceClose>>,
     _metadata: Arc<retirement::Control>,
@@ -1128,6 +1140,7 @@ impl<R: CryptoRngCore> MountedNode<R> {
                     archive_relay: Mutex::new(receive::ArchiveRelayState::default()),
                     contact_approval_generation: Mutex::new(watch::channel(false).0),
                     contact_forget_generation: Mutex::new(watch::channel(false).0),
+                    founder_route_consent: Mutex::new(receive::FounderRouteConsentState::default()),
                     next_governing_peer: AtomicUsize::new(0),
                     keys,
                     _metadata: control.clone(),
@@ -1502,9 +1515,27 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         self,
         negative: &RequestCancellation,
     ) -> Result<NativeTextJoinedRowSelection, AppError> {
+        self.select_registered_inner(negative, None)
+    }
+
+    /// The first native UI selection can provision private review storage
+    /// without replacing the parked SDK node or opening any new route.
+    pub fn select_registered_with_review_storage(
+        self,
+        negative: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextJoinedRowSelection, AppError> {
+        self.select_registered_inner(negative, Some(rng))
+    }
+
+    fn select_registered_inner(
+        self,
+        negative: &RequestCancellation,
+        review_rng: Option<&mut dyn CryptoRngCore>,
+    ) -> Result<NativeTextJoinedRowSelection, AppError> {
         self.original.require_current(negative)?;
         let pending = self.original.pending.upgrade().ok_or_else(refused)?;
-        let _owner = pending.state.try_lock().map_err(|_| refused())?;
+        let mut owner = pending.state.try_lock().map_err(|_| refused())?;
         let mounted = self.mounted.upgrade().ok_or_else(refused)?;
         let mut slot = mounted.try_lock().map_err(|_| refused())?;
         let runtime = slot.as_mut().ok_or_else(refused)?;
@@ -1513,7 +1544,26 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             .or_else(|| runtime.registration.as_ref().map(|proof| proof.data()))
             .ok_or_else(refused)?;
         let metadata = self.original.work.as_ref().ok_or_else(refused)?;
+        if runtime.recovered.is_none() {
+            owner
+                .io
+                .as_ref()
+                .ok_or_else(refused)?
+                .require_warm_review_catalog()?;
+        }
         let (row, name) = runtime.observe_selected(metadata, data)?;
+        if let Some(rng) =
+            review_rng.filter(|_| runtime.recovered.is_none() && runtime.selection.is_none())
+        {
+            let warm = owner.io.as_mut().ok_or_else(refused)?;
+            let original = runtime.registration.as_mut().ok_or_else(refused)?;
+            metadata.select_warm_review_receiver(
+                warm,
+                original,
+                || self.original.require_current(negative),
+                rng,
+            )?;
+        }
         self.original.require_current(negative)?;
         runtime.select(
             row,
@@ -1537,6 +1587,10 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         rng: &mut impl CryptoRngCore,
     ) -> Result<NativeTextJoinedRegistryRowData, AppError> {
         self.original.require_current(negative)?;
+        // Destruction of a successful plan (Files and its account) belongs
+        // outside the pending/mounted/physical writers. Uncertain errors
+        // deliberately leave the plan on the original parked runtime.
+        let mut retired_route = None;
         let (receipt, debt) = {
             let original = self.original.pending.upgrade().ok_or_else(refused)?;
             let pending = original.state.try_lock().map_err(|_| refused())?;
@@ -1561,6 +1615,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             } else {
                 let pending = pending.io.as_ref().ok_or_else(refused)?;
                 pending.require_original_join_intent(invite.binding(), token)?;
+                pending.require_warm_review_catalog()?;
                 if runtime.registration.is_none() {
                     runtime.registration = Some(metadata.capture_join_registration(pending)?);
                 }
@@ -1568,11 +1623,45 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 if proof.data().selected_data() != selected || proof.data().invocation != token {
                     return Err(refused());
                 }
+                // Match the existing Register shape rejection before the
+                // new optional AEAD plan may sample any randomness or write.
+                let max_name = super::super::super::data::MAX_NAME;
+                if name.trim().is_empty()
+                    || name.len() > max_name
+                    || display.trim().is_empty()
+                    || display.len() > max_name
+                {
+                    return Err(refused());
+                }
+                // Optional identity memory cannot hold the independent Join
+                // hostage after a torn/corrupt file. On the successful path
+                // cover it before native CAS; otherwise preserve every byte.
+                // The native cell verifies the same retained Pending and
+                // Welcome before both fresh CAS and exact Stage retry.
+                if runtime.founder_route.is_none() {
+                    if let Ok(plan) = metadata.prepare_a1_founder_route(pending, invite, rng) {
+                        runtime.founder_route = Some(plan);
+                    }
+                }
+                if let Some(plan) = runtime.founder_route.as_mut() {
+                    let mut ended = false;
+                    let _optional = metadata.cover_a1_founder_route(pending, plan, || {
+                        let current = self.original.require_current(negative);
+                        ended = current.is_err();
+                        current
+                    });
+                    if ended {
+                        return Err(refused());
+                    }
+                }
                 self.original.require_current(negative)?;
-                metadata.register_joined(name, display, proof, rng)?
+                let result = metadata.register_joined(name, display, proof, rng)?;
+                retired_route = runtime.founder_route.take();
+                result
             }
         };
         drop(debt);
+        drop(retired_route);
         self.original.require_current(negative)?;
         Ok(receipt)
     }

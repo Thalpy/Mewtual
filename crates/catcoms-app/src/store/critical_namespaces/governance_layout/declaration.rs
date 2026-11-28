@@ -2,6 +2,17 @@
 //! only an already settled Current3 parent or its exact seeded Current4 successor.
 use super::*;
 
+pub(in crate::store) struct JoinedCatalogDescriptors<'a> {
+    pub(in crate::store) layout: archive_current_namespace_codec::CurrentLayoutData,
+    pub(in crate::store) governance:
+        governance_namespace_codec::capability::GovernanceCapabilityData,
+    pub(in crate::store) shared_history: Option<&'a [u8]>,
+    pub(in crate::store) review_hold: Option<&'a [u8]>,
+    pub(in crate::store) review_decision: Option<&'a [u8]>,
+    pub(in crate::store) review_receive: Option<&'a [u8]>,
+    pub(in crate::store) rejoin_declared: bool,
+}
+
 fn summary(
     store: &ServerStore,
     key: &[u8; 32],
@@ -24,33 +35,91 @@ fn summary(
 }
 
 impl ServerStore {
+    /// Classify the bound warm catalog without adopting any physical object.
+    pub(in crate::store) fn founder_review_catalog_step(
+        &self,
+        kind: super::review_hold_namespace::declaration::ReviewDeclarationKind,
+    ) -> Result<Option<([u8; 32], bool)>, AppError> {
+        use super::review_hold_namespace::declaration::ReviewDeclarationKind;
+        let slot = self
+            .pending_join_catalog
+            .try_lock()
+            .map_err(|error| match error {
+                std::sync::TryLockError::WouldBlock => AppError::ChatV2RegistryBusy,
+                std::sync::TryLockError::Poisoned(_) => refused(),
+            })?;
+        let mounted = slot.as_ref().ok_or_else(refused)?;
+        let current = &mounted.current;
+        if mounted.pending.is_some()
+            || mounted.networks.iter().any(Option::is_some)
+            || current.rejoin_payload_digest.is_some()
+            || current.review_receive_payload_digest.is_some()
+        {
+            return Err(refused());
+        }
+        if current.shared_history_payload_digest.is_none() {
+            return Ok(None);
+        }
+        let hold = current.review_hold_payload_digest.is_some();
+        let decision = current.review_decision_payload_digest.is_some();
+        if (decision || kind == ReviewDeclarationKind::Decision) && !hold {
+            return Err(refused());
+        }
+        Ok(Some((
+            current.framed,
+            match kind {
+                ReviewDeclarationKind::Hold => hold,
+                ReviewDeclarationKind::Decision => decision,
+            },
+        )))
+    }
+
+    /// Parse the original declaration's exact bounded candidate under this
+    /// mount's configured grammar. The caller owns the read invoice and
+    /// must still prove same-inode selection before adopting the summary.
+    pub(in crate::store) fn prepare_warm_review_catalog_summary(
+        &self,
+        key: &[u8; 32],
+        candidate: &[u8],
+    ) -> Result<pending_join_codec::Summary, AppError> {
+        summary(self, key, candidate)
+    }
+
+    /// The authenticated original Current already declares the journal.
+    /// A damaged optional mount may not acquire a new declaration.
+    pub(in crate::store) fn has_declared_review_decision(&self) -> Result<bool, AppError> {
+        let catalog = self
+            .pending_join_catalog
+            .try_lock()
+            .map_err(|_| refused())?;
+        let selected = catalog.as_ref().ok_or_else(refused)?;
+        Ok(selected.current.review_decision_payload_digest.is_some())
+    }
+
     pub(in crate::store) fn parse_joined_pin_catalog(
         &self,
         plain: &[u8],
     ) -> Result<archive_current_namespace_codec::CurrentLayoutData, AppError> {
-        Ok(self.parse_joined_catalog_descriptors(plain)?.0)
+        Ok(self.parse_joined_catalog_descriptors(plain)?.layout)
     }
 
     pub(in crate::store) fn parse_joined_catalog_descriptors<'a>(
         &self,
         plain: &'a [u8],
-    ) -> Result<
-        (
-            archive_current_namespace_codec::CurrentLayoutData,
-            Option<&'a [u8]>,
-            Option<&'a [u8]>,
-        ),
-        AppError,
-    > {
+    ) -> Result<JoinedCatalogDescriptors<'a>, AppError> {
         if !self.uses_joined_pin_layout() {
             return Err(refused());
         }
         let parsed = self.parse_configured_join_catalog(plain)?;
-        Ok((
-            parsed.current_layout.ok_or_else(refused)?,
-            parsed.shared_history_payload,
-            parsed.review_hold_payload,
-        ))
+        Ok(JoinedCatalogDescriptors {
+            layout: parsed.current_layout.ok_or_else(refused)?,
+            governance: parsed.governance.ok_or_else(refused)?,
+            shared_history: parsed.shared_history_payload,
+            review_hold: parsed.review_hold_payload,
+            review_decision: parsed.review_decision_payload,
+            review_receive: parsed.review_receive_payload,
+            rejoin_declared: parsed.rejoin_payload.is_some(),
+        })
     }
 
     pub(in crate::store) fn prepare_governance_layout_declaration(

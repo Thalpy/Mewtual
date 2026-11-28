@@ -15,12 +15,13 @@ pub(in crate::store) use lifecycle::wal::{
 };
 pub(in crate::store) use lifecycle::{
     verify_joined_pin_parent, verify_shared_history_parent, PreparedNativeRejoinIndex,
-    VerifiedFounderReviewParent, VerifiedGovernanceNative,
+    VerifiedFounderReviewParent, VerifiedGovernanceNative, VerifiedRecipientReviewParent,
 };
 // Named full invoice shared with the closed physical reader. Publishing its
 // size grants no policy, reserve, handler or physical/native authority.
 pub(in crate::store) const NATIVE_INDEX3_FULL_FEE: usize = lifecycle::preparation::PREPARATION_FEE;
 pub(in crate::store::critical_namespaces) mod operational;
+pub(in crate::store) use operational::founder_review_intake;
 pub(in crate::store) mod preparation;
 
 pub use lifecycle::joined::NativeTextJoinedRegistryRowData;
@@ -61,6 +62,11 @@ pub use operational::{
     NativeTextFounderReviewReply, NativeTextFounderReviewResult, NativeTextFounderReviewSweep,
 };
 pub use operational::{
+    NativeTextFounderRouteApproval, NativeTextFounderRouteAttempt, NativeTextFounderRouteGesture,
+    NativeTextJoinedContactApprovalProof, NativeTextJoinedContactConsent,
+    NativeTextJoinedReconnect, NativeTextJoinedSavedContactApprovals,
+};
+pub use operational::{
     NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,
     NativeTextJoinedArchivedActions, NativeTextJoinedDependencyAttachRefusal,
     NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
@@ -71,11 +77,9 @@ pub use operational::{
     NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
-    NativeTextJoinedReceivedOriginal, NativeTextJoinedSelectionPreparation,
-};
-pub use operational::{
-    NativeTextJoinedContactApprovalProof, NativeTextJoinedContactConsent,
-    NativeTextJoinedReconnect, NativeTextJoinedSavedContactApprovals,
+    NativeTextJoinedReceivedOriginal, NativeTextJoinedReviewExchange,
+    NativeTextJoinedReviewResponse, NativeTextJoinedReviewedActions, NativeTextJoinedReviewedPage,
+    NativeTextJoinedSelectionPreparation,
 };
 pub use operational::{
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,

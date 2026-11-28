@@ -5,6 +5,8 @@ use super::*;
 use catcoms_rt::Clock;
 
 mod compatibility;
+#[cfg(any(windows, target_os = "linux"))]
+mod review_storage;
 
 #[cfg(any(windows, target_os = "linux"))]
 #[tokio::test]

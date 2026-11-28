@@ -5,6 +5,10 @@ mod work;
 use crate::store::critical_namespaces::native_registry::lifecycle::{
     cell, founder, network, refresh, rename,
 };
+use crate::store::critical_namespaces::review_hold_namespace::declaration::ReviewDeclarationKind;
+use crate::store::persistence::governance_layout::joined::review_hold::{
+    WarmFounderReviewCurrent, WarmFounderReviewOrigin,
+};
 use std::sync::Mutex;
 pub(in crate::store::critical_namespaces::native_registry) use work::WorkDrain;
 use work::{Slot, SlotAck};
@@ -194,6 +198,25 @@ impl Physical {
             .recovered_join_registration_data()
     }
 
+    pub(super) fn optional_a1_founder_peer(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+    ) -> Result<Option<catcoms_rt::PeerId>, AppError> {
+        self.handler.require()?;
+        let store = self.current()?.checked_store()?;
+        let pool = &store
+            .governance_layout_policy
+            .as_ref()
+            .ok_or_else(refused)?
+            .current
+            .archive
+            .pending
+            .pool;
+        let fee =
+            pool.try_reserve(crate::store::persistence::v2_founder_route::FOUNDER_ROUTE_FEE)?;
+        self.with_registered_native_join(data, |store, _| store.read_a1_founder_peer(data, &fee))
+    }
+
     pub(super) fn select_review_storage_before_founder_startup(
         &self,
         rng: &mut dyn CryptoRngCore,
@@ -202,18 +225,36 @@ impl Physical {
             return Err(refused());
         }
         let store = self.current()?.checked_store()?;
-        if store.has_mounted_review_hold()? || !store.has_mounted_shared_history()? {
+        if !store.has_mounted_shared_history()? || store.has_declared_review_decision()? {
             return Ok(false);
         }
+        let kind = if store.has_mounted_review_hold()? {
+            ReviewDeclarationKind::Decision
+        } else {
+            ReviewDeclarationKind::Hold
+        };
         // The caller retains the original unpublished native owner. No
         // listener or native command can observe a half-selected catalog.
         let Some(founder) = self.recovered_cold_founder()? else {
             return Ok(false);
         };
         self.require_recovered_cold_founder(&founder)?;
-        let mut declaration = store.prepare_founder_review_declaration(rng)?;
+        let mut declaration = store.prepare_founder_review_declaration(kind, rng)?;
         declaration.select(store)?;
         Ok(true)
+    }
+
+    pub(super) fn select_review_storage_before_joined_startup(
+        &self,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<bool, AppError> {
+        if !self.handler.accepts_rejoin_startup() {
+            return Err(refused());
+        }
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        let store = self.current()?.checked_store()?;
+        store.select_review_receiver_before_native_startup(rng)
     }
 
     pub(super) fn has_mounted_review_hold(&self) -> Result<bool, AppError> {
@@ -934,9 +975,7 @@ impl Physical {
         self.cell.get_mut().map_err(|_| refused())?.require_idle()?;
         self.handler.require()?;
         self.handler.require_idle_cached()?;
-        let handler = self.handler.clone().with_shared_history_layout(
-            crate::store::critical_namespaces::shared_history_namespace::Opening::Required,
-        );
+        let handler = self.handler.clone().with_warm_review_layout();
         self.current
             .as_mut()
             .ok_or_else(refused)?
@@ -1229,6 +1268,83 @@ impl Physical {
 }
 
 impl SourceWork {
+    pub(in crate::store::critical_namespaces::native_registry) fn require_warm_founder_review_current(
+        &self,
+        current: &WarmFounderReviewCurrent,
+        complete: bool,
+    ) -> Result<(), AppError> {
+        let store = self.physical.current()?.checked_store()?;
+        if complete {
+            current.require_complete(store)
+        } else {
+            current.require(store)
+        }
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn require_warm_founder_review_selection(
+        &self,
+        current: Option<&WarmFounderReviewCurrent>,
+    ) -> Result<(), AppError> {
+        if let Some(current) = current {
+            return self.require_warm_founder_review_current(current, true);
+        }
+        self.physical.handler.require()?;
+        let store = self.physical.current()?.checked_store()?;
+        if self.physical.handler.uses_joined_pin_layout()
+            && store
+                .founder_review_catalog_step(ReviewDeclarationKind::Hold)?
+                .is_some()
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn cover_warm_founder_review(
+        &self,
+        kind: ReviewDeclarationKind,
+        origin: &WarmFounderReviewOrigin<'_>,
+        admitted: &mut bool,
+        latest: &mut Option<WarmFounderReviewCurrent>,
+        require_current: impl FnOnce() -> Result<(), AppError>,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<(), AppError> {
+        // Old non-joined profiles cannot declare these namespaces.
+        if !self.physical.handler.uses_joined_pin_layout() {
+            self.physical.handler.require()?;
+            return require_current();
+        }
+        let metadata = self.metadata().ok_or_else(|| {
+            if self.is_live_cached() {
+                AppError::ChatV2RegistryBusy
+            } else {
+                refused()
+            }
+        })?;
+        let cell = metadata
+            .physical
+            .cell
+            .try_lock()
+            .map_err(|error| match error {
+                std::sync::TryLockError::WouldBlock => AppError::ChatV2RegistryBusy,
+                std::sync::TryLockError::Poisoned(_) => refused(),
+            })?;
+        cell.require_idle()?;
+        metadata.require_joined_store()?;
+        let store = metadata.physical.current()?.checked_store()?;
+        store.cover_warm_founder_review(
+            kind,
+            origin,
+            admitted,
+            latest,
+            || {
+                metadata.require_joined_store()?;
+                require_current()
+            },
+            rng,
+        )
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn recovered_founder_resources(
         &self,
         bytes: usize,
@@ -1793,6 +1909,20 @@ impl SourceWork {
         )
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn finish_warm_founder_review<
+        T: catcoms_rt::MeshTransport,
+        R: catcoms_rt::CryptoRngCore,
+    >(
+        &self,
+        driver: &mut crate::store::PreparedFreshV2TextFounder<T, R>,
+        request: (crate::store::NativeTextInitialReviewRequest, bool),
+        keys: crate::store::critical_namespaces::native_registry::founder_review_intake::WarmFounderReviewKeys<'_>,
+        caller: &catcoms_rt::RequestCancellation,
+        rng: &mut dyn catcoms_rt::CryptoRngCore,
+    ) -> Result<Option<catcoms_replication::chat::owner_bodies::ReviewStreamEntry>, AppError> {
+        driver.finish_warm_founder_review(self.physical.current()?, request, keys, caller, rng)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn run_founder_member_receive<
         T: catcoms_rt::MeshTransport,
         R: catcoms_rt::CryptoRngCore,
@@ -2312,6 +2442,53 @@ impl MetadataWork {
         AppError,
     > {
         self.with_joined_store(|store| pending.capture_registration_dependency(store))
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn select_warm_review_receiver(
+        &self,
+        pending: &mut JoinedPendingIo,
+        original: &mut Arc<
+            crate::store::persistence::governance_layout::joined::JoinedRegistrationDependency,
+        >,
+        require_current: impl FnOnce() -> Result<(), AppError>,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<bool, AppError> {
+        self.with_joined_store(|store| {
+            pending.select_warm_review_receiver(
+                store,
+                original,
+                || {
+                    self.require_joined_store()?;
+                    require_current()
+                },
+                rng,
+            )
+        })
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_a1_founder_route(
+        &self,
+        pending: &JoinedPendingIo,
+        invite: &crate::store::NativeTextInvitePacketData<'_>,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<crate::store::persistence::v2_founder_route::FounderRouteWrite, AppError> {
+        let (_, fee) = self.joined_transport_resources(
+            crate::store::persistence::v2_founder_route::FOUNDER_ROUTE_FEE,
+        )?;
+        self.with_joined_store(|store| {
+            let original = pending.warm_registration_data(store)?;
+            pending.require_original_join_intent(invite.binding(), original.invocation)?;
+            store.prepare_a1_founder_route(pending, invite, fee, rng)
+        })
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn cover_a1_founder_route(
+        &self,
+        pending: &JoinedPendingIo,
+        plan: &mut crate::store::persistence::v2_founder_route::FounderRouteWrite,
+        admit: impl FnOnce() -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        self.with_joined_store(|store| store.cover_a1_founder_route(pending, plan, admit))
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn register_joined(

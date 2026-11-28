@@ -8,6 +8,7 @@ on:
       - 'apps/desktop/src-tauri/src/native_text.rs'
       - 'apps/desktop/src-tauri/src/native_text/**'
       - 'apps/desktop/src/App.svelte'
+      - 'apps/desktop/src/NativeTextFounderRoute.svelte'
       - 'apps/desktop/src/native-text-*.ts'
       - 'apps/desktop/src/native-saved-chat.test.ts'
       - 'apps/desktop/src/pending-manager-fixture.test.ts'
@@ -125,6 +126,8 @@ jobs:
           --import ./scripts/test-svelte.mjs --test
           src/native-text-history.test.ts src/native-text-app.test.ts src/native-saved-chat.test.ts
           src/native-text-driver.test.ts src/native-text-intents.test.ts src/native-text-session.test.ts
+          src/native-text-audit-component.test.ts src/native-text-founder-route.test.ts
+          src/visual-native-text-fixture.test.ts
           src/tauri-command-security.test.ts src/studio-exit-routes.test.ts
 
   native:
@@ -229,6 +232,8 @@ jobs:
               ('native-membership-dispatch', 'native_text::tests::native_text_membership_dispatch_uses_the_original_founder_row', 1),
           ]
           held_review = [
+              ('native-held-audit-parser', 'native_text::history::tests::held_posts_accept_only_their_own_small_page_and_cursor', 1),
+              ('native-held-audit-size', 'native_text::history::held_posts::tests::two_maximum_escaped_posts_fit_the_held_response_limit', 1),
               ('native-held-review-lock', 'native_text::tests::held_review_does_not_adopt_an_unlock_after_router_admission', 1),
               ('native-held-review-deadline', 'native_text::membership::review::tests::review_deadline_starts_before_task_poll_and_preserves_the_original_cancellation', 1),
               ('native-held-review-authority', 'native_text::membership::review::tests::a_new_limit_preserves_an_earlier_request_authority', 1),
@@ -252,6 +257,9 @@ jobs:
                   ('native-eviction-notice', 'native_text::tests::native_text_membership_selected_eviction_notifies_the_original_joined_row', 1),
                   ('native-rejoin-registry', 'native_text::tests::native_text_rejoin_index_recovers_saved_invite_and_preserves_original_membership', 1),
                   ('native-rejoin-command', 'native_text::tests::native_text_routes_same_vault_rejoin_and_drains_the_original_file_loan', 1),
+                  ('native-founder-route-parser', 'native_text::membership::tests::native_founder_route_consent_requires_an_explicit_exact_operation', 1),
+                  ('native-founder-route-consent', 'native_text::tests::native_text_original_founder_address_reconnects_only_after_explicit_consent', 1),
+                  ('native-rejoin-startup', 'native_text::tests::native_text_rejoin_activates_the_replacement_row_on_startup', 1),
                   ('native-unconfirmed-delete', 'native_text::tests::native_text_unconfirmed_delete_invalidates_the_visible_founder_message', 1),
                   ('native-recovered-add', 'native_text::tests::native_text_recovered_founder_admits_a_fresh_join_after_selected_remove', 1),
                   ('native-complete-staged-add', 'native_text::tests::native_text_cold_founder_finishes_a_complete_staged_add', 1),

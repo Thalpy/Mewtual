@@ -483,3 +483,110 @@ test("a delayed old Found cannot release its replacement generation's busy owner
  oldReply.resolve(response(0));await old;assert.equal(app.state().busy,true,"old finally must preserve the live replacement owner");
  newReply.resolve(response(1));await current;assert.equal(app.state().busy,false);app.done();
 });
+
+
+test("actual App retains ordinary history while a stale reviewed cursor restarts", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  const ordinary = { action: row.action, text: "Ordinary history", certainty: "proven" };
+  const approved = { action: "12".repeat(32), text: "Approved after removal", certainty: "proven", replyAllowed: false };
+  const cursor = "17".repeat(219);
+  const index = { backend: "text-v2", scope: "reviewed-archive-index" };
+  const body = { backend: "text-v2", scope: "received-archive" };
+  app.nativeArchivePages(
+    { backend: "text-v2", scope: "received-archive-index", available: true, ids: [ordinary.action], more: false },
+    { ...body, item: ordinary },
+  );
+  app.nativeReviewedPages({ ...index, status: "current", ids: [], next: cursor });
+  await app.nativeArchiveRefresh();
+  assert.deepEqual(app.archive().items, [ordinary]);
+  assert.deepEqual(app.archive().reviewed, []);
+  assert.equal(app.archive().reviewedAfter, cursor);
+
+  app.nativeReviewedPages(
+    { ...index, status: "stale", ids: [], next: null },
+    { ...index, status: "current", ids: [approved.action], next: null },
+  );
+  app.nativeArchivePages({ ...body, item: approved });
+  await app.nativeArchiveRefresh(true);
+  assert.deepEqual(app.nativeReviewedCalls().map((args: Record<string, unknown>) => args.reviewedAfter), [null, cursor, null]);
+  assert.equal(app.nativeArchiveCalls().length, 3, "ordinary pagination did not restart");
+  assert.deepEqual(app.archive().items, [ordinary]);
+  assert.deepEqual(app.archive().reviewed, [approved]);
+  assert.equal(app.archive().reviewedAfter, undefined);
+  app.done();
+});
+
+test("actual App review uses the exact native fields and serializes review across navigation", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  const original = { server: 7, channel: "9", context };
+  const held = { caseId: "21".repeat(32), action: row.action, originalDigest: "22".repeat(32),
+    removalHeader: "23".repeat(32), removalEpoch: "4", decision: { status: "undecided" } };
+  const reply = deferred<unknown>();
+  app.answer(() => reply.promise);
+  const write = deferred();
+  app.holdSave(write.promise);
+  const first = app.nativeDecide(original, held, "reject");
+  await settle();
+  assert.equal(app.state().submissions.length, 0);
+  write.resolve();
+  await settle();
+  const call = app.state().submissions[0];
+  assert.equal(call.command, "decide_native_chat_held_post");
+  const [intent] = Object.values(call.sealed.nativeTextIntents) as { token: string }[];
+  assert.deepEqual(call.args, {
+    server: 7, channel: "9", expectedContext: context, caseId: held.caseId, action: held.action,
+    originalDigest: held.originalDigest, removalHeader: held.removalHeader, removalEpoch: "4",
+    previousDecision: null, choice: "reject", intent: intent.token.slice(32),
+  });
+  const second = { server: 8, channel: "10", context: "31".repeat(32) };
+  app.nativeConversation(second.server, second.channel, second.context);
+  assert.equal(await app.nativeDecide(second, held, "approve"), null);
+  assert.equal(app.state().submissions.length, 1);
+  reply.resolve({ status: "superseded", intent: call.args.intent, caseId: held.caseId, choice: "reject" });
+  assert.equal(await first, "superseded");
+  assert.deepEqual(app.state().sealed.nativeTextIntents, {});
+  app.answer(async args => ({ status: "saved", intent: args.intent, caseId: args.caseId, choice: args.choice,
+    decisionBodyId: "24".repeat(32), streamEntryId: "25".repeat(32) }));
+  assert.equal(await app.nativeDecide(second, held, "approve"), "saved");
+  assert.equal(app.state().submissions.length, 2);
+  assert.notEqual(app.state().submissions[1].args.intent, call.args.intent);
+  app.done();
+});
+
+
+test("an old-generation founder reply cannot release a new generation's exact decision retry", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  const scope = { server: 7, channel: "9", context };
+  const held = { caseId: "21".repeat(32), action: row.action, originalDigest: "22".repeat(32),
+    removalHeader: "23".repeat(32), removalEpoch: "4", decision: { status: "undecided" } };
+  const old = deferred<unknown>(), replacement = deferred<unknown>();
+  let calls = 0;
+  app.answer(() => (++calls === 1 ? old : replacement).promise);
+  const first = app.nativeDecide(scope, held, "reject");
+  await settle();
+  const call = app.state().submissions[0];
+  const [intent] = Object.values(call.sealed.nativeTextIntents);
+  const receipt = { status: "saved", intent: call.args.intent, caseId: held.caseId, choice: "reject",
+    decisionBodyId: "24".repeat(32), streamEntryId: "25".repeat(32) };
+  app.lock();
+  await app.unlock();
+  app.nativeConversation(7, "9", context);
+  const second = app.nativeRetryDecision(intent);
+  await settle();
+  assert.deepEqual(app.state().submissions[1].args, call.args);
+  old.resolve(receipt);
+  assert.equal(await first, null);
+  assert.equal(await app.nativeRetryDecision(intent), null);
+  assert.equal(app.state().submissions.length, 2);
+  assert.deepEqual(Object.values(app.state().sealed.nativeTextIntents), [intent]);
+  replacement.resolve(receipt);
+  assert.equal(await second, "saved");
+  assert.deepEqual(app.state().sealed.nativeTextIntents, {});
+  app.done();
+});

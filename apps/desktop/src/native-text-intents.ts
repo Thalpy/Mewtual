@@ -16,7 +16,13 @@ type NativeTextMutationTarget = Readonly<{
 export type NativeTextEditIntent = NativeTextMutationTarget & Readonly<{ kind: "edit"; text: string }>;
 export type NativeTextDeleteIntent = NativeTextMutationTarget & Readonly<{ kind: "delete" }>;
 export type NativeTextMutationIntent = NativeTextEditIntent | NativeTextDeleteIntent;
-export type NativeTextIntent = NativeTextFoundIntent | NativeTextCreateIntent | NativeTextMutationIntent;
+export type NativeReviewChoice = "approve" | "reject" | "reopen";
+export type NativeTextReviewIntent = Readonly<{
+  kind: "review"; token: string; server: number; channel: string; expectedContext: string;
+  caseId: string; action: string; originalDigest: string; removalHeader: string;
+  removalEpoch: string; previousDecision: string | null; choice: NativeReviewChoice;
+}>;
+export type NativeTextIntent = NativeTextFoundIntent | NativeTextCreateIntent | NativeTextMutationIntent | NativeTextReviewIntent;
 export type NativeTextIntents = Record<string, NativeTextIntent>;
 export const MAX_NATIVE_TEXT_INTENTS = 16;
 const encoder = new TextEncoder();
@@ -58,6 +64,7 @@ export function decodeNativeTextIntents(value: unknown, version: number): Native
   const source = record(value), entries = Object.entries(source);
   if (entries.length > MAX_NATIVE_TEXT_INTENTS) return fail();
   const result: NativeTextIntents = {};
+  let reviewSeen = false;
   for (const [key, raw] of entries) {
     const item = record(raw), token = id(item.token);
     if (id(key) !== token) return fail();
@@ -67,6 +74,24 @@ export function decodeNativeTextIntents(value: unknown, version: number): Native
       result[key] = Object.freeze({ kind: "found", token, displayName: text(item.displayName, 256, true),
         serverName: text(item.serverName, 256, true), advertise: text(item.advertise, 4096),
         relay: text(item.relay, 4096), rendezvous: text(item.rendezvous, 4096), isDm: item.isDm });
+    } else if (item.kind === "review") {
+      // The original vault journal permits a single pending decision. Keep
+      // its exact input covered before calling the native founder signer.
+      if (reviewSeen || /^0+$/.test(token.slice(32))) return fail();
+      reviewSeen = true;
+      exact(item, ["kind", "token", "server", "channel", "expectedContext", "caseId", "action",
+        "originalDigest", "removalHeader", "removalEpoch", "previousDecision", "choice"]);
+      if (typeof item.server !== "number" || !Number.isSafeInteger(item.server) || item.server < 1
+        || typeof item.removalEpoch !== "string" || !/^[1-9][0-9]{0,19}$/.test(item.removalEpoch)
+        || BigInt(item.removalEpoch) > (1n << 64n) - 1n) return fail();
+      const choice = item.choice;
+      if (choice !== "approve" && choice !== "reject" && choice !== "reopen") return fail();
+      const previousDecision = item.previousDecision === null ? null : id(item.previousDecision);
+      if (choice === "reopen" && previousDecision === null) return fail();
+      result[key] = Object.freeze({ kind: "review", token, server: item.server, channel: channel(item.channel),
+        expectedContext: id(item.expectedContext), caseId: id(item.caseId), action: id(item.action),
+        originalDigest: id(item.originalDigest), removalHeader: id(item.removalHeader),
+        removalEpoch: item.removalEpoch, previousDecision, choice });
     } else if (item.kind === "create" || item.kind === "edit" || item.kind === "delete") {
       if (typeof item.server !== "number" || !Number.isSafeInteger(item.server) || item.server < 0) return fail();
       const target = { token, server: item.server, channel: channel(item.channel), expectedContext: id(item.expectedContext) };

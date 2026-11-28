@@ -1,8 +1,164 @@
 # Mewtual; Handover
 
+## Preserve the catalog used to bind an installed rejoin
+
+Installed A2 recovery checks the exact seven selected replacement files and
+the original live Current throughout reconstruction. The recovery path can
+read those files and synchronize an existing record. It cannot start a
+transport exchange, enter Welcome, or create a missing replacement record.
+
+The private ID12 predecessor reader verifies an original encrypted catalog
+and the exact insertion of a receiver descriptor. An installed owner keeps
+the predecessor file, identity and digest through attachment and later
+membership changes. It checks that proof before writing a new membership
+record. A selected removal can still retire the row when a final proof
+check fails. The ordinary reader and writer use the original catalog format.
+
+A genuine linked-vault restart and migration are still pending. They must
+cover missing and replaced predecessor files, an unchanged A2 after a later
+Add, and retirement after a late failure. Existing A2 vaults without the
+receiver descriptor continue to defer provisioning.
+
+Three focused App tests and two desktop-native tests passed. The native
+tests exercise the existing direct-format A2 startup, later removal, and
+retirement of the original file loan. The App checks cover exact birth
+catalog data and held-file custody, including replacement, truncation,
+growth, and in-place changes.
+
+## Reconnect to the original A1 founder after explicit approval
+
+The original joined row can remember a user-approved founder address after
+an authenticated direct outbound connection. After reopen the same mounted
+row can dial the remembered endpoint without another invitation. The normal
+join remains one-shot, and A2 does not inherit A1 consent. Forget immediately
+stops queued retries in that mount and covers an encrypted clear before
+returning success. A live inbound-only connection cannot supply an address.
+Three focused Windows native regressions passed. They exercise the exact
+command, cold TCP reconnect only after opt-in, a failed Forget with a
+queued retry, successful cold Forget, and rejection from an installed A2
+row. The App file-replacement and Net connection-retirement regressions
+passed. The focused renderer tests, Svelte check, production build, and
+900 × 640 browser flow also passed.
+
+## Remember the original A1 founder identity
+
+During first registration, the original A1 owner can cover an encrypted
+copy of the signed founder reservation. It binds the vault, pin, exact
+request and local Add and Admission. Exact retries keep the same bytes.
+A torn or damaged optional file stays preserved and the original join
+can finish using its separate Pending and Welcome proofs.
+
+A cold A1 can use a verified saved peer identity to select the original
+founder's authenticated connection. The optional record carries only
+the signed zero-address reservation. A final file and its byte-identical
+Stage can survive an interrupted write and be read together. A Stage
+alone yields no hint. ID9 and A2 continue to require their own route
+proof. The ordinary startup path can open a row with no saved hint.
+The four-vault TCP regression recovers the original survivor before any
+invite-based reconnect. It proves the hint cannot authorize a poll by
+itself and that the next header is fetched once the connection is live.
+
+## Audit held posts while the original founder stays online
+
+After its first Add, the original founder can audit held posts and answer
+authenticated review header and approved-original requests on its live
+TCP actor. Both this actor and the recovered founder recheck the selected
+governing prefix and keep the held files through decision status lookup.
+Replacing a held file with an identical copy during that lookup removes
+the affected row and withholds the old statuses.
+
+The focused App run passed 12 tests. It exercised the same-session audit
+and a real checked empty-journal response after a warm Join, plus the
+four-vault restart, retained registration, changed-file and torn-stage
+cases.
+
+The same original founder can now fetch a removed member's exact signed
+Create from a current holder, retain it in Held posts and sign and select
+the requested decision. It verifies the selected Remove and ordinary
+reply ancestry. Both warm and recovered founders can retry an exact
+Attempt after the original native key cut confirms that signing did not
+start. A lost key result keeps the Attempt held.
+
+Five focused Windows App tests passed. The live TCP fixture checks stale
+reply refusal, two covered holds, and the real founder key on both sides
+of UI lock. It verifies that an old invocation can cover its admitted
+signature and that a fresh invocation selects those same bytes. A lost
+key result cannot sign again. The cold four-vault scenario and the
+original founder declaration cases passed on the same build.
+
+## Recover signed founder decisions on a joined vault
+
+The original joined source can cover public founder decision headers in an
+encrypted recipient journal. It reports the missing sequence for a gap,
+recognizes exact retries and preserves a signed contradiction before
+freezing that review lane. The ordinary chat archive keeps its own selector.
+An authenticated admission tag lets cold startup settle an interrupted
+metadata write from its original pin and exact write-ahead file.
+
+The first native join provisions the receiver after registering the
+original row and before publishing it. A pre-write capacity refusal can
+retry the same join. An interrupted catalog write requires cold recovery
+of that same vault. Native startup also provisions eligible recovered
+joined vaults. The first ID9 declaration preserves ID12. Existing ID9 vaults keep
+their exact catalog and require a separate migration for the receiver.
+A pending same-vault rejoin takes precedence over fresh receiver
+provisioning. The retired session can still finish its original catalog
+Stage against the same Current.
+
+The joined source can save the exact original named by a selected Approve.
+It first checks the signed header and case, the removed Admission and any
+reply parent from verified local history. It reports the missing header or
+reply parent so the caller can retry. The encrypted receipt has a separate
+action index. Exact retries and cold recovery preserve the selected copy
+without changing ordinary history.
+
+An exact joined history lookup can use the approved copy after a verified
+ordinary archive miss. It rechecks the receipt, original membership,
+Remove and any ordinary reply parent before producing the display. The
+original archive absence and receipt selection both stay current through
+publication. Joined history pages now discover retained approvals with a
+separate cursor and read each body through the exact guarded lookup.
+
+The joined desktop worker polls signed headers from the original founder
+connection. It resumes from the selected journal, occasionally rechecks
+the last header, and shares inventory turns with ordinary history. It
+uses the original route when that connection is already available.
+An existing A1 created before the optional record needs the original
+invitation to supply its peer identity.
+
+The joined worker also fetches exact approvals for its attached channel
+in bounded turns. It revisits a waiting reply without holding up later
+cases. The current row can refresh a covered post. A verified review
+freeze clears the current display and reloads ordinary history.
+The same guarded receipts are available after reopen or after returning
+to an inactive conversation.
+
+The recovered founder can see selected decision status in Held posts.
+The exact native decision command uses the original founder, held case and
+previous decision label. The dialog offers the permitted decision for the
+verified case and saves the exact request before sending it to native.
+A generic failure keeps that request for retry. Native can confirm that
+an already superseded request never reached admission, which lets the
+dialog clear the retry and show the current decision.
+
+A fresh native Found also covers the hold and decision catalogs before
+it publishes the original founder row. It keeps the same live TCP actor
+and rejects an older or replaced Current. Pre-write pressure can retry
+the original request. An interrupted write can need a cold reopen.
+
+Reconnect after explicit approval is covered for the original A1 row.
+Reconnection for ID9 and A2, migration of existing ID9 review journals,
+and combined acceptance remain open. The desktop Chat V2 switch remains off.
+
+The ordinary received archive still enforces a 2,048-record limit and
+a 256 MiB quota. Hot ledger rotation still reaches that durable limit.
+Long-lived acceptance must cover additional saves, revision reads and
+relay with bounded work while retaining the signed older operations.
+[Archive successor design](communication-recovery/CHAT-V2-SHARED-ARCHIVE-SUCCESSOR.md).
+
 ## View held posts in founder chat history
 
-The founder's Chat history dialog has a read-only Held posts view. It
+The founder's Chat history dialog has a Held posts view. It
 shows the exact signed originals that have a covered hold receipt and
 verified removal. Damaged or unwitnessed cases are reported as gaps.
 The scan describes surviving local files. If both files for a case
@@ -15,8 +171,8 @@ and row before releasing text.
 The App TCP fixture retrieves one withheld post through a survivor
 and reads it after a second founder restart. It verifies that ordinary
 chat cannot display the post and that audit refuses a replaced directory.
-The durable decision journal, application of approvals, first-session
-hold provisioning and final acceptance remain open.
+The founder journal retains each exact decision across both startup paths.
+Final acceptance remains open.
 
 ## Recover removed-member posts for founder review
 
@@ -54,6 +210,76 @@ The storage entry keeps the ordinary archive locked across the clean
 absence check and hold selection. An independently selected original
 keeps its place in history. First-session founder provisioning,
 signed decisions and the admin view remain open. Chat V2 remains disabled.
+
+Native startup extends a recovered founder's selected hold
+catalog with a decision journal. The authenticated empty head is covered
+before the catalog is selected. The original hold marker, joined pins
+and archive must still agree when cold recovery selects the catalog.
+Startup mounts the new catalog before exposing the founder. First-session
+provisioning for a newly created founder remains open.
+An ID10-only build refuses a vault once ID11 is selected.
+After selection, a missing or damaged decision marker or directory leaves
+ordinary chat available and review unavailable. Startup preserves the
+declared journal and any surviving files.
+The Windows cold fixture selects the original covered Stage after the
+hold marker is restored. Once the declaration is settled, an unexpected
+journal file stays on disk and stops review work. The founder row still
+opens. The old grammar was exercised in-process.
+
+The App can cover the first exact review signature on the original
+recovered founder. It retains one bounded retry in the same vault after
+a short write. A recovered complete file receives its own sync before
+the writer relies on it. The private result stays in the journal.
+Eleven focused App tests passed on Windows. The three-vault TCP fixture
+exercised retries before signing, exact recovery of a short write and
+a full reopen after a torn signature file. The torn file stays
+unchanged while the founder can read its roster and ordinary archive.
+The review operation can also check a covered signature against its
+original membership Header after a later Add. It still checks the exact
+current archive and held original, and uses the old Header only to
+verify the retained signature.
+
+The internal founder operation can select the first covered decision.
+An authenticated write-ahead file binds the exact signing files, the
+encrypted decision record, the intent and case indexes, and the next
+journal head. The writer syncs the record and both index pages before
+installing the head. An exact retry after installation rechecks the
+record and indexes, finishes retiring the signing files, and retires
+the write-ahead file last. The saved result can be read independently
+of the original hold file. Earlier authenticated first-decision files
+can still recover using their original controls. If the entire journal
+contents are lost, review refuses to create a new first decision.
+Ten focused Windows App regressions passed for this checkpoint. The
+TCP fixture reopens after head installation and partial input
+retirement, checks the original outcome with its hold file unavailable,
+and verifies ordinary founder recovery when all journal files are lost.
+The recovered founder can select later private decisions against the
+exact case revision. A saved intent is looked up before checking the
+current case tip, so retry can still return an earlier result. The
+write-ahead file covers both changed index paths and the record.
+Retirement proves obsolete index pages are unreachable. It keeps every
+original decision record. The two-case TCP fixture checks Reject, Reopen
+and Approve across cold reopens, an interrupted index retirement, and an
+exact retry of the earlier Reject. It also checks that a decision in
+one case leaves the other case's revision independent. Approval delivery,
+native admin controls and activation remain open.
+
+Fresh review signatures now cover the choice, the exact case predecessor
+and a commitment to the original and its Remove. This gives peers enough
+signed data to verify case transitions without reading rejected or
+reopened posts. Original version 1 signatures and old retries still use
+their exact saved bytes. An older private stream cannot seed the public
+one.
+
+The original founder can serve a covered header or approval over the
+connected dependency path. The joined source binds the original invite
+founder and live peer generation. It checks both the decision membership
+anchor and the approval's Remove against its selected prefix. The TCP
+fixture exchanges four headers across different open channels and shows
+that only the approved original is returned. Review reads and their
+bounded ancestry evidence are separate from ordinary membership selection.
+Durable recipient selection, ordinary projection and admin commands
+remain open. The Chat V2 switch is still off.
 
 ## Rejoin from the retired native session
 

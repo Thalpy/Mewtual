@@ -4,6 +4,11 @@ Native Chat V2 selected-message reads accept a Create ID and resolve its
 complete current archive snapshot. The body is withheld if the snapshot
 is incomplete, damaged or stale. Temporary resource pressure can be
 retried. Audit and discovery continuations remain paged.
+If selected ordinary history establishes an exact miss, a joined lookup
+can read the same Create ID from a covered approval receipt. The native
+reply uses the same message schema. The approval lookup also requires
+the correct channel and the still-selected receipt and governing history.
+Ordinary archive pages still enumerate their own selected operations.
 
 Chat V2 history discovery uses the existing connected dependency class with
 its own authenticated page format. The joined-source methods prepare a page
@@ -56,6 +61,18 @@ window. A page may advance beyond a damaged record. A 32-byte
 continuation token expires five minutes after publication and binds
 the original session, row, channel and audit revision. The renderer
 restarts at the first window when a continuation becomes stale.
+
+The original joined source can request a signed review header by group
+sequence, or a covered approval by sequence, signed entry ID and channel.
+This uses the original invite founder's current authenticated connection.
+The founder independently checks the requester's current signed member
+contact. Header reads use the inventory scheduling slot. The approval
+response carries the exact signed post and frozen Remove coordinates.
+An empty reply gives no durable conclusion about the stream. The joined
+worker uses the selected journal's next ordinal and may recheck its tip.
+It uses the already installed original founder route and retains no row
+permit across the network wait. Header coverage sends no renderer notice.
+An approval body still needs a separate exact request.
 
 The founder-only held-post storage entry accepts an exact original,
 the current verifier's removed-Create evidence and its host scope.
@@ -961,6 +978,36 @@ are authored and UNRUN during the compilation pause. [Contract and rollback limi
 
 ## Chat V2 review-decision data
 
+The original A1 registration can retain its pinned founder identity in a
+separate optional AEAD sidecar. Its fixed stage and record contain only the
+original zero-address reservation and exact registration scope, leaving all
+existing pin, Pending, invitation, Current, ID9 and ID12 formats unchanged.
+Registration attempts to cover it from the same parked outcome before native
+CAS, using create-new final output. Optional IO failure preserves its bytes
+and does not replace the independent Pending/Welcome registration proof or
+block registration. Cancellation still refuses the original publication.
+Cold A1 installs only an inert PeerId, with no host/IP or dial capability.
+The original signed commitment and selected local registration are rechecked;
+an unreadable optional file leaves ordinary startup available without a hint.
+A crash may leave final and Stage together: only byte-identical fully
+authenticated copies can supply the inert hint, and cold read repairs neither.
+An ID9/A2 owner never inherits this file's route interpretation.
+
+`remember_native_chat_founder_route` is a main-window command on the exact
+selected joined A1 row. It takes `server`, `expectedContext`, the original
+accepted `inviteHex`, and a user-approved numeric `approvedHost`. The
+accepted invite can be older than its join expiry because this starts no
+new join. The app saves an encrypted standing address only after observing
+the authenticated outbound socket to that exact signed TCP endpoint.
+If a live connection uses a different route, the app can preserve that
+connection and decline to remember the new endpoint.
+`forget_native_chat_founder_route` takes only `server` and
+`expectedContext`. It revokes pending retries before covering a clear in
+the same optional file. Both commands return JSON null on success.
+`get_native_chat_members` advertises the A1 control with
+`canRememberFounderRoute`; each mutation still checks the original
+registration, current membership, source and UI generation.
+
 `owner_bodies::ReviewDecisionBody` binds one complete target, stable case ID, intent nonce, decision
 and exact previous body ID in at most665bytes. It checks data transitions and actual action/header
 signatures, not selected-current case state or owner/root provenance. A later selected Approve can
@@ -970,8 +1017,60 @@ Remove Header and epoch. Its predecessor is the previous exact wrapper body ID. 
 rederived reply ancestry under the current verifier. `ReviewStreamEntry` supplies the separately
 signed position and exact membership anchor, using the pinned founder key. The audit record
 proof can recheck the signed original and frozen removal without evaluating parent readiness
-or storage durability. Stream selection, durable decisions and native commands remain to be
-implemented. [Exact contract](communication-recovery/CHAT-OWNER-V2-REVIEW-DECISION.md).
+or storage durability. The internal ID11 declaration consumes a verified founder's ID10
+catalog and keeps all preceding descriptors exact. Native founder startup covers
+each missing declaration and reopens the selected catalog before exposing a source.
+Once the journal is selected, its separately
+classified transaction files can refuse review without changing the original
+founder history path. The initial review request names the exact expected case, original digest,
+Remove and stable intent. The original recovered member source can cover its first
+signature through a dedicated native key cut. The exact retained signature can be
+recovered after a later membership change if its original Header is still in the
+selected lineage. A separate Rust operation selects the first private decision after
+covering its authenticated write-ahead file, exact record and journal head. The
+head commits separate intent and case indexes. A fresh first review starts at
+the authenticated empty head covered by the declaration. A later request binds
+the exact previous case decision and the original encrypted journal head.
+The held-post audit also returns an independently guarded current status
+of unavailable, proven undecided, or selected with its exact
+decision-body ID, public stream-entry ID and choice. This read uses the
+selected keyed Case index and retains its paid native file evidence through
+the combined hold and decision publication guard. A missing or damaged
+required case proof, legacy status, or an interrupted transaction leaves
+the held original readable with unavailable decision status. The audit
+does no signing or repair.
+After the first selected Add, the same audit and connected public review
+reply routes accept the original mounted warm founder. The warm writer
+rechecks its selected membership and exact retained predecessors before
+serving a historical decision anchor.
+The original mounted founder can also fetch and hold the exact removed
+Create through an approved peer connection. It uses the same protected
+ReviewDecision purpose and private transaction as a recovered founder.
+The native recovered-founder operation supports independent cases and
+Reject, Reopen and Approve transitions. Exact retry looks up the original
+intent before consulting the latest case. The main-window
+`decide_native_chat_held_post` command binds the original row, channel, case,
+action, signed-original digest, Remove, choice, previous decision-body ID
+and a 16-byte intent. Its response describes that exact saved decision.
+The history view can approve or reject an undecided or reopened case and
+reopen a rejected case. It seals the exact request in critical4 before
+invocation. Only a matching saved result or an authenticated no-admission
+response can retire that request.
+Joined callers can select a
+checked public header from the original connected response. The recipient
+journal reports a covered header, duplicate, missing predecessor or frozen
+review lane. An exact approved body is available over the founder route.
+The joined recipient can save the original as an encrypted review receipt
+after the selected header, historical Remove and reply parent agree. Its
+result distinguishes saved, duplicate, waiting for a header, waiting for a
+reply parent and frozen. Exact-ID display requires an independent guarded
+lookup. The joined worker scans approved headers for its attached channel
+and can refresh an active view after a receipt is selected. The separate
+`reviewedAfter` history cursor is opaque, scoped to the original joined row
+and channel, and valid for the selected approval root. Every exact body
+read checks ordinary history first. A stale cursor restarts review history
+while the ordinary cursor continues.
+[Exact contract](communication-recovery/CHAT-OWNER-V2-REVIEW-DECISION.md).
 
 ## Guarded current chat projection core (5 November; authored, unexecuted)
 

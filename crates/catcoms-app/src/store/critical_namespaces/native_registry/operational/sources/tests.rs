@@ -118,6 +118,22 @@ fn selected_governed_or_joined(
     path: &std::path::Path,
     joined: bool,
 ) -> (NativeTextVault, NativeUiInvocationBudget) {
+    selected_with_ui(
+        path,
+        joined,
+        (
+            Arc::new(AtomicU64::new(7)),
+            Arc::new(AtomicU64::new(7)),
+            Arc::new(AtomicBool::new(false)),
+        ),
+    )
+}
+
+pub(super) fn selected_with_ui(
+    path: &std::path::Path,
+    joined: bool,
+    (generation, authorized, locked): (Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicBool>),
+) -> (NativeTextVault, NativeUiInvocationBudget) {
     use crate::store::critical_namespaces::native_registry::preparation::tests::{
         current_policy, SECRET,
     };
@@ -157,9 +173,9 @@ fn selected_governed_or_joined(
     .unwrap();
     let mut upgrade = crate::store::NativeTextVaultUpgrade::prepare(
         index.into_index_store().unwrap(),
-        Arc::new(AtomicU64::new(7)),
-        Arc::new(AtomicU64::new(7)),
-        Arc::new(AtomicBool::new(false)),
+        generation,
+        authorized,
+        locked,
         budget.clone(),
     )
     .unwrap();

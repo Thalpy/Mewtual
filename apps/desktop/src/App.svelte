@@ -1,6 +1,7 @@
 <script lang="ts">
   import ChatAdminLedger from "./ChatAdminLedger.svelte";
   import NativeTextAudit from "./NativeTextAudit.svelte";
+  import NativeTextFounderRoute from "./NativeTextFounderRoute.svelte";
   import type { LedgerReads } from "./chat-admin-ledger.ts";
   import { memberRole, identityForRoleLabel } from "./member-role.ts";
   import { invoke } from "@tauri-apps/api/core";
@@ -213,10 +214,10 @@
     type ModerationEvent, type ModerationState, type TimelineMessage,
   } from "./moderation";
   import { MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
-  import type { NativeTextIntent, NativeTextIntents } from "./native-text-intents";
-  import { createNativeTextDriver } from "./native-text-driver";
+  import type { NativeReviewChoice, NativeTextIntent, NativeTextIntents, NativeTextReviewIntent } from "./native-text-intents";
+  import { createNativeTextDriver, type NativeReviewDisposition } from "./native-text-driver";
   import { decodeNativeMembershipNotice, decodeRestoredChatSession, type NativeTextServer } from "./native-text-session";
-  import { decodeNativeReceived, decodeNativeReceivedNotice, isNativeHistoryBusy, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived, type NativeOriginal, type NativeOwnMessage, type NativeReceived } from "./native-text-history";
+  import { decodeNativeReceived, decodeNativeReceivedNotice, isNativeHistoryBusy, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, readNativeReviewedArchive, updateNativeReceived, type NativeHeldPost, type NativeHistoryTarget, type NativeOriginal, type NativeOwnMessage, type NativeReceived } from "./native-text-history";
   import NativeSavedChat from "./NativeSavedChat.svelte";
   import {
     captureLockContinuity, closeContinuityAcknowledgement, NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
@@ -401,8 +402,9 @@
   const nativeReceivedReads = new Map<string, { dirty: boolean; current: () => boolean; read: () => Promise<void> }>();
   let nativeReceivedPump: Promise<void> | null = null;
   let nativeArchive = $state.raw<{
-    server: number; channel: string; context: string; items: NativeReceived[];
-    after: string | null; more: boolean; loading: boolean; note: string | null;
+    server: number; channel: string; context: string; items: NativeReceived[]; reviewed: NativeReceived[];
+    after: string | null; more: boolean; reviewedAfter: string | null | undefined;
+    loading: boolean; note: string | null;
   } | null>(null);
   let nativeArchiveRevision = 0;
   let nativeArchiveFirstPage = $state(false);
@@ -414,6 +416,7 @@
   let nativeHistoryError = $state<string|null>(null);
   let nativeHistoryRevision = 0;
   let nativeRetryGeneration = $state<number|null>(null);
+  let nativeReviewGeneration: number | null = null;
   let activeServerId = $state<number | null>(null);
   // Bumped by every move that changes WHICH group the panes show. An async refresh captures it
   // on entry and re-checks after its awaits: a slow answer from the group you just left must
@@ -3637,7 +3640,7 @@
   $effect(() => {
     pendingSendRetry.update(
       !locked && uiStateReady && !windowCloseInFlight ? uiStateLoadGeneration : null,
-      chatBackend==="text-v2" ? Object.values(nativeTextIntents).some(nativeIntentCanRetry) : Object.values(pendingSends).some(intent => !quarantinedPendingIntent(intent) && (intent.resolution || !intent.retryBlock)),
+      chatBackend==="text-v2" ? Object.values(nativeTextIntents).some(intent => intent.kind !== "review" && nativeIntentCanRetry(intent)) : Object.values(pendingSends).some(intent => !quarantinedPendingIntent(intent) && (intent.resolution || !intent.retryBlock)),
       sending || (chatBackend==="text-v2" ? nativeHistoryLoading || nativeOwnLoading || busy || nativeRetryGeneration===uiStateLoadGeneration : retryingPendingSends || pendingManagerOpen || pendingSendResolution !== null),
     );
   });
@@ -4543,7 +4546,7 @@
     }
   }
   type NativeRosterMember = Member & { admission: string; founder: boolean };
-  type NativeRoster = { members: NativeRosterMember[]; canRemove: boolean };
+  type NativeRoster = { members: NativeRosterMember[]; canRemove: boolean; canRememberFounderRoute?: boolean };
   type NativeRosterSnapshot = NativeRoster & { server: number; mount: number; failure: string; loading: boolean };
   let nativeRoster = $state<NativeRosterSnapshot | null>(null);
   let nativeRosterRequest = 0;
@@ -4556,6 +4559,9 @@
   let nativeContactStatus = $state("");
   let nativeContactBusy = $state(false);
   let nativeRemovedContexts = $state<Record<number, string>>({});
+  function canUseNativeFounderRoute() {
+    return !locked && !uiSessionRetired && uiStateReady && !windowCloseInFlight;
+  }
   async function refreshNativeMembers(server: number, generation: number, mount = chatLedgerMount) {
     if (cur?.backend !== "text-v2") return;
     const expectedContext = cur.context;
@@ -7141,17 +7147,56 @@
       replace:next=>{if(!current())throw new Error("The chat session changed.");nativeTextIntents=next;uiContinuityVersion=4;},
       seal:()=>queueUiStateSave(()=>{if(!current())throw new Error("The chat session changed.");return continuityJson();}),
       current,
-      mayDispatch: nativeIntentCanRetry,
+      mayDispatch: intent => nativeIntentCanRetry(intent) && (intent.kind !== "review" || nativeReviewCurrent(intent.server, intent.channel, intent.expectedContext)),
       token:()=>Array.from(crypto.getRandomValues(new Uint8Array(32)),byte=>byte.toString(16).padStart(2,"0")).join(""),
       invoke:async(command,args)=>{
         if(command==="found_server")return(await invokeDebugged<unknown>("found_server",args)).value;
         if(command==="send_message")return(await invokeDebugged<unknown>("send_message",args)).value;
         if(command==="edit_message")return(await invokeDebugged<unknown>("edit_message",args)).value;
         if(command==="delete_message")return(await invokeDebugged<unknown>("delete_message",args)).value;
+        if(command==="decide_native_chat_held_post")return await invoke<unknown>("decide_native_chat_held_post",args);
         throw new Error("Unsupported native chat request.");
       },
       sealed:()=>sealed?.(),
     });
+  }
+  function nativeReviewCurrent(server: number, channel: string, context: string): boolean {
+    return !locked && uiStateReady && !uiSessionRetired && !windowCloseInFlight
+      && activeServerId === server && cur?.backend === "text-v2" && cur.active === channel
+      && cur.context === context && !nativeConversationRemoved(server, context);
+  }
+  function pendingNativeReview(server: number, channel: string, context: string): NativeTextReviewIntent | null {
+    return Object.values(nativeTextIntents).find((item): item is NativeTextReviewIntent =>
+      item.kind === "review" && item.server === server && item.channel === channel && item.expectedContext === context) ?? null;
+  }
+  // Navigation can mount a second history dialog while the first still
+  // owns native dispatch or the continuity write that retires its intent.
+  async function runNativeReview(
+    target: NativeHistoryTarget,
+    invokeOriginal: (session: number) => Promise<{ status: NativeReviewDisposition } | null>,
+  ): Promise<NativeReviewDisposition | null> {
+    const session = uiStateLoadGeneration;
+    if (nativeReviewGeneration === session || !nativeReviewCurrent(target.server, target.channel, target.context)) return null;
+    nativeReviewGeneration = session;
+    try {
+      const result = await invokeOriginal(session);
+      return result?.status ?? null;
+    } finally {
+      if (nativeReviewGeneration === session) nativeReviewGeneration = null;
+    }
+  }
+  async function decideNativeHeldPost(target: NativeHistoryTarget, item: NativeHeldPost, choice: NativeReviewChoice) {
+    const { server, channel, context } = target;
+    const previousDecision = item.decision.status === "selected" ? item.decision.decisionBodyId : null;
+    return runNativeReview(target, session => nativeTextDriver(session).decideReview({
+      server, channel, expectedContext: context, caseId: item.caseId, action: item.action,
+      originalDigest: item.originalDigest, removalHeader: item.removalHeader, removalEpoch: item.removalEpoch,
+      previousDecision, choice,
+    }));
+  }
+  async function retryNativeHeldDecision(intent: NativeTextReviewIntent) {
+    return runNativeReview({ server: intent.server, channel: intent.channel, context: intent.expectedContext },
+      session => nativeTextDriver(session).retryReview(intent));
   }
   function installNativeServer(row:NativeTextServer) {
     const previous=servers.find(server=>server.id===row.server);
@@ -7179,7 +7224,7 @@
     try {
       for(const intent of Object.values(nativeTextIntents)) {
         if(locked || session!==uiStateLoadGeneration || windowCloseInFlight || chatBackend!=="text-v2")return;
-        if(!nativeTextIntents[intent.token] || !nativeIntentCanRetry(intent))continue;
+        if(intent.kind==="review" || !nativeTextIntents[intent.token] || !nativeIntentCanRetry(intent))continue;
         try {
           if(intent.kind==="found") {
             // Only open a recovered first group while this original empty-view
@@ -7334,6 +7379,7 @@
       nativeArchive = {
         ...nativeArchive,
         items: nativeArchive.items.filter(item => item.action !== action),
+        reviewed: nativeArchive.reviewed.filter(item => item.action !== action),
       };
     }
     if (nativeReceivedScope?.server === server && nativeReceivedScope.channel === channel && nativeReceivedScope.context === context) {
@@ -7436,7 +7482,8 @@
       && !nativeConversationRemoved(server, context);
     const base = append && nativeArchive?.server === server && nativeArchive.channel === channel && nativeArchive.context === context
       ? nativeArchive : null;
-    const previous = { server, channel, context, items: base?.items ?? [], after: base?.after ?? null, more: base?.more ?? false };
+    const previous = { server, channel, context, items: base?.items ?? [], after: base?.after ?? null, more: base?.more ?? false,
+      reviewed: base?.reviewed ?? [], reviewedAfter: base ? base.reviewedAfter : null };
     const changed = new Set<string>();
     nativeArchiveReadChanges = changed;
     // An invalidated page loses visible ownership immediately. Its physical
@@ -7445,7 +7492,7 @@
     nativeArchive = { ...previous, note: null, loading: true };
     try {
       let retries = 3;
-      const page = await readNativeReceivedArchive(async (_command, args) => {
+      const invokePage = async (_command: string, args: Record<string, unknown>) => {
         while (current()) {
           try { return await invoke<unknown>("get_message_page", args); }
           catch (failure) {
@@ -7454,28 +7501,56 @@
           }
         }
         return null;
-      }, { server, channel, context }, current, previous.after);
-      if (!page || !current()) return;
-      const covered = new Set(page.covered.filter(action => !changed.has(action)));
+      };
+      const target = { server, channel, context };
+      const page = !base || previous.more
+        ? await readNativeReceivedArchive(invokePage, target, current, previous.after)
+        : null;
+      if (!current()) return;
+      let reviewed: Awaited<ReturnType<typeof readNativeReviewedArchive>> = null;
+      let reviewFailed = false;
+      let resetReviewed = false;
+      if (previous.reviewedAfter !== undefined) {
+        try {
+          reviewed = await readNativeReviewedArchive(invokePage, target, current, previous.reviewedAfter);
+          if (reviewed?.status === "stale" && previous.reviewedAfter !== null) {
+            resetReviewed = true;
+            reviewed = await readNativeReviewedArchive(invokePage, target, current, null);
+          }
+        } catch { reviewFailed = true; }
+      }
+      if (!current()) return;
+      const ordinaryCovered = new Set(page?.covered ?? []);
+      const reviewedCovered = new Set(reviewed?.covered ?? []);
+      const covered = new Set([...ordinaryCovered, ...reviewedCovered].filter(action => !changed.has(action)));
       for (const action of covered) nativeReceivedReads.delete(action);
       if (nativeReceivedScope?.server === server && nativeReceivedScope.channel === channel && nativeReceivedScope.context === context) {
         nativeReceived = nativeReceived.filter(item => !covered.has(item.action));
       }
-      const note = page.blocked ? "Saved received messages could not be loaded. Try again."
-        : !page.available ? "Saved received messages are unavailable for this group."
-        : page.incomplete ? "Some saved received messages could not be loaded."
+      const note = page?.blocked ? "Saved received messages could not be loaded. Try again."
+        : page && !page.available ? "Saved received messages are unavailable for this group."
+        : page?.incomplete ? "Some saved received messages could not be loaded."
+        : reviewFailed || reviewed?.blocked || reviewed?.incomplete ? "Some approved posts could not be loaded."
         : null;
+      const reviewedBase = resetReviewed || reviewed?.status === "unavailable" ? [] : previous.reviewed;
+      const reviewedAfter = reviewed?.status === "unavailable" ? undefined
+        : reviewed?.status === "current" && !reviewed.blocked ? reviewed.next ?? undefined
+        : resetReviewed ? null : previous.reviewedAfter;
       nativeArchive = {
         ...previous,
-        items: [...previous.items.filter(item => !covered.has(item.action)), ...page.items]
+        items: [...previous.items.filter(item => !ordinaryCovered.has(item.action)), ...(page?.items ?? [])]
           .filter(item => !changed.has(item.action)).slice(-64),
-        after: page.blocked ? previous.after : page.ids.at(-1) ?? previous.after,
-        more: page.blocked ? previous.more : page.more,
+        reviewed: [...reviewedBase.filter(item => !reviewedCovered.has(item.action) && !ordinaryCovered.has(item.action)), ...(reviewed?.items ?? [])]
+          .filter(item => !changed.has(item.action)).slice(-64),
+        reviewedAfter,
+        after: !page || page.blocked ? previous.after : page.ids.at(-1) ?? previous.after,
+        more: !page || page.blocked ? previous.more : page.more,
         note,
         loading: false,
       };
     } catch {
-      if (current()) nativeArchive = { ...previous, items: previous.items.filter(item => !changed.has(item.action)), note: "Saved received messages could not be loaded. Try again.", loading: false };
+      if (current()) nativeArchive = { ...previous, items: previous.items.filter(item => !changed.has(item.action)),
+        reviewed: previous.reviewed.filter(item => !changed.has(item.action)), note: "Saved received messages could not be loaded. Try again.", loading: false };
     } finally {
       if (nativeArchiveReadChanges === changed) nativeArchiveReadChanges = null;
       nativeArchiveReading = false;
@@ -28924,7 +28999,10 @@
         {#if cur?.backend === "text-v2" && nativeSelectedRemoved}
           <p class="muted" role="status">You were removed from this conversation.</p>
         {:else if cur?.backend === "text-v2"}
-          {@const archive = nativeArchive !== null && nativeArchive.server === activeServerId && nativeArchive.channel === cur.active && nativeArchive.context === cur.context ? nativeArchive : null}
+          {@const archive = nativeArchive !== null && nativeArchive.server === activeServerId && nativeArchive.channel === cur.active && nativeArchive.context === cur.context
+            ? { ...nativeArchive, more: nativeArchive.more || nativeArchive.reviewedAfter !== undefined,
+                items: [...new Map([...nativeArchive.reviewed, ...nativeArchive.items].map(item => [item.action, item])).values()] }
+            : null}
           <button type="button" class="ghost small sb-members" aria-expanded={membersOpen} aria-controls="native-member-list" onclick={toggleMembers}>
             {membersOpen ? "Hide members" : "Show members"}
           </button>
@@ -30815,7 +30893,9 @@
             {#if snapshot.members.some((member) => member.you && member.founder)
               && cur.context && activeServerId !== null && !locked && uiStateReady && !windowCloseInFlight}
               {#key `${activeServerId}:${cur.context}:${cur.active}:${chatLedgerMount}`}
-                <NativeTextAudit server={activeServerId} channel={cur.active} context={cur.context} />
+                <NativeTextAudit server={activeServerId} channel={cur.active} context={cur.context}
+                  pendingReview={pendingNativeReview(activeServerId, cur.active, cur.context)}
+                  onReview={decideNativeHeldPost} onRetryReview={retryNativeHeldDecision} />
               {/key}
             {/if}
             {#if snapshot.members.some((member) => member.you && !member.founder)}
@@ -30831,6 +30911,12 @@
               </form>
               <button type="button" class="ghost small" disabled={nativeContactBusy} onclick={() => void useNativeContact("forget")}>Forget saved contacts</button>
               {#if nativeContactStatus}<p class="small" role="status">{nativeContactStatus}</p>{/if}
+            {/if}
+            {#if snapshot.canRememberFounderRoute && cur.context && activeServerId !== null
+              && !locked && uiStateReady && !windowCloseInFlight}
+              {#key `${activeServerId}:${cur.context}:${chatLedgerMount}`}
+                <NativeTextFounderRoute server={activeServerId} context={cur.context} isUiLive={canUseNativeFounderRoute} />
+              {/key}
             {/if}
           {/if}
           <button type="button" class="ghost small" disabled={snapshot?.loading || !!removingNativeAdmission} onclick={() => { if (activeServerId !== null) void refreshNativeMembers(activeServerId, viewGeneration); }}>Refresh members</button>

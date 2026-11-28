@@ -15,6 +15,31 @@ offered original on the same approved connection. It will revisit a deferred
 entry when the required ancestors are available.
 [Chat V2 discovery flow](communication-recovery/CHAT-V2-ORDINARY-MEMBER-PATH.md#discovering-missed-originals-from-a-joined-member).
 
+The disabled Chat V2 path can exchange one founder review header or one
+covered approval over the current authenticated connection. Header reads
+use a group-wide exporter and proceed across the founder's open channels.
+An approval additionally names the post's channel and exact entry. The
+original founder retains Reject and Reopen bodies. The joined source
+checks the decision's exact membership anchor and the approval's Remove
+against its own selected prefix. A founder can reopen its own selected
+outbox to verify a reply parent after restart. A joined receiver covers the
+exact approved original after its public case and ordinary reply ancestry
+are verified. This receipt leaves ordinary history unchanged.
+An exact joined history lookup with a verified ordinary archive miss can
+read the covered approval and render it through the original native
+source. A separate bounded history cursor discovers the selected review
+receipt IDs for that conversation, including after reopen. Each ID still
+requires its own exact guarded body read.
+When the original founder connection is available, the joined worker
+polls the next selected header and occasionally rechecks the current tip.
+This shares a single inventory slot with ordinary discovery. Exact
+ordinary history requests retain their own lower slot.
+An A1 joined desktop can restore that connection from its explicit saved
+founder address. It uses the signed original peer and TCP port, rechecks
+live membership, then releases its local row permit before dialing.
+The original invitation and normal Join alone retain only the peer hint.
+[Review flow](communication-recovery/CHAT-OWNER-V2-REVIEW-DECISION.md#founder-review-stream).
+
 Security prerequisite: an incoming subscription retries retained publication
 only for its exact canonical topic. Other retained originals preserve their
 ownership/order and normal periodic retry; wire and delivery claims below are

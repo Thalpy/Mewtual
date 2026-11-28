@@ -24,6 +24,8 @@ pub struct PreparedV2FounderAddInstall<'a> {
     invite_nonce: [u8; 16],
     founder: OwnerFactId,
     member: &'a mut Option<V2AuthenticatedAdmission>,
+    original_native: &'a NativeChatSourceObservation,
+    native_origin: &'a mut Option<NativeChatSourceObservation>,
     core_retired: &'a mut Option<V2GeneralRetiredData>,
     sdk_retired: &'a mut Option<RetiredTextCurrentAdd>,
 }
@@ -113,6 +115,8 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2FounderGovernanceNode<T, R> {
                 invite_nonce,
                 founder,
                 member: &mut self.member,
+                original_native: &p.original,
+                native_origin: &mut self.native_origin,
                 core_retired: &mut p.retired_core,
                 sdk_retired: &mut p.retired_sdk,
             },
@@ -178,6 +182,7 @@ impl PreparedV2FounderAddInstall<'_> {
         *self.installed_invite = Some(self.invite_nonce);
         if let Some(founder) = first_member {
             *self.member = Some(founder);
+            *self.native_origin = Some(self.original_native.clone());
         }
         Ok(())
     }

@@ -49,6 +49,9 @@ pub(super) struct Entry {
     pub(super) state: ActionState,
     pub(super) authority: Option<VerifiedAuthorityBasis>,
     pub(super) local_ancestry: Option<projection_admission::V2LocalAncestry>,
+    // A reviewed original can acquire semantic state before its display
+    // token. That state alone must not supply ordinary causal authority.
+    pub(super) reviewed_only: bool,
     // At most one constant-size normalized approval for this already imported action. There
     // is no unknown-action cache or unbounded collection of equivalent proof representations.
     delete_approval: Option<VerifiedDeleteApproval>,
@@ -175,6 +178,15 @@ impl ChatLedger {
                 return Err(ChatError::Malformed);
             }
             if action.signature() < entry.action.signature() {
+                // A reviewed detached projection is bound to one exact
+                // signature. Replacing it here would bypass the projection
+                // writer and allow an already captured body to outlive it.
+                if entry.projection.as_ref().is_some_and(|token| {
+                    self.projection
+                        .protects_reviewed_signature(token, id, &entry.action)
+                }) {
+                    return Err(ChatError::AuthorityConflict);
+                }
                 // The selected archive may have retained another original
                 // signature for these same semantic bytes.
                 entry.local_ancestry = None;
@@ -201,6 +213,7 @@ impl ChatLedger {
                 state: ActionState::Pending(PendingReason::Authority),
                 authority: None,
                 local_ancestry: None,
+                reviewed_only: false,
                 delete_approval: None,
                 projection: None,
                 prior_delete: None,

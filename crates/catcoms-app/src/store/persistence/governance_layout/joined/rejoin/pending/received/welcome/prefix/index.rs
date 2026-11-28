@@ -5,6 +5,7 @@ use crate::store::critical_namespaces::native_registry::PreparedNativeRejoinInde
 use crate::store::NativeTextJoinedRegistryRowData;
 
 mod installed;
+use crate::store::persistence::governance_layout::joined::rejoin::pending::replay_catalog::InstalledCatalogWitness;
 pub(in crate::store) use installed::InstalledRejoin;
 
 const INDEX: &str = "chat-critical-namespaces.rejoin-native-index.bin";
@@ -93,11 +94,13 @@ impl ServerStore {
         require_current: impl Fn() -> Result<(), AppError>,
     ) -> Result<NativeTextRejoinIndexReceipt, AppError> {
         self.select_rejoin_index(
-            inventory,
-            original,
+            RejoinReadCatalog::Current {
+                inventory,
+                original,
+            },
             sources,
             invite,
-            (rng, None, false),
+            (rng, None),
             require_current,
         )
     }
@@ -109,14 +112,50 @@ impl ServerStore {
         &self,
         inventory: &UpgradeInventory,
         original: (NativeTextJoinedRegistrationData, SelectedRejoinRemoval),
-        (pending, received, welcome, prefix, slot): RejoinIndexRecovery<'_>,
+        sources: RejoinIndexRecovery<'_>,
         caller: &RequestCancellation,
         rng: &mut impl CryptoRngCore,
         require_current: impl Fn() -> Result<(), AppError>,
     ) -> Result<NativeTextRejoinIndexReceipt, AppError> {
+        self.recover_rejoin_index_with_catalog(
+            inventory,
+            original,
+            sources,
+            caller,
+            rng,
+            require_current,
+        )
+        .map(|(receipt, _)| receipt)
+    }
+
+    fn recover_rejoin_index_with_catalog(
+        &self,
+        inventory: &UpgradeInventory,
+        original: (NativeTextJoinedRegistrationData, SelectedRejoinRemoval),
+        (pending, received, welcome, prefix, slot): RejoinIndexRecovery<'_>,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+        require_current: impl Fn() -> Result<(), AppError>,
+    ) -> Result<(NativeTextRejoinIndexReceipt, InstalledCatalogWitness), AppError> {
+        require_current()?;
+        const CLOSED_ROLES: [(&str, usize); 7] = [
+            (ATTEMPT, MAX_ATTEMPT),
+            (PENDING, MAX_PENDING),
+            (RECEIVED, MAX_FRAME),
+            (SDK_ATTEMPT, ATTEMPT_MAX),
+            (OUTCOME, OUTCOME_MAX),
+            (PREFIX, MAX_PREFIX),
+            (INDEX, INDEX_FRAME),
+        ];
+        let replay = InstalledReplayCatalog::capture(self, inventory, original, CLOSED_ROLES)?;
+        let catalog = RejoinReadCatalog::Installed(&replay);
         require_current()?;
         let path = fixed(self, false, INDEX)?;
         let captured = if let Some(owner) = slot.as_ref() {
+            let _ = owner
+                .record
+                .held
+                .replay_file(catalog, INDEX, &owner.record.frame)?;
             owner.record.require(&path)?;
             None
         } else {
@@ -130,19 +169,19 @@ impl ServerStore {
                 .pool;
             let fee = pool.try_reserve(INDEX_WORK)?;
             let record = read(&path, INDEX_FRAME)?.ok_or_else(denied)?;
+            catalog.require_leaf(INDEX, (&record.0, &record.1))?;
             let key = Zeroizing::new(self.keys.db_key()?);
             // Refuse an incomplete or foreign record before replaying the
             // original SDK and Core data. Exact successor proof follows.
             open_frame(&key, INDEX_TAG, &record.1)?;
             Some((record, fee))
         };
-        let (attempt, token) = self.recover_saved_rejoin_intent(inventory, original, pending)?;
+        let (attempt, token) = self.recover_saved_rejoin_intent(&replay, pending)?;
         let (_, invite) = decode_saved_attempt(&attempt)?;
         let intent = (&invite, token);
         let pending = pending.as_ref().ok_or_else(denied)?;
-        self.cover_rejoin_received(
-            inventory,
-            original,
+        self.select_rejoin_received(
+            catalog,
             (pending, received),
             intent,
             RejoinReceivedInput::LocalRetry,
@@ -152,9 +191,8 @@ impl ServerStore {
         .ok_or_else(denied)?;
         let received = received.as_ref().ok_or_else(denied)?;
         if !matches!(
-            self.cover_rejoin_welcome(
-                inventory,
-                original,
+            self.select_rejoin_welcome(
+                catalog,
                 (pending, received, welcome),
                 intent,
                 (None, caller),
@@ -166,33 +204,34 @@ impl ServerStore {
             return Err(denied());
         }
         let welcome = welcome.as_deref_mut().ok_or_else(denied)?;
-        self.select_rejoin_index(
-            inventory,
-            original,
+        let selected = self.select_rejoin_index(
+            catalog,
             ((pending, received, welcome, prefix), slot),
             intent,
-            (rng, captured, true),
-            require_current,
-        )
+            (rng, captured),
+            &require_current,
+        )?;
+        replay.require(self)?;
+        require_current()?;
+        Ok((selected, replay.into_witness()))
     }
 
     fn select_rejoin_index<R: CryptoRngCore>(
         &self,
-        inventory: &UpgradeInventory,
-        original: (NativeTextJoinedRegistrationData, SelectedRejoinRemoval),
+        catalog: RejoinReadCatalog<'_>,
         sources: RejoinIndexInputs<'_>,
         invite: (&NativeTextInvitePacketData<'_>, [u8; 32]),
-        (rng, captured, existing_only): (
+        (rng, captured): (
             &mut R,
             Option<(OpenedArchiveObject, CatalogReadReservation)>,
-            bool,
         ),
         require_current: impl Fn() -> Result<(), AppError>,
     ) -> Result<NativeTextRejoinIndexReceipt, AppError> {
         let ((pending, received, welcome, prefix), slot) = sources;
+        let (inventory, original) = catalog.parts();
+        let existing_only = catalog.existing_only();
         let expected = self.select_rejoin_prefix(
-            inventory,
-            original,
+            catalog,
             (pending, received, &mut *welcome, &mut *prefix),
             invite,
             (!existing_only).then_some(&mut *rng),
@@ -260,8 +299,7 @@ impl ServerStore {
         let owner = slot.as_mut().ok_or_else(denied)?;
         let mut require = |prefix: &mut Option<Box<RejoinPrefixOwner>>| {
             let current = self.select_rejoin_prefix(
-                inventory,
-                original,
+                catalog,
                 (pending, received, &mut *welcome, prefix),
                 invite,
                 None::<&mut R>,
@@ -281,7 +319,7 @@ impl ServerStore {
             &selected,
         )?;
         require(prefix)?;
-        owner.record.cover(&path)?;
+        owner.record.cover_bound(&path, catalog, INDEX)?;
         inventory.sync_rejoin_catalog_parent(self)?;
         require(prefix)?;
         owner.record.require(&path)?;

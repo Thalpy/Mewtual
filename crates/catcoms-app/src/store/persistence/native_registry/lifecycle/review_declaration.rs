@@ -22,7 +22,8 @@ impl ReviewDeclarationInventory {
         store: &ServerStore,
         pool: &critical::read_pool::CriticalCatalogReadPool,
     ) -> Result<Self, AppError> {
-        let fee = pool.try_reserve(REVIEW_INVENTORY_FEE)?;
+        let fee =
+            pool.try_reserve_classified(REVIEW_INVENTORY_FEE, || AppError::ChatV2RegistryBusy)?;
         let value = Self {
             expected: ExpectedCurrentInputs::capture(store, &fee, pool)?,
             base: operational::IndexSnapshot::capture_lifecycle_inventory(store)?,

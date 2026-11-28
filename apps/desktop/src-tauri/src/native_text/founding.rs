@@ -350,6 +350,9 @@ async fn run_setup_step<T: Send + 'static>(
                 // The completed job returned its original runtime and all guards.
                 SystemClock.sleep(Duration::from_millis(25)).await;
             }
+            Err(NativeTextCreationRefusal::ReviewCatalogReopen) => {
+                return Err("Reopen the vault to finish setting up held posts.".to_owned());
+            }
             Err(error) => {
                 #[cfg(test)]
                 eprintln!("Native founder {_name} failed: {error:?}");
@@ -367,13 +370,14 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<Output, St
     }
     // Each consuming call restores the same whole runtime before acquisition.
     // Only explicit contention retries the current step, with its original data.
-    let steps: [(_, fn(CreationJob) -> _); 6] = [
+    let steps: [(_, fn(CreationJob) -> _); 7] = [
         ("device preparation", CreationJob::prepare_device),
         ("network preparation", CreationJob::prepare_network),
         ("pending network save", CreationJob::cover_pending_network),
         ("transport preparation", CreationJob::prepare_transport),
         ("founder preparation", CreationJob::prepare_founder),
         ("activation save", CreationJob::cover_founder_activation),
+        ("review storage", CreationJob::cover_founder_review_storage),
     ];
     for (name, step) in steps {
         run_setup_step(state, invocation, name, step).await?;
@@ -382,7 +386,7 @@ async fn execute(state: &AppState, invocation: &Invocation) -> Result<Output, St
         state,
         invocation,
         "stored row selection",
-        CreationJob::select_stored_runtime,
+        CreationJob::select_stored_review_runtime,
     )
     .await?;
     let context = founder.context_data();

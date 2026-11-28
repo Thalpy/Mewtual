@@ -3,6 +3,7 @@ use super::{SharedHistoryScope, SharedHistoryTargetSnapshot, MAX_SHARED_HISTORY_
 use crate::store::critical_namespaces::read_pool::{
     CatalogReadReservation, CriticalCatalogReadPool,
 };
+use crate::store::persistence::governance_layout::joined::review_receive::SelectedReceivedApproval;
 use crate::store::persistence::v2_member_outbox::MemberSavedOriginal;
 use crate::store::persistence::v2_member_transport::LocalDependencyStack;
 use crate::store::{ServerStore, V2MemberSaveRefusal};
@@ -105,6 +106,7 @@ pub(in crate::store) struct SharedHistoryProjectionLease {
     pub(in crate::store) selected: SharedHistoryMessageSelection,
     pub(in crate::store) _view: ProjectionView,
     pub(in crate::store) _ledger: ChatLedger,
+    pub(in crate::store) review: Option<SelectedReceivedApproval>,
     pub(in crate::store) _invocation: Option<tokio::sync::watch::Sender<bool>>,
     pub(in crate::store) _fee: CatalogReadReservation,
     pub(in crate::store) _replay: SharedHistoryReplayCredit,
@@ -115,7 +117,10 @@ impl SharedHistoryProjectionLease {
         &self,
         publish: impl FnOnce() -> T,
     ) -> Result<T, AppError> {
-        self.selected.snapshot.observation.with_publication(publish)
+        self.selected.with_publication(|| match &self.review {
+            Some(review) => review.observation.with_publication(publish),
+            None => Ok(publish()),
+        })?
     }
 }
 
@@ -127,6 +132,19 @@ impl SharedHistoryMessageSelection {
     pub(in crate::store) fn includes(&self, action: ActionId) -> bool {
         self.snapshot.actions.binary_search(&action).is_ok()
     }
+
+    pub(in crate::store) fn with_publication<T>(
+        &self,
+        publish: impl FnOnce() -> T,
+    ) -> Result<T, AppError> {
+        self.snapshot.observation.with_publication(publish)
+    }
+}
+
+pub(in crate::store) enum SharedHistoryTargetSelection {
+    Unmounted,
+    Empty(SharedHistoryMessageSelection),
+    Replayed(SharedHistoryMessageSelection),
 }
 
 pub(in crate::store) struct SharedHistoryReplay<'a> {
@@ -144,15 +162,34 @@ impl SharedHistoryReplay<'_> {
         create: ActionId,
         retired: &[V2FrozenAdmission],
         credit: &mut SharedHistoryReplayCredit,
-        mut read_local: impl FnMut(ActionId) -> Result<Option<MemberSavedOriginal>, V2MemberSaveRefusal>,
+        read_local: impl FnMut(ActionId) -> Result<Option<MemberSavedOriginal>, V2MemberSaveRefusal>,
     ) -> Result<Option<SharedHistoryMessageSelection>, V2MemberSaveRefusal> {
+        match self.replay_target(ledger, view, create, retired, credit, read_local)? {
+            SharedHistoryTargetSelection::Replayed(selection) => Ok(Some(selection)),
+            SharedHistoryTargetSelection::Unmounted | SharedHistoryTargetSelection::Empty(_) => {
+                Ok(None)
+            }
+        }
+    }
+
+    /// Keep an exact checked ordinary miss as a live negative for the
+    /// separate review source. Errors or unselected ordinary debt refuse.
+    pub(in crate::store) fn replay_target(
+        self,
+        ledger: &mut ChatLedger,
+        view: &ProjectionView,
+        create: ActionId,
+        retired: &[V2FrozenAdmission],
+        credit: &mut SharedHistoryReplayCredit,
+        read_local: impl FnMut(ActionId) -> Result<Option<MemberSavedOriginal>, V2MemberSaveRefusal>,
+    ) -> Result<SharedHistoryTargetSelection, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
         if !self
             .store
             .has_mounted_shared_history()
             .map_err(|_| Refusal::Busy)?
         {
-            return Ok(None);
+            return Ok(SharedHistoryTargetSelection::Unmounted);
         }
         let snapshot = self
             .store
@@ -162,12 +199,58 @@ impl SharedHistoryReplay<'_> {
                 _ => Refusal::Failed,
             })?;
         if snapshot.actions.is_empty() {
-            return Ok(None);
+            return Ok(SharedHistoryTargetSelection::Empty(
+                SharedHistoryMessageSelection { snapshot },
+            ));
         }
         let roots = &snapshot.actions;
         if roots.binary_search(&create).is_err() {
             return Err(Refusal::Failed);
         }
+        self.replay_actions(
+            (ledger, view),
+            (roots, Some(create)),
+            retired,
+            credit,
+            read_local,
+        )?;
+        snapshot
+            .observation
+            .with_publication(|| ())
+            .map_err(|_| Refusal::Stale)?;
+        Ok(SharedHistoryTargetSelection::Replayed(
+            SharedHistoryMessageSelection { snapshot },
+        ))
+    }
+
+    /// Supply only original ancestry to the separately reviewed Create.
+    /// The target itself keeps its independent empty archive observation.
+    pub(in crate::store) fn replay_required_parent(
+        self,
+        (ledger, view): (&mut ChatLedger, &ProjectionView),
+        parent: ActionId,
+        retired: &[V2FrozenAdmission],
+        credit: &mut SharedHistoryReplayCredit,
+        read_local: impl FnMut(ActionId) -> Result<Option<MemberSavedOriginal>, V2MemberSaveRefusal>,
+    ) -> Result<(), V2MemberSaveRefusal> {
+        self.replay_actions(
+            (ledger, view),
+            (std::slice::from_ref(&parent), None),
+            retired,
+            credit,
+            read_local,
+        )
+    }
+
+    fn replay_actions(
+        &self,
+        (ledger, view): (&mut ChatLedger, &ProjectionView),
+        (roots, ordinary_target): (&[ActionId], Option<ActionId>),
+        retired: &[V2FrozenAdmission],
+        credit: &mut SharedHistoryReplayCredit,
+        mut read_local: impl FnMut(ActionId) -> Result<Option<MemberSavedOriginal>, V2MemberSaveRefusal>,
+    ) -> Result<(), V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
         let pool = &self
             .store
             .archive_bootstrap_policy
@@ -196,7 +279,9 @@ impl SharedHistoryReplay<'_> {
             let status = if let Some(original) = archived {
                 let signed = original.original.action();
                 let target = signed.spec().body.create().unwrap_or(action);
-                if roots.binary_search(&action).is_ok() && target != create {
+                if ordinary_target
+                    .is_some_and(|create| roots.binary_search(&action).is_ok() && target != create)
+                {
                     return Err(Refusal::Failed);
                 }
                 let selected = V2LocalArchiveOriginal::from_trusted_local_selection(
@@ -214,7 +299,7 @@ impl SharedHistoryReplay<'_> {
                     LEDGER_WORK,
                 )
             } else {
-                if roots.binary_search(&action).is_ok() {
+                if ordinary_target.is_some() && roots.binary_search(&action).is_ok() {
                     return Err(Refusal::Failed);
                 }
                 let original = read_local(action)?.ok_or(Refusal::Unavailable)?;
@@ -245,11 +330,7 @@ impl SharedHistoryReplay<'_> {
         if self.caller.is_cancelled() {
             return Err(Refusal::Cancelled);
         }
-        snapshot
-            .observation
-            .with_publication(|| ())
-            .map_err(|_| Refusal::Stale)?;
-        Ok(Some(SharedHistoryMessageSelection { snapshot }))
+        Ok(())
     }
 }
 

@@ -106,6 +106,7 @@ pub use critical_namespaces::{
     NativeTextFounderReviewReply, NativeTextFounderReviewResult, NativeTextFounderReviewSweep,
 };
 pub use critical_namespaces::{
+    NativeTextFounderRouteApproval, NativeTextFounderRouteAttempt, NativeTextFounderRouteGesture,
     NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,
     NativeTextJoinedArchivedActions, NativeTextJoinedContactApprovalProof,
     NativeTextJoinedContactConsent, NativeTextJoinedDependencyAttachRefusal,
@@ -117,7 +118,8 @@ pub use critical_namespaces::{
     NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
-    NativeTextJoinedReceivedOriginal, NativeTextJoinedReconnect,
+    NativeTextJoinedReceivedOriginal, NativeTextJoinedReconnect, NativeTextJoinedReviewExchange,
+    NativeTextJoinedReviewResponse, NativeTextJoinedReviewedActions, NativeTextJoinedReviewedPage,
     NativeTextJoinedSavedContactApprovals, NativeTextJoinedSelectionPreparation,
 };
 pub use critical_namespaces::{
@@ -137,16 +139,22 @@ pub use native_text_invite::{
     NativeTextSavedJoinResponse, MAX_NATIVE_TEXT_INVITE_PACKET_BYTES,
 };
 pub use native_text_roster::{NativeTextRoster, NativeTextRosterMember};
+mod native_text_review;
+pub use native_text_review::NativeTextInitialReviewRequest;
 pub use persistence::governance_layout::joined::rejoin::{
     NativeTextRejoinIndexReceipt, NativeTextRejoinOutcomeReceipt, NativeTextRejoinPendingReceipt,
     NativeTextRejoinPrefixReceipt, NativeTextRejoinReceivedReceipt, NativeTextRejoinWelcomeStatus,
+};
+pub use persistence::governance_layout::joined::review_receive::{
+    NativeTextReviewApprovalStatus, NativeTextReviewHeaderPollStatus, NativeTextReviewHeaderStatus,
 };
 pub use persistence::v2_member_transport::{
     NativeTextFounderAudit, NativeTextFounderDependencyExchange,
     NativeTextFounderDependencyResponse, NativeTextFounderFrameOutcome, NativeTextFounderReceived,
 };
 pub use persistence::v2_review_hold::{
-    NativeTextHeldCase, NativeTextHeldReviewContinuation, NativeTextHeldReviewPage,
+    NativeTextHeldCase, NativeTextHeldReviewContinuation, NativeTextHeldReviewDecision,
+    NativeTextHeldReviewPage,
 };
 mod owner_evidence;
 pub use chat_admission::{
@@ -673,6 +681,8 @@ mod persistence {
     /// Strict bounded native-registry migration reads; deliberately no writer yet.
     pub(in crate::store) mod native_registry;
     pub(in crate::store) mod v2_contact_approvals;
+    pub(in crate::store) mod v2_founder_consent;
+    pub(in crate::store) mod v2_founder_route;
     mod v2_group_directory;
     /// Chat V2 ordinary-member durable outbox; independent of the founder `v2_text` journal.
     pub(in crate::store) mod v2_member_outbox;
@@ -5813,6 +5823,12 @@ pub struct ServerStore {
     review_hold_mount: std::sync::Mutex<
         Option<persistence::governance_layout::joined::review_hold::SelectedReviewHold>,
     >,
+    review_decision_mount: std::sync::Mutex<
+        Option<persistence::governance_layout::joined::review_decision::SelectedReviewDecision>,
+    >,
+    review_receive_mount: std::sync::Mutex<
+        Option<persistence::governance_layout::joined::review_receive::SelectedReviewReceiver>,
+    >,
     // Namespace5 marker + held member-outbox parent, installed only by the concrete configured
     // handler. Its presence is mount DATA, never a member-source or save permission.
     member_outbox_layout: std::sync::Mutex<
@@ -6071,6 +6087,8 @@ impl ServerStore {
             installed_rejoin: Default::default(),
             shared_history_mount: Default::default(),
             review_hold_mount: Default::default(),
+            review_decision_mount: Default::default(),
+            review_receive_mount: Default::default(),
             member_outbox_layout: Default::default(),
             member_outbox_mount: Default::default(),
             current_layout: Default::default(),

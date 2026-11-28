@@ -1,8 +1,12 @@
-//! Evidence for withholding one exact signed Create from a closed admission.
-//! This never proves tree inclusion, releases a post or makes it visible.
+//! Evidence for withholding and checking a reviewed signed Create from a
+//! closed admission. This grants no inclusion or publication authority.
 use super::*;
 use crate::chat::cold_actions::OriginalActionDigest;
-use crate::chat::owner_bodies::{AcceptanceSpec, ReviewCaseId, MAX_ACCEPTANCE_RECORD_BYTES};
+use crate::chat::join_bindings::GenesisAnchorBindingData;
+use crate::chat::owner_bodies::{
+    AcceptanceSpec, ReviewCaseId, ReviewDecision, ReviewStreamEntry, ReviewStreamRecord,
+    MAX_ACCEPTANCE_RECORD_BYTES,
+};
 use catcoms_wire::{Decoder, Encoder};
 use zeroize::Zeroizing;
 
@@ -208,7 +212,118 @@ impl<'a> V2RemovedCreateRecord<'a> {
     }
 }
 
+/// The checked approval either needs its exact reply parent or is ready
+/// for the host's separate receipt selection.
+pub enum V2ReviewedCreateCheck<'a> {
+    /// The authenticated reply is still missing its exact verified parent.
+    WaitingForReplyParent(ActionId),
+    /// The exact record passed the current verifier and parent replay.
+    Ready(V2CheckedReviewedCreate<'a>),
+}
+
+/// Transient evidence for the exact borrowed approval. The host must still
+/// prove durable review selection and cover its own receipt before use.
+pub struct V2CheckedReviewedCreate<'a> {
+    record: &'a ReviewStreamRecord<'a>,
+    // Keep the exact verified ancestry immutable until the receipt edge.
+    _parent_ledger: &'a ChatLedger,
+    parent_view: &'a ProjectionView,
+    issuer: std::sync::Weak<()>,
+    selected_sequence: u64,
+}
+
+redacted_debug!(V2ReviewedCreateCheck<'_>, V2CheckedReviewedCreate<'_>);
+
+impl<'a> V2CheckedReviewedCreate<'a> {
+    pub fn record_data(&self) -> &'a ReviewStreamRecord<'a> {
+        self.record
+    }
+
+    /// Layout allowance for the check. The borrowed record, parent replay
+    /// and temporary verification have separate fees.
+    pub const fn retained_layout_bytes() -> usize {
+        std::mem::size_of::<Self>()
+    }
+}
+
 impl V2GeneralPrefixVerifier {
+    /// The host supplies the actual selected public ordinal and case tip, and
+    /// proves the signed membership anchor in its selected ancestry. Core
+    /// checks their coordinates against the exact record and live verifier.
+    /// Use a paid replay ledger with verified selected ordinary ancestry.
+    /// This check leaves that ledger and its view unchanged.
+    pub fn check_selected_reviewed_create<'a>(
+        &self,
+        (pin, membership): (&FounderGenesisAnchorData, (OwnerHeaderId, u64)),
+        (selected, record): (&ReviewStreamEntry, &'a ReviewStreamRecord<'a>),
+        author: &V2FrozenAdmission,
+        (ledger, view): (&'a ChatLedger, &'a ProjectionView),
+        retired_dependencies: &[&V2FrozenAdmission],
+    ) -> Result<V2ReviewedCreateCheck<'a>, ChatError> {
+        let position = selected.position_data();
+        if selected != record.entry_data()
+            || (position.membership_header, position.membership_epoch) != membership
+            || position.membership_epoch > self.math.mls_epoch_data()
+            || pin.group != self.math.profile().spec().group
+        {
+            return Err(ChatError::Scope);
+        }
+        let step = selected.case_step_data().ok_or(ChatError::Dependency)?;
+        if step.choice_data() != ReviewDecision::Approve {
+            return Err(ChatError::Permission);
+        }
+        self.require_join_genesis_data(
+            GenesisAnchorBindingData {
+                group: pin.group.clone(),
+                founder: pin.founder,
+                profile: *pin.profile.as_bytes(),
+                admission: *pin.admission.as_bytes(),
+                tenure: *pin.tenure.as_bytes(),
+                header: *pin.header.as_bytes(),
+                state: *pin.state.as_bytes(),
+            }
+            .commitment_data()?,
+        )?;
+        selected.verify_decision_for_pin(pin, record.decision_data())?;
+        let held = record.held_data();
+        let evidence = self.verify_removed_create_for_review(
+            held.original_bytes_data(),
+            author,
+            ledger,
+            view,
+            retired_dependencies,
+        )?;
+        held.require_evidence(&evidence)?;
+        self.require_current_removed_create(&evidence)?;
+        if !view.life.live() {
+            return Err(ChatError::Scope);
+        }
+        if let Some(parent) = evidence.waiting_for_reply_parent_data() {
+            return Ok(V2ReviewedCreateCheck::WaitingForReplyParent(parent));
+        }
+        record.decision_data().require_evidence_data(&evidence)?;
+        Ok(V2ReviewedCreateCheck::Ready(V2CheckedReviewedCreate {
+            record,
+            _parent_ledger: ledger,
+            parent_view: view,
+            issuer: evidence.issuer,
+            selected_sequence: evidence.selected_sequence,
+        }))
+    }
+
+    /// At the receipt edge, recheck the original issuer, parent view and
+    /// exact header. The host separately rechecks its durable selectors.
+    pub fn require_current_reviewed_create(
+        &self,
+        checked: &V2CheckedReviewedCreate<'_>,
+        selected: &ReviewStreamEntry,
+    ) -> Result<(), ChatError> {
+        if selected != checked.record.entry_data() || !checked.parent_view.life.live() {
+            return Err(ChatError::Scope);
+        }
+        self.require_current_review_issuer(&checked.issuer, checked.selected_sequence)
+    }
+
     /// Reprove a retained case's signed original against the current selected
     /// historical author and Remove. This read does not assess reply ancestry,
     /// prove covered storage selection, or return publication authority.
@@ -239,9 +354,17 @@ impl V2GeneralPrefixVerifier {
         &self,
         evidence: &V2RemovedCreateEvidence,
     ) -> Result<(), ChatError> {
+        self.require_current_review_issuer(&evidence.issuer, evidence.selected_sequence)
+    }
+
+    fn require_current_review_issuer(
+        &self,
+        issuer: &std::sync::Weak<()>,
+        selected_sequence: u64,
+    ) -> Result<(), ChatError> {
         self.live()?;
-        if !evidence.issuer.ptr_eq(&Arc::downgrade(&self.identity))
-            || evidence.selected_sequence != self.selected_sequence.load(Ordering::Acquire)
+        if !issuer.ptr_eq(&Arc::downgrade(&self.identity))
+            || selected_sequence != self.selected_sequence.load(Ordering::Acquire)
         {
             return Err(ChatError::Scope);
         }

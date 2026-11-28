@@ -21,6 +21,7 @@ use catcoms_sync::{
 };
 mod contact;
 mod founder_recovery;
+pub(in crate::store) use founder_recovery::review as founder_review_intake;
 mod runtime;
 pub(super) use contact::{connect_approved_host, ApprovedContact};
 pub use founder_recovery::{
@@ -258,9 +259,9 @@ impl NativeTextJoinedStorage {
         self.index.native_row_count_data()
     }
 
-    /// Upgrade a recovered founder's existing shared-history vault before
-    /// publishing it. The exact selected catalog requires a fresh opener,
-    /// so a successful change must drop this old startup owner.
+    /// Cover one missing founder review namespace before publishing the
+    /// source. The hold declaration precedes the decision journal. Reopen
+    /// after each successful change to acquire the new catalog selection.
     pub fn select_review_storage_before_founder_startup(
         &self,
         rng: &mut dyn CryptoRngCore,
@@ -272,6 +273,21 @@ impl NativeTextJoinedStorage {
             return Ok(false);
         }
         self.index.select_review_storage_before_founder_startup(rng)
+    }
+
+    /// Provision the recipient's private journal before exposing a recovered
+    /// first joined source. The caller must reopen after a successful write.
+    pub fn select_review_storage_before_joined_startup(
+        &self,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<bool, AppError> {
+        if self.pending.is_some() || self.recovered_tcp.is_some() {
+            return Err(refused());
+        }
+        if self.row_count_data()? != 1 || self.recovered_join_registration_data()?.is_none() {
+            return Ok(false);
+        }
+        self.index.select_review_storage_before_joined_startup(rng)
     }
 
     /// Mount the original cold selection as an empty native vault only if

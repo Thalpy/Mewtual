@@ -203,8 +203,9 @@ impl ChatLedger {
         Ok(self.projection.begin(Some(group.life.clone()), false))
     }
 
-    /// Start a detached local archive display view. It can only admit
-    /// exact locally selected archive effects which remain provisional.
+    /// Start a detached local archive display view. Ordinary selected
+    /// originals are provisional. A verified review receipt can prove its
+    /// exact Create in this view.
     pub fn begin_local_archive_projection_view_in(
         &mut self,
         group: &ProjectionGroupView,

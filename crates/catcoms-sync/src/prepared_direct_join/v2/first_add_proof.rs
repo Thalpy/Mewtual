@@ -21,6 +21,9 @@ use catcoms_replication::chat::{
 };
 use std::sync::{Arc, Weak};
 
+mod review_ancestry;
+use review_ancestry::JoinedReviewAncestry;
+
 const TAG: &[u8] = b"mewtual/chat/first-add-proof/v2\0";
 pub(super) const FIRST_JOIN_DELIVERY_TAG: &[u8] = b"mewtual/chat/first-join-delivery/v2\0";
 const FRAME_OVERHEAD: usize = 4 + TAG.len() + 2 + 5 * 4;
@@ -191,9 +194,11 @@ impl<'a> V2FirstAddProofData<'a> {
         let candidate = verifier
             .derive_successor(add, ReplayBody::Admission(own), self.add.image())
             .map_err(reject)?;
+        let review_ancestry = JoinedReviewAncestry::new(accepted.clone(), verifier.replay_data());
         Ok(PreparedV2JoinedPrefix {
             retired_history: Vec::with_capacity(crate::MAX_V2_GOVERNING_JOIN_STEPS),
             verifier,
+            review_ancestry,
             candidate: Some(candidate),
             own: own.admission_id(),
             source_origin: None,
@@ -206,6 +211,7 @@ impl<'a> V2FirstAddProofData<'a> {
 pub struct PreparedV2JoinedPrefix {
     retired_history: Vec<V2FrozenAdmission>,
     verifier: V2GeneralPrefixVerifier,
+    review_ancestry: JoinedReviewAncestry,
     candidate: Option<V2GeneralCandidate>,
     own: OwnerFactId,
     source_origin: Option<Weak<()>>,
@@ -226,6 +232,20 @@ impl PreparedV2JoinedPrefix {
     /// History occupies bounded space alongside the same selected verifier.
     pub const fn retired_history_layout_bytes() -> usize {
         crate::MAX_V2_GOVERNING_JOIN_STEPS * V2FrozenAdmission::retained_layout_bytes()
+    }
+
+    /// Additional allocation made with the original paid prefix. Reopen
+    /// rebuilds this from the same verified initial and successor steps.
+    pub const fn review_ancestry_layout_bytes() -> usize {
+        JoinedReviewAncestry::retained_layout_bytes()
+    }
+
+    pub(super) fn require_selected_review_anchor(
+        &self,
+        coordinate: (OwnerHeaderId, u64),
+    ) -> Result<&GenesisAnchorBindingData, SyncError> {
+        self.review_ancestry
+            .require(self.selected_member_verifier()?.replay_data(), coordinate)
     }
 
     /// Actual selected Removes for this node's original governing verifier.
@@ -333,9 +353,13 @@ impl PreparedV2JoinedPrefix {
         candidate: &mut Option<V2GeneralCandidate>,
     ) -> Result<V2GeneralRetiredData, SyncError> {
         self.selected_member_verifier()?;
-        self.verifier
+        let retired = self
+            .verifier
             .advance_host_selected(selection, candidate)
-            .map_err(|_| SyncError::JoinRejected)
+            .map_err(|_| SyncError::JoinRejected)?;
+        self.review_ancestry
+            .remember_selected(self.verifier.replay_data());
+        Ok(retired)
     }
 
     pub(super) fn prepare_member_removal(
@@ -430,9 +454,13 @@ impl PreparedV2JoinedPrefix {
         &mut self,
         selection: &V2HostSelectionExpectation,
     ) -> Result<V2GeneralRetiredData, SyncError> {
-        self.verifier
+        let retired = self
+            .verifier
             .advance_host_selected(selection, &mut self.candidate)
-            .map_err(|_| SyncError::JoinRejected)
+            .map_err(|_| SyncError::JoinRejected)?;
+        self.review_ancestry
+            .remember_selected(self.verifier.replay_data());
+        Ok(retired)
     }
 
     pub fn selected_replay_data(&self) -> Option<&ReplayMath> {

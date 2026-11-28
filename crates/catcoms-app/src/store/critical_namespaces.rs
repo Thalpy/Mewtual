@@ -102,6 +102,11 @@ pub use native_registry::{
     NativeTextFounderReviewReply, NativeTextFounderReviewResult, NativeTextFounderReviewSweep,
 };
 pub use native_registry::{
+    NativeTextFounderRouteApproval, NativeTextFounderRouteAttempt, NativeTextFounderRouteGesture,
+    NativeTextJoinedContactApprovalProof, NativeTextJoinedContactConsent,
+    NativeTextJoinedReconnect, NativeTextJoinedSavedContactApprovals,
+};
+pub use native_registry::{
     NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,
     NativeTextJoinedArchivedActions, NativeTextJoinedDependencyAttachRefusal,
     NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
@@ -112,11 +117,9 @@ pub use native_registry::{
     NativeTextJoinedMemberIngressPreparation, NativeTextJoinedMemberLedger,
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
-    NativeTextJoinedReceivedOriginal, NativeTextJoinedSelectionPreparation,
-};
-pub use native_registry::{
-    NativeTextJoinedContactApprovalProof, NativeTextJoinedContactConsent,
-    NativeTextJoinedReconnect, NativeTextJoinedSavedContactApprovals,
+    NativeTextJoinedReceivedOriginal, NativeTextJoinedReviewExchange,
+    NativeTextJoinedReviewResponse, NativeTextJoinedReviewedActions, NativeTextJoinedReviewedPage,
+    NativeTextJoinedSelectionPreparation,
 };
 pub use native_registry::{
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,
@@ -132,7 +135,9 @@ use read_pool::{CatalogReadReservation, EMPTY_READ_FEE};
 pub(in crate::store) mod pending_join;
 pub(in crate::store) mod pending_join_codec;
 pub(in crate::store) mod rejoin_namespace;
+pub(in crate::store) mod review_decision_namespace;
 pub(in crate::store) mod review_hold_namespace;
+pub(in crate::store) mod review_receive_namespace;
 pub(in crate::store) mod shared_history_namespace;
 pub use pending_join::{
     ActivatedCheckpointJoin, CheckpointJoinExecutionPolicy, CheckpointJoinNetwork,

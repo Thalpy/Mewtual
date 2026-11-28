@@ -33,20 +33,32 @@ pub enum ReviewDecision {
     Reopen,
 }
 impl ReviewDecision {
-    fn tag(self) -> u8 {
+    pub(super) fn tag(self) -> u8 {
         match self {
             Self::Approve => 1,
             Self::Reject => 2,
             Self::Reopen => 3,
         }
     }
-    fn from_tag(tag: u8) -> Result<Self, ChatError> {
+    pub(super) fn from_tag(tag: u8) -> Result<Self, ChatError> {
         match tag {
             1 => Ok(Self::Approve),
             2 => Ok(Self::Reject),
             3 => Ok(Self::Reopen),
             _ => Err(ChatError::Malformed),
         }
+    }
+
+    pub(super) fn require_transition(self, previous: Option<Self>) -> Result<(), ChatError> {
+        let allowed = match previous {
+            None | Some(Self::Reopen) => matches!(self, Self::Approve | Self::Reject),
+            Some(Self::Reject) => self == Self::Reopen,
+            Some(Self::Approve) => false,
+        };
+        if !allowed {
+            return Err(ChatError::Dependency);
+        }
+        Ok(())
     }
 }
 
@@ -126,20 +138,13 @@ impl ReviewDecisionBody {
         previous: Option<(&Self, OwnerBodyId)>,
     ) -> Result<(), ChatError> {
         match (previous, self.spec.previous) {
-            (None, None) if self.spec.decision != ReviewDecision::Reopen => Ok(()),
+            (None, None) => self.spec.decision.require_transition(None),
             (Some((previous, selected)), Some(id))
-                if selected == id
-                    && previous.case_id() == self.case_id()
-                    && matches!(
-                        (previous.spec.decision, self.spec.decision),
-                        (ReviewDecision::Reject, ReviewDecision::Reopen)
-                            | (
-                                ReviewDecision::Reopen,
-                                ReviewDecision::Approve | ReviewDecision::Reject
-                            )
-                    ) =>
+                if selected == id && previous.case_id() == self.case_id() =>
             {
-                Ok(())
+                self.spec
+                    .decision
+                    .require_transition(Some(previous.spec.decision))
             }
             _ => Err(ChatError::Dependency),
         }

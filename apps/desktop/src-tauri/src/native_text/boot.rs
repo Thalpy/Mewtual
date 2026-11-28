@@ -127,10 +127,18 @@ impl Bootstrap {
                             directory, secret, &mut rng, current,
                         )
                         .map_err(|_| EXISTING)?;
-                        if storage
-                            .select_review_storage_before_founder_startup(&mut rng)
-                            .map_err(|_| EXISTING)?
-                        {
+                        // A founder can need two successive declarations.
+                        // A joined vault needs at most its recipient journal.
+                        for _ in 0..2 {
+                            let changed = storage
+                                .select_review_storage_before_founder_startup(&mut rng)
+                                .map_err(|_| EXISTING)?
+                                || storage
+                                    .select_review_storage_before_joined_startup(&mut rng)
+                                    .map_err(|_| EXISTING)?;
+                            if !changed {
+                                break;
+                            }
                             // The write used the original exclusive vault
                             // mount. Transfer no source when replacing it.
                             drop(storage);

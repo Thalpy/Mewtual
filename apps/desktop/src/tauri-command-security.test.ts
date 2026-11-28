@@ -96,7 +96,7 @@ function manualCommands(sources: Map<string, string>): string[] {
     "the retired rejoin inventory must dispatch through the production router");
   return [
     ...inventory("admin_chat_ledger/mod.rs", ["get_admin_chat_ledger", "get_admin_chat_ledger_detail"]),
-    ...inventory("native_text/membership.rs", ["get_native_chat_members", "remove_native_chat_member", "share_native_chat_contact", "connect_native_chat_contact", "forget_native_chat_contacts", "check_native_chat_removed_posts"]),
+    ...inventory("native_text/membership.rs", ["get_native_chat_members", "remove_native_chat_member", "share_native_chat_contact", "connect_native_chat_contact", "forget_native_chat_contacts", "check_native_chat_removed_posts", "decide_native_chat_held_post", "remember_native_chat_founder_route", "forget_native_chat_founder_route"]),
     ...inventory("native_text/rejoin.rs", ["rejoin_server"]),
   ];
 }

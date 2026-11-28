@@ -93,6 +93,17 @@ impl GenesisAnchorBindingData {
         self.validate()?;
         Ok(*blake3::hash(&self.encode()).as_bytes())
     }
+
+    /// Preserve the canonical anchor data in an authenticated local record.
+    pub fn encode_data(&self) -> Result<Vec<u8>, ChatError> {
+        self.validate()?;
+        Ok(self.encode())
+    }
+
+    /// Decode anchor data. The caller must independently establish provenance.
+    pub fn decode_data(bytes: &[u8]) -> Result<Self, ChatError> {
+        Self::decode(bytes)
+    }
 }
 
 /// Different payload domains must never alias the SDK's KP hash reference or

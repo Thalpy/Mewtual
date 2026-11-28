@@ -316,7 +316,9 @@ pub(super) fn decode_selected_data(
 }
 
 mod review_declaration;
-pub(in crate::store) use review_declaration::VerifiedFounderReviewParent;
+pub(in crate::store) use review_declaration::{
+    VerifiedFounderReviewParent, VerifiedRecipientReviewParent,
+};
 
 /// Authenticate the original unchanging native row, marker and catalog
 /// capability. The caller owns the physical role proof, including any Stage.

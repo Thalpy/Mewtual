@@ -8,7 +8,7 @@ export type NativeOriginal = {
 };
 export type NativeOriginalPage = { backend: "text-v2"; scope: "own-saved-originals"; next: string; end_exclusive: string; items: NativeOriginal[] };
 export type NativeReceivedTarget = { server: number; channel: string; context: string; action: string | null };
-export type NativeReceived = { action: string; text: string; certainty: "provisional" | "proven" };
+export type NativeReceived = { action: string; text: string; certainty: "provisional" | "proven"; replyAllowed?: false };
 export type NativeOwnRevision = { revision: string; text: string; status: NativeOriginal["status"] };
 export type NativeOwnMessage = { scanning: boolean; item: NativeOwnRevision | null };
 export type NativeAuditRecord = {
@@ -16,9 +16,13 @@ export type NativeAuditRecord = {
   presented_ms: string; parents: string[]; body: NativeOriginal["body"];
 };
 export type NativeAuditPage = { items: NativeAuditRecord[] | null; next: string | null };
+export type NativeHeldDecision =
+  | { status: "unavailable" | "undecided" }
+  | { status: "selected"; choice: "approve" | "reject" | "reopen"; decisionBodyId: string; streamEntryId: string };
 export type NativeHeldPost = {
   caseId: string; action: string; signer: string; admission: string; originalDigest: string;
   removalHeader: string; removalEpoch: string;
+  decision: NativeHeldDecision;
   body: Extract<NativeOriginal["body"], { kind: "create" }>;
 };
 export type NativeHeldPage = { items: NativeHeldPost[] | null; next: string | null; unavailable: number };
@@ -77,15 +81,17 @@ export function decodeNativeReceived(
   if (root.backend !== "text-v2" || root.scope !== scope) return fail();
   if (root.item === null) return null;
   const row = object(root.item);
-  fields(row, ["action", "text", "certainty"]);
+  const reviewedOnly = Object.hasOwn(row, "replyAllowed");
+  fields(row, reviewedOnly ? ["action", "text", "certainty", "replyAllowed"] : ["action", "text", "certainty"]);
+  if (reviewedOnly && (row.replyAllowed !== false || row.certainty !== "proven")) return fail();
   const action = hex(row.action);
   if (action !== expectedAction || (row.certainty !== "provisional" && row.certainty !== "proven")) return fail();
   const body = text(row.text);
   if (!body) return fail();
-  return { action, text: body, certainty: row.certainty };
+  return { action, text: body, certainty: row.certainty, ...(reviewedOnly ? { replyAllowed: false as const } : {}) };
 }
 
-type NativeHistoryTarget = { server: number; channel: string; context: string };
+export type NativeHistoryTarget = { server: number; channel: string; context: string };
 type NativeInvoke = (command: string, args: Record<string, unknown>) => Promise<unknown>;
 
 export async function readNativeAudit(
@@ -157,18 +163,34 @@ export async function readNativeHeldPosts(
   const seen = new Set<string>();
   const items = result.items.map((raw): NativeHeldPost => {
     const row = object(raw);
-    fields(row, ["caseId", "action", "signer", "admission", "originalDigest", "removalHeader", "removalEpoch", "body"]);
+    fields(row, ["caseId", "action", "signer", "admission", "originalDigest", "removalHeader", "removalEpoch", "decision", "body"]);
     const caseId = hex(row.caseId);
     const body = decodeBody(row.body);
     const removalEpoch = decimal(row.removalEpoch);
     if (body.kind !== "create" || removalEpoch === "0" || seen.has(caseId)) return fail();
     seen.add(caseId);
     return {
-      caseId, body, removalEpoch, action: hex(row.action), signer: hex(row.signer),
+      caseId, body, removalEpoch, decision: decodeHeldDecision(row.decision), action: hex(row.action), signer: hex(row.signer),
       admission: hex(row.admission), originalDigest: hex(row.originalDigest), removalHeader: hex(row.removalHeader),
     };
   });
   return { items, next, unavailable: result.unavailable };
+}
+
+function decodeHeldDecision(raw: unknown): NativeHeldDecision {
+  const decision = object(raw);
+  const status = decision.status;
+  if (status === "unavailable" || status === "undecided") {
+    fields(decision, ["status"]);
+    return { status };
+  }
+  if (status !== "selected") return fail();
+  fields(decision, ["status", "choice", "decisionBodyId", "streamEntryId"]);
+  const choice = decision.choice;
+  if (choice !== "approve" && choice !== "reject" && choice !== "reopen") return fail();
+  const decisionBodyId = hex(decision.decisionBodyId), streamEntryId = hex(decision.streamEntryId);
+  if (/^0+$/.test(decisionBodyId) || /^0+$/.test(streamEntryId)) return fail();
+  return { status, choice, decisionBodyId, streamEntryId };
 }
 
 export function decodeNativeOwnMessage(value: unknown, target: string): NativeOwnMessage {
@@ -229,6 +251,44 @@ export async function readNativeReceivedArchive(
     if (previous !== null && previous >= id) return fail();
     previous = id;
   }
+  const bodies = await readNativeArchiveBodies(invoke, address, ids, current);
+  return bodies && { available: root.available, ids, more: root.more, ...bodies };
+}
+
+// The cursor is the exact 219-byte sealed frame returned by native.
+const reviewedCursor = /^[a-f0-9]{438}$/;
+
+export async function readNativeReviewedArchive(
+  invoke: NativeInvoke,
+  target: NativeHistoryTarget,
+  current: () => boolean,
+  after: string | null,
+) {
+  if (!current()) return null;
+  const address = { server: target.server, channel: target.channel, expectedContext: target.context };
+  const raw = await invoke("get_message_page", { ...address, reviewedAfter: after });
+  if (!current()) return null;
+  const root = object(raw);
+  fields(root, ["backend", "scope", "status", "ids", "next"]);
+  const status = root.status;
+  if (root.backend !== "text-v2" || root.scope !== "reviewed-archive-index"
+    || (status !== "current" && status !== "unavailable" && status !== "stale")
+    || !Array.isArray(root.ids) || root.ids.length > 2) return fail();
+  const next = root.next;
+  if (next !== null && (typeof next !== "string" || !reviewedCursor.test(next) || next === after)) return fail();
+  if (status !== "current" && (root.ids.length !== 0 || next !== null)) return fail();
+  const ids = root.ids.map(hex);
+  if (new Set(ids).size !== ids.length) return fail();
+  const bodies = await readNativeArchiveBodies(invoke, address, ids, current);
+  return bodies && { status, next, ...bodies };
+}
+
+async function readNativeArchiveBodies(
+  invoke: NativeInvoke,
+  address: Record<string, unknown>,
+  ids: string[],
+  current: () => boolean,
+) {
   const items: NativeReceived[] = [];
   const covered: string[] = [];
   let incomplete = false;
@@ -252,7 +312,7 @@ export async function readNativeReceivedArchive(
       incomplete = true;
     }
   }
-  return { available: root.available, ids, more: root.more, items, covered, incomplete, blocked };
+  return { items, covered, incomplete, blocked };
 }
 
 export function updateNativeReceived(rows: NativeReceived[], action: string, item: NativeReceived | null): NativeReceived[] {

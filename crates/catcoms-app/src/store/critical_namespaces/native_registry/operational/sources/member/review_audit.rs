@@ -1,5 +1,8 @@
 //! The native founder audit borrows the original runtime only for local work.
 use super::*;
+use crate::store::persistence::v2_member_transport::{
+    FounderReceiveOperation, FounderReceiveOutcome,
+};
 use crate::store::{NativeTextHeldReviewContinuation, NativeTextHeldReviewPage};
 
 impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
@@ -19,23 +22,16 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
             caller.clone(),
             None,
         );
-        let mut job = self.finish_prepared((cell, keys))?;
-        job.inner.require_current().map_err(|_| Refusal::Stale)?;
-        let founder = job
-            .inner
-            .loan
-            .body
-            .as_mut()
-            .and_then(|body| body.recovered_founder.as_mut())
-            .ok_or(Refusal::Unavailable)?;
-        let result = founder
-            .selected_held_review_window(channel, after, limit, &caller)
-            .map_err(|_| Refusal::Unavailable);
-        job.inner.loan.recorded = true;
-        job.inner.require_current().map_err(|_| Refusal::Stale)?;
-        if caller.is_cancelled() {
-            return Err(Refusal::Cancelled);
+        let job = self.finish_prepared((cell, keys))?;
+        match job.run_founder_member_receive(
+            channel,
+            FounderReceiveOperation::HeldAudit(after, limit),
+            &caller,
+        ) {
+            Ok(FounderReceiveOutcome::HeldAudit(page)) => Ok(*page),
+            Ok(_) => Err(Refusal::Failed),
+            Err(Refusal::Failed) => Err(Refusal::Unavailable),
+            Err(error) => Err(error),
         }
-        result
     }
 }

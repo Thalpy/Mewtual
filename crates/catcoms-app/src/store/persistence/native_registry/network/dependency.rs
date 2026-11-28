@@ -108,6 +108,25 @@ impl NetworkDependency {
         *blake3::hash(self.output.raw()).as_bytes()
     }
 
+    /// Independently captured proofs must still hold the warm activation's
+    /// same file and parent identities. Equal replacement bytes are refused.
+    pub(in crate::store) fn require_same_original(
+        &self,
+        store: &ServerStore,
+        original: &Self,
+    ) -> Result<(), AppError> {
+        if self.expected != original.expected
+            || self.output.identity() != original.output.identity()
+            || self.output.raw() != original.output.raw()
+            || self.servers.identity != original.servers.identity
+            || self.vault.identity != original.vault.identity
+        {
+            return Err(denied());
+        }
+        self.require(store)?;
+        original.require(store)
+    }
+
     pub(in crate::store) fn restore_reservation(
         &self,
         store: &ServerStore,

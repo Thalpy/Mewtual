@@ -1964,6 +1964,30 @@ async fn check_active_rejoin(
     let returned = found_value(exact.await.unwrap());
     assert_eq!(returned["server"].as_u64(), Some(active_id));
     assert_eq!(returned["context"], active["context"]);
+    let a2_context = serde_json::json!({
+        "server": active_id, "expectedContext": active["context"],
+    });
+    let a2_roster = command_value_after_busy(
+        &window,
+        &queue,
+        "get_native_chat_members",
+        membership::BUSY,
+        a2_context.clone(),
+    )
+    .await;
+    assert_eq!(a2_roster["canRememberFounderRoute"], false);
+    let mut a2_consent = a2_context;
+    a2_consent["inviteHex"] = hex::encode(invite).into();
+    a2_consent["approvedHost"] = "127.0.0.1".into();
+    let rejected = command_after_busy(
+        &window,
+        &queue,
+        "remember_native_chat_founder_route",
+        membership::BUSY,
+        a2_consent,
+    )
+    .await;
+    refused(rejected);
 
     let post = native_send_request(&window, active, 191, "Saved by the replacement admission");
     run(&queue).await;
@@ -3512,6 +3536,16 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
     let review_cover =
         std::fs::read(&review_marker).expect("cold founder provisions review storage");
     assert_eq!(review_cover.len(), 32);
+    let decision_marker = founder_path.join("chat-critical-namespaces.review-decision.marker");
+    let decision_head = founder_path
+        .join("chat-v2-review-decisions")
+        .join("head.current");
+    let review_catalog = founder_path.join("chat-critical-namespaces.bin");
+    let decision_cover = std::fs::read(&decision_marker).expect("startup covers both declarations");
+    let decision_empty = std::fs::read(&decision_head).expect("startup covers the empty head");
+    assert_eq!(decision_cover.len(), 32);
+    assert_eq!(decision_empty.len(), 32);
+    let selected_catalog = std::fs::read(&review_catalog).unwrap();
     let mut held = serde_json::json!({
         "server": found["server"], "channel": found["channel"], "expectedContext": found["context"],
         "heldAfter": null, "limit": 2,
@@ -3584,6 +3618,9 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
         "cold replay returns the exact original packet"
     );
     assert_eq!(std::fs::read(review_marker).unwrap(), review_cover);
+    assert_eq!(std::fs::read(decision_marker).unwrap(), decision_cover);
+    assert_eq!(std::fs::read(decision_head).unwrap(), decision_empty);
+    assert_eq!(std::fs::read(review_catalog).unwrap(), selected_catalog);
     if join_after_restart {
         fn group_directory(dir: &std::path::Path, depth: usize) -> Option<std::path::PathBuf> {
             assert!(depth < 12, "isolated fixture tree");
@@ -4364,6 +4401,253 @@ async fn native_text_joined_dependency_provider_reopens_after_selected_add() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_text_original_founder_address_reconnects_only_after_explicit_consent() {
+    use catcoms_app::store::{NativeTextFounderRouteAttempt, V2MemberSaveRefusal};
+
+    async fn attempt(
+        state: &AppState,
+        id: u64,
+    ) -> Result<Option<NativeTextFounderRouteAttempt>, V2MemberSaveRefusal> {
+        let generation = state.ui_session_generation.load(Ordering::SeqCst);
+        let caller = keep_session::current(state, generation).unwrap();
+        let _local = joined_work(state, id)
+            .await
+            .foreground(caller)
+            .await
+            .unwrap();
+        let (prepared, selection, _, caller) = capture_joined_worker(state, id, generation).await;
+        tauri::async_runtime::spawn_blocking(move || {
+            prepared.prepare_saved_founder_reconnect(&selection, caller)
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn close(state: &AppState) {
+        let _closing = register_vault_close(state).await.unwrap();
+        sources::close_server_rows(state, &SystemClock)
+            .await
+            .unwrap();
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let founder_path = dir.path().join("founder");
+    let joiner_path = dir.path().join("joiner");
+    let (founder, founder_window, founder_queue) = app(founder_path.clone(), None, true);
+    let (joiner, joiner_window, joiner_queue) = app(joiner_path.clone(), None, true);
+    unlock_current(&founder, &founder_window, &founder_queue).await;
+    unlock_current(&joiner, &joiner_window, &joiner_queue).await;
+
+    let found = found_request(&founder_window, 1, "Standing founder route");
+    run(&founder_queue).await;
+    let found = found_value(found.await.unwrap());
+    let mint = || async {
+        let response = invite_command(
+            &founder_window,
+            "mint_invite_fresh",
+            serde_json::json!({"server": found["server"], "expectedContext": found["context"]}),
+        );
+        run(&founder_queue).await;
+        found_value(response.await.unwrap())
+    };
+    let accepted = mint().await;
+    let joined = invite_command(
+        &joiner_window,
+        "join_server",
+        serde_json::json!({
+            "inviteHex": accepted, "approvedHost": "127.0.0.1", "displayName": "Member",
+            "serverName": "Standing founder route", "isDm": false, "allowSwitchboards": false,
+        }),
+    );
+    timeout(Duration::from_secs(45), run(&joiner_queue))
+        .await
+        .unwrap();
+    let joined = found_value(joined.await.unwrap());
+    let id = joined["server"].as_u64().unwrap();
+    let request =
+        serde_json::json!({"server": joined["server"], "expectedContext": joined["context"]});
+    let path = joiner_path.join("chat-v2-a1-founder-consent.bin");
+    let identity_hint = joiner_path.join("chat-v2-a1-founder-peer.bin");
+    assert!(identity_hint.is_file());
+    assert!(
+        !path.exists(),
+        "ordinary Join must leave only the inert identity hint"
+    );
+    let state = joiner.state::<AppState>();
+    assert!(attempt(&state, id).await.unwrap().is_none());
+
+    let roster = command_value_after_busy(
+        &joiner_window,
+        &joiner_queue,
+        "get_native_chat_members",
+        membership::BUSY,
+        request.clone(),
+    )
+    .await;
+    assert_eq!(roster["canRememberFounderRoute"], true);
+    let remember = |invite: &serde_json::Value, host| {
+        let mut payload = request.clone();
+        payload["inviteHex"] = invite.clone();
+        payload["approvedHost"] = serde_json::json!(host);
+        payload
+    };
+    let other = mint().await;
+    let bad = command_after_busy(
+        &joiner_window,
+        &joiner_queue,
+        "remember_native_chat_founder_route",
+        membership::BUSY,
+        remember(&other, "127.0.0.1"),
+    )
+    .await;
+    refused(bad);
+    let different_endpoint = command_after_busy(
+        &joiner_window,
+        &joiner_queue,
+        "remember_native_chat_founder_route",
+        membership::BUSY,
+        remember(&accepted, "127.0.0.2"),
+    )
+    .await;
+    refused(different_endpoint);
+    assert!(!path.exists());
+
+    {
+        let edge = AdmissionBarrier::new();
+        *state.native_text.founder_route_edge.lock().unwrap() = Some(edge.clone());
+        let old_remember = command_after_busy(
+            &joiner_window,
+            &joiner_queue,
+            "remember_native_chat_founder_route",
+            membership::BUSY,
+            remember(&accepted, "127.0.0.1"),
+        );
+        tokio::pin!(old_remember);
+        timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                _ = edge.arrived.notified() => {}
+                _ = &mut old_remember => panic!("Remember must reach its bounded network wait"),
+            }
+        })
+        .await
+        .expect("the approved route has released its local turn before dialing");
+        let history = command_value_after_busy(
+        &joiner_window,
+        &joiner_queue,
+        "get_message_page",
+        history::BUSY,
+        serde_json::json!({
+            "server": joined["server"], "channel": joined["channel"],
+            "expectedContext": joined["context"], "start": "0", "endExclusive": null, "limit": 8,
+        }),
+    )
+    .await;
+        assert_eq!(history["scope"], "own-saved-originals");
+        let cancelled = command_value_after_busy(
+            &joiner_window,
+            &joiner_queue,
+            "forget_native_chat_founder_route",
+            membership::BUSY,
+            request.clone(),
+        )
+        .await;
+        assert!(cancelled.is_null());
+        edge.release.notify_one();
+        refused(old_remember.await);
+    }
+    assert!(attempt(&state, id).await.unwrap().is_none());
+
+    let saved = command_value_after_busy(
+        &joiner_window,
+        &joiner_queue,
+        "remember_native_chat_founder_route",
+        membership::BUSY,
+        remember(&accepted, "127.0.0.1"),
+    )
+    .await;
+    assert!(saved.is_null());
+    assert!(attempt(&state, id).await.unwrap().is_some());
+    assert!(path.is_file());
+    close(&state).await;
+    close(&founder.state::<AppState>()).await;
+    drop((joiner_window, joiner, founder_window, founder));
+
+    // No route command or invitation is submitted after reopening either actor.
+    let (founder, founder_window, founder_queue) = app(founder_path, None, true);
+    let (joiner, joiner_window, joiner_queue) = app(joiner_path.clone(), None, true);
+    unlock_current(&founder, &founder_window, &founder_queue).await;
+    unlock_current(&joiner, &joiner_window, &joiner_queue).await;
+    let state = joiner.state::<AppState>();
+    let generation = state.ui_session_generation.load(Ordering::SeqCst);
+    let caller = keep_session::current(&state, generation).unwrap();
+    let work = joined_work(&state, id).await;
+    timeout(Duration::from_secs(30), async {
+        loop {
+            let ready = {
+                let _local = work.foreground(caller.clone()).await.unwrap();
+                let (prepared, selection, _, negative) =
+                    capture_joined_worker(&state, id, generation).await;
+                tauri::async_runtime::spawn_blocking(move || {
+                    prepared
+                        .prepare_governing_exchange(&selection, negative)
+                        .is_ok()
+                })
+                .await
+                .unwrap()
+            };
+            if ready {
+                break;
+            }
+            SystemClock.sleep(Duration::from_millis(250)).await;
+        }
+    })
+    .await
+    .expect("the reopened joined worker must reach its original founder");
+
+    let queued = attempt(&state, id).await.unwrap().unwrap();
+    let stage = joiner_path.join("chat-v2-a1-founder-consent.stage");
+    std::fs::create_dir(&stage).unwrap();
+    let failed = command_after_busy(
+        &joiner_window,
+        &joiner_queue,
+        "forget_native_chat_founder_route",
+        membership::BUSY,
+        request.clone(),
+    )
+    .await;
+    refused(failed);
+    assert!(queued.connect(&state.endpoint_dials).await.is_err());
+    assert!(
+        attempt(&state, id).await.unwrap().is_none(),
+        "the older durable approval must stay suppressed"
+    );
+    assert!(path.is_file() && stage.is_dir());
+    std::fs::remove_dir(stage).unwrap();
+    let cleared = command_value_after_busy(
+        &joiner_window,
+        &joiner_queue,
+        "forget_native_chat_founder_route",
+        membership::BUSY,
+        request,
+    )
+    .await;
+    assert!(cleared.is_null());
+    assert!(attempt(&state, id).await.unwrap().is_none());
+    close(&state).await;
+    close(&founder.state::<AppState>()).await;
+    drop((caller, work, joiner_window, joiner, founder_window, founder));
+
+    let (joiner, window, queue) = app(joiner_path, None, true);
+    unlock_current(&joiner, &window, &queue).await;
+    let state = joiner.state::<AppState>();
+    assert!(
+        attempt(&state, id).await.unwrap().is_none(),
+        "covered Forget survives cold open"
+    );
+    close(&state).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_expired_preview_reproves_the_original_pending_after_restart() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("joiner");
@@ -4633,7 +4917,8 @@ async fn native_text_unconfirmed_delete_invalidates_the_visible_founder_message(
 
 async fn native_text_connected_join(block_delete_archive: bool) {
     let root = tempfile::tempdir().unwrap();
-    let (founder, founder_window, founder_queue) = app(root.path().join("founder"), None, true);
+    let founder_path = root.path().join("founder");
+    let (founder, founder_window, founder_queue) = app(founder_path.clone(), None, true);
     let joiner_path = root.path().join("joiner");
     let (joiner, joiner_window, joiner_queue) = app(joiner_path.clone(), None, true);
     unlock_current(&founder, &founder_window, &founder_queue).await;
@@ -4641,6 +4926,11 @@ async fn native_text_connected_join(block_delete_archive: bool) {
     let found = found_request(&founder_window, 1, "Founder group");
     run(&founder_queue).await;
     let found = found_value(found.await.unwrap());
+    assert!(
+        founder_path.join("chat-v2-removed-holds").is_dir()
+            && founder_path.join("chat-v2-review-decisions").is_dir(),
+        "first native Found publishes only after its exact original review mounts"
+    );
     let listing = resume_request(&founder_window);
     run(&founder_queue).await;
     let listing = found_value(listing.await.unwrap());
@@ -4700,15 +4990,18 @@ async fn native_text_connected_join(block_delete_archive: bool) {
     })
     .await
     .expect("the native Join completes over the founder TCP actor");
-    assert!(
-        matches!(initial_response, tauri::ipc::InvokeResponse::Ok(_)),
-        "initial native join after metadata capture release"
-    );
+    if let tauri::ipc::InvokeResponse::Err(error) = &initial_response {
+        panic!("initial native join after metadata capture release refused: {error:?}");
+    }
     let original = found_value(initial_response);
     assert_eq!(original["backend"], "text-v2");
     assert_eq!(original["name"], "My joined group");
     assert_eq!(original["display_name"], "Member");
     assert_eq!(original["channel"], found["channel"]);
+    assert!(
+        joiner_path.join("chat-v2-review-received").is_dir(),
+        "the first native joined result already has its original receiver"
+    );
     timeout(Duration::from_secs(5), startup.arrived.notified())
         .await
         .expect("Join published before starting the original row workers");
@@ -4791,6 +5084,21 @@ async fn native_text_connected_join(block_delete_archive: bool) {
         body["expectedContext"] = row["context"].clone();
         body
     };
+    let reviewed = command_value_after_busy(
+        &joiner_window,
+        &joiner_queue,
+        "get_message_page",
+        history::BUSY,
+        archive_request(&original, serde_json::json!({ "reviewedAfter": null })),
+    )
+    .await;
+    assert_eq!(
+        reviewed,
+        serde_json::json!({
+            "backend": "text-v2", "scope": "reviewed-archive-index",
+            "status": "current", "ids": [], "next": null
+        })
+    );
     let empty_archive = serde_json::json!({
         "backend":"text-v2","scope":"received-archive-index","available":true,"ids":[],"more":false,
     });

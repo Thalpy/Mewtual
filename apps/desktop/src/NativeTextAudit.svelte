@@ -3,10 +3,17 @@
   import { invoke } from "@tauri-apps/api/core";
   import {
     readNativeAudit, readNativeHeldPosts, readNativeOriginalPage,
-    type NativeAuditPage, type NativeHeldPage, type NativeOriginalPage,
+    type NativeAuditPage, type NativeHeldPage, type NativeHeldPost, type NativeHistoryTarget, type NativeOriginalPage,
   } from "./native-text-history.ts";
+  import type { NativeReviewDisposition } from "./native-text-driver.ts";
+  import type { NativeReviewChoice, NativeTextReviewIntent } from "./native-text-intents.ts";
 
-  let { server, channel, context }: { server: number; channel: string; context: string } = $props();
+  let { server, channel, context, pendingReview = null, onReview, onRetryReview }: {
+    server: number; channel: string; context: string;
+    pendingReview?: NativeTextReviewIntent | null;
+    onReview?: (target: NativeHistoryTarget, item: NativeHeldPost, choice: NativeReviewChoice) => Promise<NativeReviewDisposition | null>;
+    onRetryReview?: (intent: NativeTextReviewIntent) => Promise<NativeReviewDisposition | null>;
+  } = $props();
   let dialog: HTMLDialogElement;
   let target = $state<string | null>(null);
   let after = $state<string | null>(null);
@@ -18,6 +25,8 @@
   let localCursor = $state<{ next: string; end: string | null }>({ next: "0", end: null });
   let view = $state<"received" | "local" | "held">("received");
   let loading = $state(false);
+  let deciding = $state(false);
+  let decisionStatus = $state("");
   let failure = $state("");
   let request = 0;
 
@@ -62,7 +71,7 @@
     }
   }
 
-  async function loadHeld(cursor: string | null = null) {
+  async function loadHeld(cursor: string | null = null, notice = "") {
     const original = ++request;
     const current = () => original === request && dialog.open;
     view = "held";
@@ -71,6 +80,8 @@
     localPage = null;
     heldPage = null;
     loading = true;
+    deciding = false;
+    decisionStatus = notice;
     failure = "";
     try {
       const result = await readNativeHeldPosts(invoke, { server, channel, context }, cursor, current);
@@ -82,6 +93,30 @@
     }
   }
 
+  async function submitDecision(save: () => Promise<NativeReviewDisposition | null>) {
+    if (deciding) return;
+    const original = ++request;
+    const current = () => original === request && dialog.open && view === "held";
+    deciding = true;
+    decisionStatus = "";
+    let outcome: NativeReviewDisposition | null = null;
+    try {
+      outcome = await save();
+    } catch {
+      if (current()) decisionStatus = "Could not confirm the decision. Retry the same decision.";
+    } finally {
+      if (current()) deciding = false;
+    }
+    if (outcome && current()) await loadHeld(null, outcome === "superseded" ? "The decision changed. Review the current post." : "");
+  }
+
+  function decide(item: NativeHeldPost, choice: NativeReviewChoice) {
+    const submit = onReview;
+    if (!submit) return;
+    const target = { server, channel, context };
+    void submitDecision(() => submit(target, item, choice));
+  }
+
   function clear() {
     request++;
     page = null;
@@ -89,6 +124,8 @@
     heldPage = null;
     heldAfter = null;
     loading = false;
+    deciding = false;
+    decisionStatus = "";
     failure = "";
   }
 
@@ -96,6 +133,7 @@
 
   const labels = { create: "Original message", edit: "Edit", delete: "Deletion", join: "Combined revisions" };
   const localStatus = { pending: "Saved here", submitted: "Submitted", held: "Held on this device" };
+  const reviewChoice = { approve: "Approved", reject: "Rejected", reopen: "Reopened" };
 </script>
 
 <button type="button" class="ghost small" onclick={() => {
@@ -117,6 +155,15 @@
     <button type="button" class="ghost small" onclick={() => void load(null, listAfter)}>Back to messages</button>
   {/if}
   <div aria-busy={loading}>
+    {#if view === "held" && decisionStatus}
+      <p role="status">{decisionStatus}</p>
+    {/if}
+    {#if view === "held" && pendingReview && onRetryReview}
+      {@const original = pendingReview}
+      {@const retry = onRetryReview}
+      <button type="button" class="ghost small" disabled={deciding}
+        onclick={() => void submitDecision(() => retry(original))}>Retry decision</button>
+    {/if}
     {#if loading}
       <p role="status">Loading history…</p>
     {:else if failure}
@@ -139,8 +186,18 @@
           <ul>
             {#each heldPage.items as item (item.caseId)}
               <li>
-                <strong>Awaiting review</strong>
+                <strong>{item.decision.status === "selected"
+                  ? reviewChoice[item.decision.choice]
+                  : item.decision.status === "undecided" ? "Awaiting review" : "Review status unavailable"}</strong>
                 <p class="message">{item.body.text}</p>
+                {#if onReview && !pendingReview}
+                  {#if item.decision.status === "undecided" || (item.decision.status === "selected" && item.decision.choice === "reopen")}
+                    <button type="button" class="ghost small" disabled={deciding} onclick={() => decide(item, "approve")}>Approve</button>
+                    <button type="button" class="ghost small" disabled={deciding} onclick={() => decide(item, "reject")}>Reject</button>
+                  {:else if item.decision.status === "selected" && item.decision.choice === "reject"}
+                    <button type="button" class="ghost small" disabled={deciding} onclick={() => decide(item, "reopen")}>Reopen</button>
+                  {/if}
+                {/if}
                 <details>
                   <summary>Signed record details</summary>
                   <dl>

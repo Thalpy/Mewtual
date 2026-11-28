@@ -7,7 +7,7 @@ import { persistenceWarning, sendAndRefresh, sendOutcome } from "./message-send.
 import { closeContinuityAcknowledgement, NativeVaultLockCoordinator } from "./window-close.ts";
 import { VideoReviewQueue } from "./video-review.ts";
 import { createNativeTextDriver } from "./native-text-driver.ts";
-import { decodeNativeReceived, decodeNativeReceivedNotice, isNativeHistoryBusy, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived } from "./native-text-history.ts";
+import { decodeNativeReceived, decodeNativeReceivedNotice, isNativeHistoryBusy, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, readNativeReviewedArchive, updateNativeReceived } from "./native-text-history.ts";
 import { PendingSendRetry } from "./pending-send-retry.ts";
 import { decodeNativeMembershipNotice, decodeRestoredChatSession } from "./native-text-session.ts";
 import { sessionContinuationCurrent } from "./viewscope.ts";
@@ -44,13 +44,14 @@ export function pendingManagerBackend(initial:unknown){return{sealed:JSON.string
 /** Shared test fixture for real App save queue, hydration, decisions and submit/retry. */
 export function pendingManagerApp(initial: unknown, backend=pendingManagerBackend(initial)) {
   const dependencies = { initial, backend, addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingMutation, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, resolvePendingSend, recoverQuarantinedIntent, quarantinedPendingIntent, validateMutationPayload, validateSendPayload, pendingContinuityVersion, sendRefusedUnaccepted,
-    MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, sendOutcome, NativeVaultLockCoordinator, closeContinuityAcknowledgement, VideoReviewQueue, createNativeTextDriver, decodeNativeReceived, decodeNativeReceivedNotice, isNativeHistoryBusy, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived, PendingSendRetry, decodeNativeMembershipNotice, decodeRestoredChatSession, sessionContinuationCurrent };
+    MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, sendOutcome, NativeVaultLockCoordinator, closeContinuityAcknowledgement, VideoReviewQueue, createNativeTextDriver, decodeNativeReceived, decodeNativeReceivedNotice, isNativeHistoryBusy, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, readNativeReviewedArchive, updateNativeReceived, PendingSendRetry, decodeNativeMembershipNotice, decodeRestoredChatSession, sessionContinuationCurrent };
   return new Function(...Object.keys(dependencies), `
     let locked = false, uiStateReady = false, uiStateLoadGeneration = 1, uiStateHydrationAttempt = 0, uiStateSaveTimer,uiSessionRetired=false;
     let uiStateSaveChain = Promise.resolve(), uiStateSaveFailed = false, uiStateFailureToast = 0;
     let pendingSends = {}, recoveredSendDrafts = {}, nativeTextIntents = {}, pendingSendErrors = {}, pendingSendResolution = null, uiContinuityVersion = 1;
     let retryingPendingSends = false, pendingManagerOpen = false, sending = false;
     let chatBackend = "legacy", nativeRejoinRequired = false, nativeOriginals = [], nativeCursor = null, nativeHistoryLoading = false, nativeHistoryLoaded = false, nativeHistoryError = null, nativeHistoryRevision = 0, nativeRetryGeneration = null, viewGeneration = 1;
+    let nativeReviewGeneration = null;
     let nativePages = [], nativeHistoryCalls = [];
     let nativeOwnMessages = {}, nativeOwnLoading = false, nativeOwnPages = [], nativeOwnCalls = [];
     let nativeReceived = [], nativeReceivedScope = null, nativeReceivedRevision = 0;
@@ -58,6 +59,7 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
     let nativeReceivedPump = null;
     let nativeArchive = null, nativeArchiveRevision = 0, nativeArchiveFirstPage = false, nativeArchiveReading = false, nativeArchiveReadChanges = null;
     let nativeArchivePages = [], nativeArchiveCalls = [];
+    let nativeReviewedPages = [], nativeReviewedCalls = [];
     const untrack = read => read();
     let nativeRemovedContexts = {}, membersOpen = false;
     let busy=false,showAdd=false,startTab="join";
@@ -118,6 +120,11 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
     const chatScopeKey = (s,c) => s + ":" + c;
     const chanKey = () => activeServerId === null || !cur?.active ? null : chatScopeKey(activeServerId,cur.active);
     const invoke = async (command, args) => {
+      if (command === "decide_native_chat_held_post") {
+        if (Object.keys(args).length !== 11 || "trace" in args) throw new Error("invalid decision fields");
+        submissions.push({ command, args: structuredClone(args), sealed: JSON.parse(backend.sealed) });
+        return await submitAnswer(args);
+      }
       if (command === "preview_invite" || command === "join_server") {
         nativeJoinCalls.push({ command, args: structuredClone(args) });
         const next = nativeJoinReplies.shift();
@@ -129,6 +136,12 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
         const next = nativeOwnPages.shift();
         if (next instanceof Error) throw next;
         return await (next ?? {backend:"text-v2",scope:"own-message-revision",action:args.ownAction,scanning:false,item:null});
+      }
+      if (command === "get_message_page" && "reviewedAfter" in args) {
+        nativeReviewedCalls.push(structuredClone(args));
+        const next = nativeReviewedPages.shift();
+        if (next instanceof Error) throw next;
+        return await (next ?? { backend: "text-v2", scope: "reviewed-archive-index", status: "unavailable", ids: [], next: null });
       }
       if (command === "get_message_page" && ("archiveAfter" in args || "archivedAction" in args)) {
         nativeArchiveCalls.push(structuredClone(args));
@@ -163,6 +176,7 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
       backend.nativeWrites = write.catch(() => {}); return write;
     };
     const invokeDebugged = async (command, args) => {
+      if (command === "decide_native_chat_held_post") return { value: await invoke(command, { ...args, trace: 1 }) };
       const call = { command, args: structuredClone(args), sealed: JSON.parse(backend.sealed) };
       if (command === "stop_durable_chat") { stops.push(call); return { value: await stopAnswer(args) }; }
       submissions.push(call);
@@ -211,10 +225,13 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
       nativeOwnHistory(...pages) { nativeOwnPages = pages; },
       nativeOwn() { return { messages: structuredClone(nativeOwnMessages), calls: nativeOwnCalls }; },
       nativeChange: changeNativeOwnMessage,
+      nativeDecide: decideNativeHeldPost, nativeRetryDecision: retryNativeHeldDecision,
       nativeRefresh: refreshNativeHistory,
       nativeArchiveRefresh: refreshNativeArchive,
       nativeArchivePages(...pages) { nativeArchivePages = pages; },
       nativeArchiveCalls: () => nativeArchiveCalls,
+      nativeReviewedPages(...pages) { nativeReviewedPages = pages; },
+      nativeReviewedCalls: () => nativeReviewedCalls,
       requestNativeArchive,
       loadRequestedNativeArchive,
       archive() { return structuredClone(nativeArchive); },

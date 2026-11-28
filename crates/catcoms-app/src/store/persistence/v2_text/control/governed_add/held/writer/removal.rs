@@ -2,7 +2,7 @@
 use super::*;
 use crate::store::persistence::v2_text::control::governed_add::archive::removal;
 use crate::store::persistence::v2_text::io::archive_child;
-use catcoms_replication::chat::owner_header::{OwnerBodyId, SignedOwnerHeader};
+use catcoms_replication::chat::owner_header::{OwnerBodyId, OwnerHeaderId, SignedOwnerHeader};
 use catcoms_sync::owner_v2::{V2FounderRemoveOutcomeData, V2InstalledFounderAddData};
 
 const ROLE: &[u8] = b"catcoms/private-chat-text-governed-remove/v1\0";
@@ -40,6 +40,14 @@ pub(in crate::store) struct PreparedGovernedRemoveFence {
 }
 
 impl PreparedGovernedRemoveFence {
+    pub(in crate::store) fn require_warm_review_parent_anchor(
+        &mut self,
+        guard: &V2TextCurrentGroupGuard<'_, '_>,
+        anchor: (OwnerHeaderId, u64),
+    ) -> Result<(), AppError> {
+        self.prior.require_warm_review_parent_anchor(guard, anchor)
+    }
+
     pub(in crate::store) fn prepare(
         store: &ServerStore,
         source: &GenesisSourceDataRef<'_>,

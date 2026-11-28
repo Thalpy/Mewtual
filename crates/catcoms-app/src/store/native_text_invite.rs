@@ -141,6 +141,42 @@ fn check_parts<'a>(
     check_reservation(reservation, &anchor.group)
 }
 
+pub(in crate::store) fn checked_founder_peer(
+    binding: &SignedInviteBindingData,
+    reservation: &[u8],
+) -> Result<catcoms_rt::PeerId, ChatError> {
+    checked_founder_reservation(binding, reservation).map(|value| value.0)
+}
+
+/// Reconstruct a numeric route from the signed reservation and separate local consent.
+pub(in crate::store) fn checked_founder_route(
+    binding: &SignedInviteBindingData,
+    reservation: &[u8],
+    host: std::net::IpAddr,
+) -> Result<(catcoms_rt::PeerId, String), ChatError> {
+    let (peer, address, port) = checked_founder_reservation(binding, reservation)?;
+    let family = if host.is_ipv4() { "ip4" } else { "ip6" };
+    Ok((peer, format!("/{family}/{host}/tcp/{port}/p2p/{address}")))
+}
+
+fn checked_founder_reservation<'a>(
+    binding: &SignedInviteBindingData,
+    reservation: &'a [u8],
+) -> Result<(catcoms_rt::PeerId, &'a str, u16), ChatError> {
+    use catcoms_replication::chat::join_bindings::JoinPayloadKindData;
+    if reservation.len() > MAX_ROUTING
+        || !binding.verify()
+        || binding.spec_data().inviter != binding.spec_data().anchor.founder
+        || JoinPayloadKindData::RoutingPlan.commitment_data(reservation)?
+            != binding.spec_data().public_routing_plan
+    {
+        return Err(ChatError::Scope);
+    }
+    // The same closed reservation grammar as the original invitation:
+    // authenticated identity, TCP port and exactly zero contact addresses.
+    check_reservation(reservation, &binding.spec_data().anchor.group)
+}
+
 fn check_reservation<'a>(
     bytes: &'a [u8],
     group: &[u8],

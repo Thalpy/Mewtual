@@ -20,6 +20,14 @@ and real signature do not authenticate its claimed removal or store
 scope. A future host must obtain those from its own selected prefix and
 encrypted case selection, then enforce current authorization for access.
 
+The public review header authenticates the choice, a stable case ID and
+commitment, and the exact case predecessor under the original founder
+pin. This exposes decision choice, order and case correlation when served.
+Private Reject and Reopen bodies are never valid approval records. The
+recipient still has to prove the membership anchor, selected case and
+original Remove before selecting an effect. Version 1 private headers
+provide no public case transition evidence.
+
 Chat V2 history discovery can reveal IDs and the scanned ordinal range of a
 current member's outbox to a peer with an explicitly approved signed contact
 and the current channel exporter. The native Source binds contact Admission
@@ -239,6 +247,37 @@ consent requires a fresh authenticated connection and contains no dial
 address. Forgetting the contacts revokes the original live approval.
 Rolling the local contact file back to an earlier authentic version at the
 same governing head can restore its previous consent.
+
+The separate optional A1 founder-peer record is not contact consent. It
+binds the complete original registration and only the original signed
+zero-address reservation. Cold startup can recover its PeerId for use on
+an independently authenticated existing connection; it retains no host/IP
+and cannot dial. Stage-only, foreign, partial or malformed optional bytes
+grant no hint. A complete final plus Stage grants a hint only when their
+ciphertext is identical and authentic for the original A1 scope; the cold
+reader retains both native identities and writes nothing. Create-new final
+output preserves a racing destination. An optional failure does not block
+the separately reverified original Join registration or ordinary startup;
+ID9 declaration/A2 always refuses this A1 interpretation. The same-vault
+component rollback boundary applies, but replaying this immutable original
+hint supplies no membership, signing, message or new-connection permission.
+
+An explicit A1 Remember can add one separate encrypted standing consent.
+The accepted zero-address reservation supplies the original founder, peer
+and signed TCP port. The local user supplies the numeric host. Saving also
+requires a live outbound connection to that exact endpoint. An inbound
+socket, another endpoint, or a replacement socket that preserves the peer
+lease cannot complete that proof. Attached workers reprove the original
+registration and current local and founder membership before using the
+same bounded endpoint scheduler. Incomplete or unreadable optional bytes
+grant no dial authority, and ID9/A2 use their own route proof.
+
+Forget rotates the original row's approval before it writes the clear.
+If the write fails, this mount keeps older approvals suppressed. A restart
+before durable Forget can recover the last selected complete record if
+there is no unresolved Stage. A cold rollback of authentic vault files
+can also restore the earlier consent, under the same local rollback model
+as existing member contact records.
 
 16 November Score/voice integration candidate: this branch combines the reviewed
 Score and voice admission history with the newer Chat/security and Studio save
@@ -4295,6 +4334,130 @@ The archive view cannot sign or admit ordinary live effects. Local receipt
 selection does not establish when another device received an original.
 Remote originals under an obsolete Admission still require separate
 authorization evidence. Local outbox ancestry carries no display effect.
+
+The ID11 decision namespace succeeds only the founder's authenticated
+ID10 catalog. Its recovery seed uses a separate key and domain. Declaration
+retains the original ID10 marker and directory, shared history, pin and native
+founder leaves through exact Stage selection. The declaration covers the
+original authenticated empty decision head before Stage selection. A foreign claim, crossed
+marker, unexpected entry or unsupported opener stops before the journal
+can acquire authority. Once selected, ID11 prevents an ID10-only binary
+from treating the vault as an older layout. Native startup provisions it
+after covering and reopening the original ID10 declaration. The mounted
+declaration supplies no decision or message admission. Once declared, a
+damaged marker or directory leaves the optional mount unavailable and
+prevents reprovisioning. Review checks its exact mount before classifying
+transaction files. Recovery of an in-progress catalog declaration still
+requires all of the original physical evidence.
+
+The first review signature requires the original founder, exact witnessed
+hold, the selected frozen admission and a strict ID8 absence check. A
+successful dedicated native key entry is required before obtaining Raw.
+Once obtained, that exact output can be covered after UI cancellation.
+A same-vault warm retry can finish its own short file and an Attempt
+provably left before its signer was called. Cold or ambiguous Attempt
+has no permission to enter the key again. A file that is merely readable
+is synced by its original identity before use. Result disclosure remains
+bound to the current native command. Historical recovery may use an
+earlier exact membership Header only for a retained signature. It must
+prove that Header and MLS epoch in the selected lineage and recheck the
+original current archive and held record.
+
+The recipient ID12 journal has its own critical declaration, authenticated
+selector and write-ahead file. The live source binds each new signed header
+to the original pinned founder, current native row and selected membership
+ancestry. Cold recovery can complete a covered metadata write with the
+original pin and exact physical predecessor. New admission and display
+require their own live proofs. The selector binds each lane's exact Head.
+Missing files under a selected lane stop that lane's review, and an exact
+signed contradiction freezes the lane. The ordinary message index stays
+independent. Encrypted storage detects substitutions against a surviving
+selector. Cold restoration of an earlier authenticated selector can select
+the older Head when its exact index files survive. That can rewind the
+remembered review freeze or storage allowance. An external monotonic
+anchor would be needed to detect replay of the entire component.
+
+A recipient approval receipt requires the same exact signed Approve under
+both selected header indexes, the current joined source, its selected
+historical Remove and an exact verified local reply parent when present.
+The receipt preserves the original signed Create in its own encrypted
+record and immutable action index. Its write-ahead tag covers the already
+admitted effect. Recovery rechecks the old selector, exact immutable
+outputs and the single index change before retiring the pending record.
+Ordinary ID8 and publication authority remain separate.
+
+An exact joined display can use a covered receipt after a healthy ID8
+lookup establishes that the Create is absent. The selected case,
+original signature and membership lineage are rechecked in a detached
+archive view. At final native publication both the ordinary absence and
+the group-specific receipt observation must still be current. A new
+ordinary archive write or a conflicting review selection can revoke the
+prepared view. The reviewed copy grants no authority to sign, mutate,
+serve the post as an ordinary original, or supply a new reply parent.
+
+The first private selection checks the same exact Raw, signing files
+and held original under the founder loan. An authenticated write-ahead
+file commits the encrypted immutable record, the intent and case index
+pages, and the encrypted first head. These outputs are synced before the staged head is renamed and
+covered. Only the pre-commit scratch name can classify a short frame
+for replacement, and only while all selection outputs are absent.
+After covering the exact selected head, recovery proves the immutable
+record and both index pages before retiring the exact signing inputs.
+The write-ahead file retires last, with a final absence check for the
+inputs. Loss of the whole journal cannot supply a new empty baseline.
+Later decisions bind the original encrypted head before key entry.
+The pending append verifies both original selected index paths and
+replays the exact copy-on-write edits. When the new head is covered, a
+bounded path at each obsolete page's authenticated minimum proves it
+unreachable before removal. The selected head and exact file handles
+remain held through retirement. The immutable decision records stay
+available for original-intent recovery. The connected route can disclose the
+exact selected Approve proof to a current member. The joined member can
+cover its own receipt for that original. Exact-ID display uses the
+separate guarded archive path described above. A selected-only encrypted
+receipt index can enumerate exact IDs on navigation or restart.
+
+The background header poll uses the same original connected founder and
+selected member prefix as the explicit request. The durable cursor is
+scoped to the original pin. A cached local signed card stays on its
+original native row and is revalidated against the selected membership
+on every send. The same source can fetch an approved body by exact ordinal
+and entry for its already attached channel. It keeps a bounded cache of
+recent active-row receipts. Waiting for a parent leaves later approvals
+eligible. An authenticated selected review freeze suppresses further
+review work and invalidates the original row's displayed receipt data.
+Receipt enumeration checks the original row, channel, membership view and
+revision again at native publication. At most two selected entries are
+inspected per page. Only the requested channel's IDs can leave native. The
+fixed-width encrypted continuation can advance a filtered page without
+exposing another channel's index key. First Join can declare the receiver
+only after proving original warm registration. It preserves the exact
+Pending, pin, Welcome, Outcome and native registry. Storage admitted
+before a lock can finish without making the old native reply current.
+The private warm native handler recognizes the exact review successors
+of its original shared-history layout. This parsing capability gives no
+rejoin or cold declaration recovery authority. Fresh Found retains the
+original current file after each declaration. The protected row selector
+requires both review mounts and the exact selected file before and after
+reading the native row. A close between declarations prevents the stale
+request from starting the next one.
+
+A main-window decision command takes exact held-case coordinates and an
+intent. It uses the original warm or recovered founder's own key and
+signed Case index. The warm founder binds its protected signing scope to
+the original issuer installed with its first Add.
+The held-post status read checks the original hold and current decision
+independently. Missing required files cannot prove an undecided case.
+The original mounted warm founder also rechecks the exact current
+membership and its authenticated archived predecessors when reading or
+serving decisions from earlier epochs. The private journal and signed
+requester retain their independent checks through the final response.
+The result of a retried mutation belongs to that exact intent and may be
+older than the case's current status. An authenticated miss in the Intent
+index and a different selected revision of the exact case can retire a
+superseded request. Outstanding signing controls, staged selection or
+retained warm work defeat this proof. The renderer retains the same request
+after an uncertain response or continuity write.
 
 ## Chat history admission and retained audit (20 October, continuation)
 

@@ -10,14 +10,20 @@ use crate::store::persistence::v2_member_outbox::fs::{
     bounded_entries, create_namespace, observe_directory, HeldDirectory, Presence,
 };
 use crate::store::persistence::v2_review_hold::{
-    disk::{HeldReviewQuery, HoldCandidate, HoldDisk, HoldRootRead, PreparedHeldWindow, WORK},
+    disk::{
+        HeldReviewQuery, HoldCandidate, HoldDisk, HoldRootRead, PreparedHeldWindow,
+        SelectedReviewOriginal, WORK,
+    },
     HeldAuditObservation, HeldCase, HoldScope, NativeTextHeldReviewContinuation,
 };
 use crate::store::persistence::v2_shared_history::{disk::DISK_FEE, SharedHistoryScope};
 use catcoms_replication::chat::{
     SignedAction, V2GeneralPrefixVerifier, V2RemovedCreateEvidence, V2RemovedCreateRecord,
 };
+#[cfg(test)]
+pub(in crate::store) use declaration::warm_fault::{with_warm_review_hook, WarmReviewCut};
 pub(super) use declaration::{recover, require_no_scratch};
+pub(in crate::store) use declaration::{WarmFounderReviewCurrent, WarmFounderReviewOrigin};
 use std::{collections::BTreeMap, sync::Mutex};
 
 const MAX_SCOPES: usize = 8;
@@ -37,22 +43,47 @@ pub(in crate::store) struct SelectedReviewHold {
 }
 
 impl SelectedReviewHold {
-    pub(super) fn capture(
-        store: &ServerStore,
-        key: &[u8; 32],
-        descriptor: &[u8],
-    ) -> Result<Self, AppError> {
-        let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+    fn mount_bytes(store: &ServerStore) -> Result<usize, AppError> {
         // Keep the hold root, up to eight scoped names, the optional
         // witness directory and this operation's path copies paid.
-        let paths = fixed(store, false, DIRECTORY_NAME)?
+        fixed(store, false, DIRECTORY_NAME)?
             .as_os_str()
             .len()
             .checked_add(80)
             .and_then(|bytes| bytes.checked_mul(2 * (MAX_SCOPES + 4)))
             .and_then(|bytes| bytes.checked_add(16 * 1024))
-            .ok_or_else(denied)?;
-        let fee = policy.current.archive.pending.pool.try_reserve(paths)?;
+            .ok_or_else(denied)
+    }
+
+    fn reserve_mount(store: &ServerStore) -> Result<CatalogReadReservation, AppError> {
+        let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        policy
+            .current
+            .archive
+            .pending
+            .pool
+            .try_reserve_classified(Self::mount_bytes(store)?, || AppError::ChatV2ArchiveBusy)
+    }
+
+    pub(super) fn capture(
+        store: &ServerStore,
+        key: &[u8; 32],
+        descriptor: &[u8],
+    ) -> Result<Self, AppError> {
+        Self::capture_prepaid(store, key, descriptor, Self::reserve_mount(store)?)
+    }
+
+    fn capture_prepaid(
+        store: &ServerStore,
+        key: &[u8; 32],
+        descriptor: &[u8],
+        fee: CatalogReadReservation,
+    ) -> Result<Self, AppError> {
+        let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        fee.validate(
+            &policy.current.archive.pending.pool,
+            Self::mount_bytes(store)?,
+        )?;
         let marker = read(
             &fixed(store, false, MARKER_NAME)?,
             review_hold_namespace::MARKER_LEN,
@@ -94,6 +125,58 @@ impl SelectedReviewHold {
 }
 
 impl ServerStore {
+    /// Hold the strict ID8 absence proof through decision admission. A
+    /// history read error cannot become evidence of a missing original.
+    pub(in crate::store) fn with_absent_ordinary_review_target<T>(
+        &self,
+        scope: SharedHistoryScope,
+        case: HeldCase,
+        review: impl FnOnce() -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        self.with_selected_shared_history(scope, None, |ordinary, _, key, pool| {
+            let selected = ordinary.read(
+                key,
+                case.action,
+                &self._session,
+                pool.try_reserve(DISK_FEE)?,
+            )?;
+            if selected.is_some() {
+                return Err(denied());
+            }
+            review()
+        })
+    }
+
+    /// Prepare the exact captured hold for reproof after the founder
+    /// resolves ordinary dependencies. The hold mutex leaves before any
+    /// ID8 or ID5 ancestry read to preserve their existing lock order.
+    pub(in crate::store) fn prepare_held_review_original(
+        &self,
+        scope: SharedHistoryScope,
+        expected: HeldCase,
+        mut require_current: impl FnMut() -> Result<(), AppError>,
+    ) -> Result<SelectedReviewOriginal, AppError> {
+        let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        let pool = &policy.current.archive.pending.pool;
+        let key = Zeroizing::new(self.keys.db_key()?);
+        let mut mount = self.review_hold_mount.try_lock().map_err(|_| denied())?;
+        let owner = mount.as_mut().ok_or_else(denied)?;
+        require_current()?;
+        owner.require(self)?;
+        let directory = owner.read_partition(scope, &key)?.ok_or_else(denied)?;
+        let witnesses = owner.read_witness_directory(self)?.ok_or_else(denied)?;
+        let marker = owner.marker.1.as_slice().try_into().map_err(|_| denied())?;
+        let root = owner.audit_root(self, None)?;
+        let disk = HoldDisk::from_held(directory, scope, &key, pool.clone())?
+            .with_selection_witnesses(witnesses, marker);
+        let mut selected =
+            disk.prepare_selected_review_original(&key, expected, root, &self._session)?;
+        require_current()?;
+        owner.require(self)?;
+        selected.require_original()?;
+        Ok(selected)
+    }
+
     /// Read only the selected scoped directory and authenticated covering
     /// witnesses. An unrelated archive WAL is never opened by this read.
     pub(in crate::store) fn read_selected_review_window(

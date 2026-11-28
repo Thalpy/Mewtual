@@ -37,6 +37,7 @@ pub(in crate::store) struct Handler {
     payment: Arc<Payment>,
     joined_pin_layout: bool,
     shared_history_layout: Opening,
+    warm_review_layout: bool,
     rejoin_startup: bool,
 }
 impl Handler {
@@ -78,6 +79,7 @@ impl Handler {
             payment,
             joined_pin_layout: false,
             shared_history_layout: Opening::Disabled,
+            warm_review_layout: false,
             rejoin_startup: false,
         })
     }
@@ -99,6 +101,22 @@ impl Handler {
         self.joined_pin_layout = true;
         self.shared_history_layout = opening;
         self
+    }
+
+    /// Parse the private review successors on a freshly mounted native
+    /// shared-history layout. Cold claim recovery and rejoin retain their
+    /// separate authority and are never enabled by this warm reader.
+    pub(in crate::store::critical_namespaces::native_registry) fn with_warm_review_layout(
+        mut self,
+    ) -> Self {
+        self.warm_review_layout = true;
+        self.with_shared_history_layout(Opening::Required)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn accepts_warm_review_layout(
+        &self,
+    ) -> bool {
+        self.warm_review_layout
     }
 
     /// Only the original private native startup dispatch uses this grammar.

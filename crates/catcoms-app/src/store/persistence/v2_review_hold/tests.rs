@@ -14,7 +14,7 @@ use rand_core::SeedableRng;
 
 pub(super) const KEY: [u8; 32] = [80; 32];
 
-pub(super) fn scope() -> SharedHistoryScope {
+pub(in crate::store::persistence) fn scope() -> SharedHistoryScope {
     SharedHistoryScope {
         vault: [1; 32],
         group: [2; 16],
@@ -27,7 +27,7 @@ pub(super) fn scope() -> SharedHistoryScope {
 
 /// Build wire DATA as a decrypted vault would supply it. This fixture never
 /// constructs provenance. Core tests cover the signed governing reproof.
-pub(super) fn fixture(
+pub(in crate::store::persistence) fn fixture(
     scope: SharedHistoryScope,
     admission: u8,
     nonce: u8,

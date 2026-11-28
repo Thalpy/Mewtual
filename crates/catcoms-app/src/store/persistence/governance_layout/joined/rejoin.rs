@@ -263,10 +263,28 @@ impl ServerStore {
         removal: SelectedRejoinRemoval,
         inventory: &UpgradeInventory,
     ) -> Result<[u8; 32], AppError> {
+        self.with_selected_rejoin_catalog(
+            registration,
+            removal,
+            inventory,
+            rejoin_namespace::selected_frame_digest,
+        )
+    }
+
+    // The selected Current File stays held on both sides of an installed
+    // historical read. The callback does not stand in for that File or the
+    // original retired A1. Only the installed replay holder uses a witness.
+    fn with_selected_rejoin_catalog<T>(
+        &self,
+        registration: NativeTextJoinedRegistrationData,
+        removal: SelectedRejoinRemoval,
+        inventory: &UpgradeInventory,
+        authenticate: impl FnOnce(&[u8; 32], &[u8], &[u8; 32]) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
         inventory.require(self)?;
         self.require_recovered_joined_removal(registration, removal)?;
         absent(&fixed(self, false, REJOIN_STAGE)?)?;
-        let digest = {
+        let auth = {
             let slot = self.joined_pin_index.try_lock().map_err(|_| denied())?;
             let index = slot.as_ref().ok_or_else(denied)?;
             index.require(self)?;
@@ -283,11 +301,7 @@ impl ServerStore {
                 3 * critical_namespaces::pending_join_codec::MAX_CATALOG_FRAMED + 16 * 1024,
             )?;
             let key = Zeroizing::new(self.keys.db_key()?);
-            let digest = rejoin_namespace::selected_frame_digest(
-                &key,
-                recorded,
-                &self.chat_vault_domain()?,
-            )?;
+            let auth = authenticate(&key, recorded, &self.chat_vault_domain()?)?;
             let selected = fixed(self, false, critical_namespaces::Slot::Current.name())?;
             let (writable, opened) = open_exact_write(&selected, WriteMode::Existing)?;
             if opened != identity {
@@ -298,12 +312,12 @@ impl ServerStore {
             inventory.sync_rejoin_catalog_parent(self)?;
             exact_held(&selected, &writable, identity, recorded)?;
             index.require(self)?;
-            digest
+            auth
         };
         self.require_recovered_joined_removal(registration, removal)?;
         absent(&fixed(self, false, REJOIN_STAGE)?)?;
         inventory.require(self)?;
-        Ok(digest)
+        Ok(auth)
     }
 
     pub(in crate::store) fn prepare_retired_rejoin_catalog(

@@ -12,6 +12,7 @@ mod cell;
 pub(super) mod data;
 mod facade;
 mod governed;
+pub(in crate::store) use governed::founder_review_intake;
 mod join_tcp;
 pub use governed::{
     NativeTextColdFounderGoverningRequest, NativeTextColdFounderGoverningRequests,
@@ -39,6 +40,7 @@ pub use sources::{
     NativeTextCreationRequest, NativeTextCreationSettings, NativeTextFounderDependencyProvider,
     NativeTextFounderMemberIngressPreparation, NativeTextFounderMemberPublication,
     NativeTextFounderMemberPublicationReceipt, NativeTextFounderMemberReceiver,
+    NativeTextFounderRouteApproval, NativeTextFounderRouteAttempt, NativeTextFounderRouteGesture,
     NativeTextInvitePublication, NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,
     NativeTextJoinedArchivedActions, NativeTextJoinedContactApprovalProof,
     NativeTextJoinedContactConsent, NativeTextJoinedDelivery,
@@ -52,15 +54,17 @@ pub use sources::{
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
     NativeTextJoinedMemberSaveJob, NativeTextJoinedReceivedOriginal, NativeTextJoinedReconnect,
-    NativeTextJoinedRequestPreparation, NativeTextJoinedRowSelection,
-    NativeTextJoinedSavedContactApprovals, NativeTextJoinedSelectionPreparation,
-    NativeTextMemberAdmissionFailure, NativeTextMemberBudget, NativeTextMemberFinalPreparation,
-    NativeTextMemberHistoryItem, NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus,
-    NativeTextMemberJob, NativeTextMemberPreparation, NativeTextMemberSaveJob,
-    NativeTextRuntimeSelection, NativeTextSourceBudget, NativeTextSourceCommand,
-    NativeTextSourcePolicy, NativeTextSourcePreparation, NativeTextSourceRetirement,
-    NativeTextSourceRetirementPreparation, NativeTextSourceRetirementRefusal,
-    NativeTextSourceRetirementStatus, NativeTextSources, NativeTextUiAddRetirement,
+    NativeTextJoinedRequestPreparation, NativeTextJoinedReviewExchange,
+    NativeTextJoinedReviewResponse, NativeTextJoinedReviewedActions, NativeTextJoinedReviewedPage,
+    NativeTextJoinedRowSelection, NativeTextJoinedSavedContactApprovals,
+    NativeTextJoinedSelectionPreparation, NativeTextMemberAdmissionFailure, NativeTextMemberBudget,
+    NativeTextMemberFinalPreparation, NativeTextMemberHistoryItem, NativeTextMemberHistoryPage,
+    NativeTextMemberHistoryStatus, NativeTextMemberJob, NativeTextMemberPreparation,
+    NativeTextMemberSaveJob, NativeTextRuntimeSelection, NativeTextSourceBudget,
+    NativeTextSourceCommand, NativeTextSourcePolicy, NativeTextSourcePreparation,
+    NativeTextSourceRetirement, NativeTextSourceRetirementPreparation,
+    NativeTextSourceRetirementRefusal, NativeTextSourceRetirementStatus, NativeTextSources,
+    NativeTextUiAddRetirement,
 };
 mod ui_state;
 mod work_retirement;

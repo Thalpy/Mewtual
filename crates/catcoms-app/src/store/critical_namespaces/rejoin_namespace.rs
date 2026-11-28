@@ -9,6 +9,9 @@ use crate::AppError;
 use catcoms_wire::{Decoder, Encoder};
 use zeroize::Zeroizing;
 
+mod replay;
+pub(in crate::store) use replay::{inspect_installed_catalog_binding, InstalledCatalogBindingData};
+
 pub(super) const ID: u32 = 9;
 pub(super) const VERSION: u32 = 1;
 const TAG: &[u8] = b"catcoms/private-chat-v2-same-vault-rejoin/v1\0";
@@ -85,7 +88,7 @@ pub(super) fn prepare_declaration(
     original: &[u8],
     domain: &[u8; 32],
 ) -> Result<Zeroizing<Vec<u8>>, AppError> {
-    let prior = catalog::parse_shared_history_native_registry_layout(original, domain, true)?;
+    let prior = parse_joined_history(original, domain, false)?;
     let descriptor = encode(expected(&prior)?)?;
     let candidate =
         catalog_declaration::insert_entry_data(original, domain, ID, VERSION, &descriptor)?;
@@ -101,10 +104,30 @@ pub(super) fn verify_declaration(
     declaration: &[u8],
     domain: &[u8; 32],
 ) -> Result<(), AppError> {
-    let prior = catalog::parse_shared_history_native_registry_layout(original, domain, true)?;
+    let prior = parse_joined_history(original, domain, false)?;
     catalog_declaration::validate_insert_pair_data(original, declaration, domain, ID, VERSION)?;
-    let next = catalog::parse_rejoin_native_registry_layout(declaration, domain, true)?;
+    let next = parse_joined_history(declaration, domain, true)?;
     require_exact(next.rejoin_payload.ok_or_else(refused)?, expected(&prior)?)
+}
+
+/// Keep the original rejoin grammar closed. A recipient journal may already
+/// be selected in an updated vault, so only the physical rejoin owner accepts
+/// that additional dialect. The caller still binds the entire sealed frame.
+fn parse_joined_history<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    rejoin_selected: bool,
+) -> Result<catalog::Parsed<'a>, AppError> {
+    let parsed = if rejoin_selected {
+        catalog::parse_rejoin_native_registry_layout(plain, domain, true)
+    } else {
+        catalog::parse_shared_history_native_registry_layout(plain, domain, true)
+    }
+    .or_else(|_| catalog::parse_review_receive_family(plain, domain, true))?;
+    if parsed.rejoin_payload.is_some() != rejoin_selected {
+        return Err(refused());
+    }
+    Ok(parsed)
 }
 
 /// Seal the one catalog successor. No rejoin output is admissible before
@@ -165,7 +188,7 @@ pub(in crate::store) fn selected_frame_digest(
     domain: &[u8; 32],
 ) -> Result<[u8; 32], AppError> {
     let plain = open_framed_catalog(key, frame)?;
-    catalog::parse_rejoin_native_registry_layout(&plain, domain, true)?;
+    parse_joined_history(&plain, domain, true)?;
     Ok(*blake3::hash(frame).as_bytes())
 }
 

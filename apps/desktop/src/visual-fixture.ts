@@ -858,7 +858,7 @@ export function installVisualFixture(name: string): void {
   const transfers = new URLSearchParams(window.location.search).get("transfers") === "1";
   const pendingRecovery = new URLSearchParams(window.location.search).get("pending") === "oversized";
   const nativeMode = new URLSearchParams(window.location.search).get("nativeText");
-  const nativeText = nativeMode ? createVisualNativeTextFixture(nativeMode === "empty") : null;
+  const nativeText = nativeMode ? createVisualNativeTextFixture(nativeMode === "empty", nativeMode === "joined") : null;
   const uploads = studio ? createVisualFileUploads(ME.repeat(2)) : null;
   mockIPC(
     (command, payload) => {

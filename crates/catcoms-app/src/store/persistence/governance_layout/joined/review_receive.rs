@@ -1,0 +1,278 @@
+//! Original physical ownership of a recipient review journal. Its visible
+//! selector and contents are checked only by a paid review operation.
+use super::*;
+use crate::store::chat_admission::PhysicalMountNegative;
+use crate::store::persistence::v2_member_outbox::fs::{
+    read_bounded_held, require_exact_held, HeldDirectory,
+};
+
+mod approval;
+mod declaration;
+mod header;
+mod index;
+mod initial;
+mod journal;
+mod lane_head;
+mod manifest;
+mod objects;
+mod observation;
+mod plan;
+mod read;
+mod transaction_check;
+mod wal;
+mod write;
+pub(super) use declaration::{recover, require_no_claim_stage};
+#[cfg(test)]
+pub(in crate::store) use fault::{with_receiver_fault, with_receiver_hook, ReceiverFault};
+pub(in crate::store) use journal::pinned_founder;
+pub use journal::{
+    NativeTextReviewApprovalStatus, NativeTextReviewHeaderPollStatus, NativeTextReviewHeaderStatus,
+};
+pub(in crate::store) use plan::ApprovalSelection;
+pub(in crate::store) use read::{
+    ReviewActionPage, ReviewActionScope, ReviewApprovalScan, ReviewHeaderPoll,
+    SelectedReceivedApproval, SelectedReviewActions, REVIEW_ACTION_CURSOR_BYTES,
+};
+#[cfg(test)]
+mod fault;
+
+pub(super) const MANIFEST_NAME: &str = "manifest.current";
+
+pub(super) const MARKER_NAME: &str = "chat-critical-namespaces.review-receiver.marker";
+pub(super) const DIRECTORY_NAME: &str = "chat-v2-review-received";
+const MOUNT_FEE: usize = 80 * 1024;
+
+pub(super) fn require_absent(store: &ServerStore) -> Result<(), AppError> {
+    require_no_claim_stage(store)?;
+    absent(&fixed(store, false, MARKER_NAME)?)?;
+    absent(&fixed(store, false, DIRECTORY_NAME)?)
+}
+
+pub(in crate::store) struct SelectedReviewReceiver {
+    marker: OpenedArchiveObject,
+    directory: HeldDirectory,
+    mount: PhysicalMountNegative,
+    publication: observation::ReviewPublicationFences,
+    _fee: CatalogReadReservation,
+}
+
+struct HeldManifest {
+    path: PathBuf,
+    file: (File, SessionId),
+    bytes: Zeroizing<Vec<u8>>,
+    data: manifest::ReceiverManifest,
+}
+
+impl ServerStore {
+    pub(in crate::store) fn read_selected_review_actions(
+        &self,
+        binding: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
+        (target, after): (ReviewActionScope, Option<&[u8]>),
+        rng: &mut dyn catcoms_rt::CryptoRngCore,
+    ) -> Result<Option<ReviewActionPage>, AppError> {
+        let mounted = self
+            .review_receive_mount
+            .try_lock()
+            .map_err(review_lock_error)?;
+        mounted
+            .as_ref()
+            .map(|selected| selected.read_review_actions(self, binding, target, after, rng))
+            .transpose()
+    }
+
+    pub(in crate::store) fn scan_selected_review_approvals(
+        &self,
+        binding: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
+        cursor: Option<std::ops::RangeInclusive<u64>>,
+    ) -> Result<ReviewApprovalScan, AppError> {
+        let mounted = self
+            .review_receive_mount
+            .try_lock()
+            .map_err(review_lock_error)?;
+        let Some(mounted) = mounted.as_ref() else {
+            return Ok((None, None));
+        };
+        mounted.scan_approval_candidates(self, binding, cursor)
+    }
+
+    pub(in crate::store) fn next_received_review_header(
+        &self,
+        binding: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
+        check_tip: bool,
+    ) -> Result<ReviewHeaderPoll, AppError> {
+        let mounted = self
+            .review_receive_mount
+            .try_lock()
+            .map_err(review_lock_error)?;
+        let Some(mounted) = mounted.as_ref() else {
+            return Ok(ReviewHeaderPoll::Unavailable);
+        };
+        mounted.next_header_poll(self, binding, check_tip)
+    }
+
+    pub(in crate::store) fn has_mounted_review_receiver(&self) -> Result<bool, AppError> {
+        Ok(self
+            .review_receive_mount
+            .try_lock()
+            .map_err(review_lock_error)?
+            .is_some())
+    }
+
+    pub(in crate::store) fn read_received_review_approval(
+        &self,
+        binding: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
+        target: (u128, catcoms_replication::chat::ActionId),
+    ) -> Result<Option<SelectedReceivedApproval>, AppError> {
+        let mounted = self
+            .review_receive_mount
+            .try_lock()
+            .map_err(review_lock_error)?;
+        let Some(mounted) = mounted.as_ref() else {
+            return Ok(None);
+        };
+        mounted.read_approval(self, binding, target)
+    }
+
+    pub(in crate::store) fn check_received_review_approval(
+        &self,
+        binding: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
+        header: &catcoms_replication::chat::owner_bodies::ReviewStreamEntry,
+    ) -> Result<ApprovalSelection, AppError> {
+        let mounted = self
+            .review_receive_mount
+            .try_lock()
+            .map_err(review_lock_error)?;
+        mounted
+            .as_ref()
+            .ok_or_else(denied)?
+            .check_approval_header(self, binding, header)
+    }
+
+    pub(in crate::store) fn select_received_review_approval(
+        &self,
+        binding: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
+        raw: &[u8],
+        require: impl FnMut() -> Result<(), AppError>,
+        rng: &mut dyn catcoms_rt::CryptoRngCore,
+    ) -> Result<NativeTextReviewApprovalStatus, AppError> {
+        let mounted = self
+            .review_receive_mount
+            .try_lock()
+            .map_err(review_lock_error)?;
+        mounted
+            .as_ref()
+            .ok_or_else(denied)?
+            .select_approval(self, binding, raw, require, rng)
+    }
+
+    pub(in crate::store) fn select_received_review_header(
+        &self,
+        binding: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
+        incoming: &catcoms_replication::chat::owner_bodies::ReviewStreamEntry,
+        require: impl FnMut(
+            Option<catcoms_replication::chat::owner_bodies::ReviewStreamPosition>,
+        ) -> Result<(), AppError>,
+        rng: &mut dyn catcoms_rt::CryptoRngCore,
+    ) -> Result<NativeTextReviewHeaderStatus, AppError> {
+        let mounted = self
+            .review_receive_mount
+            .try_lock()
+            .map_err(review_lock_error)?;
+        mounted
+            .as_ref()
+            .ok_or_else(denied)?
+            .select_header(self, binding, incoming, require, rng)
+    }
+}
+
+fn review_lock_error<T>(error: std::sync::TryLockError<T>) -> AppError {
+    match error {
+        std::sync::TryLockError::WouldBlock => AppError::ChatV2ArchiveBusy,
+        std::sync::TryLockError::Poisoned(_) => denied(),
+    }
+}
+
+impl HeldManifest {
+    fn require_current(&mut self, root: &HeldDirectory) -> Result<(), AppError> {
+        root.require()?;
+        require_exact_held(&self.path, &mut self.file, &self.bytes)?;
+        root.require()
+    }
+}
+
+impl SelectedReviewReceiver {
+    fn reserve_mount(store: &ServerStore) -> Result<CatalogReadReservation, AppError> {
+        let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        policy.current.archive.pending.pool.try_reserve(MOUNT_FEE)
+    }
+
+    pub(super) fn capture(
+        store: &ServerStore,
+        descriptor: &[u8],
+        key: &[u8; 32],
+    ) -> Result<Self, AppError> {
+        Self::capture_prepaid(store, descriptor, key, Self::reserve_mount(store)?)
+    }
+
+    fn capture_prepaid(
+        store: &ServerStore,
+        descriptor: &[u8],
+        key: &[u8; 32],
+        fee: CatalogReadReservation,
+    ) -> Result<Self, AppError> {
+        let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        fee.validate(&policy.current.archive.pending.pool, MOUNT_FEE)?;
+        let expected = critical_namespaces::review_receive_namespace::marker_data(key, descriptor)?;
+        let marker =
+            read(&fixed(store, false, MARKER_NAME)?, expected.len())?.ok_or_else(denied)?;
+        if marker.1.as_slice() != expected {
+            return Err(denied());
+        }
+        let directory = HeldDirectory::open(fixed(store, false, DIRECTORY_NAME)?)?;
+        let captured = Self {
+            marker,
+            directory,
+            mount: store.capture_physical_mount_negative(),
+            publication: Default::default(),
+            _fee: fee,
+        };
+        captured.require(store)?;
+        Ok(captured)
+    }
+
+    pub(super) fn require(&self, store: &ServerStore) -> Result<(), AppError> {
+        store.require_original_physical_mount(&self.mount)?;
+        self.directory.require()?;
+        let (marker, bytes) = &self.marker;
+        exact_held(
+            &fixed(store, false, MARKER_NAME)?,
+            marker,
+            session_id(marker).map_err(io)?,
+            bytes,
+        )?;
+        self.directory.require()
+    }
+
+    /// The initial manifest was selected during declaration. Lost or
+    /// damaged files cannot recreate the empty state on this path.
+    fn read_manifest(
+        &self,
+        store: &ServerStore,
+        key: &manifest::ManifestKey,
+    ) -> Result<HeldManifest, AppError> {
+        self.require(store)?;
+        let path = self.directory.child(MANIFEST_NAME);
+        let (file, identity, bytes) =
+            read_bounded_held(&path, manifest::MAX_MANIFEST_BYTES, false)?;
+        let data = key.open(&bytes)?;
+        let mut manifest = HeldManifest {
+            path,
+            file: (file, identity),
+            bytes,
+            data,
+        };
+        manifest.require_current(&self.directory)?;
+        self.require(store)?;
+        Ok(manifest)
+    }
+}

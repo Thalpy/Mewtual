@@ -97,6 +97,36 @@ fn native_invite_packet_requires_exact_complete_versioned_envelope() {
 }
 
 #[test]
+fn remembered_founder_peer_requires_the_exact_signed_zero_address_reservation() {
+    let founder = Founder::new();
+    let binding = founder.binding(&founder.device, &founder.policy, &founder.reservation);
+    assert_eq!(
+        checked_founder_peer(&binding, &founder.reservation).unwrap(),
+        NativeTextInvitePacketData::decode(&founder.packet(
+            &founder.device,
+            &founder.policy,
+            &founder.reservation
+        ))
+        .unwrap()
+        .connected_peer_data()
+    );
+    let other = seeded_transport_identity_data(&[22; 32]).unwrap();
+    let changed = encode_reservation(&founder.group.group_id(), &other, 1234).unwrap();
+    assert!(checked_founder_peer(&binding, &changed).is_err());
+    let mut nonempty = founder.reservation.clone();
+    let end = nonempty.len();
+    nonempty[end - 4..].copy_from_slice(&1u32.to_be_bytes());
+    // Even a genuine founder signature over another grammar cannot grant
+    // address retention or a dial through this zero-contact profile.
+    let signed_nonempty = founder.binding(&founder.device, &founder.policy, &nonempty);
+    assert!(checked_founder_peer(&signed_nonempty, &nonempty).is_err());
+    let mut tail = founder.reservation.clone();
+    tail.push(0);
+    let signed_tail = founder.binding(&founder.device, &founder.policy, &tail);
+    assert!(checked_founder_peer(&signed_tail, &tail).is_err());
+}
+
+#[test]
 fn native_invite_packet_rejects_signature_and_both_body_substitutions() {
     let f = Founder::new();
     let signed = f.binding(&f.device, &f.policy, &f.reservation);

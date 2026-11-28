@@ -449,6 +449,7 @@ async fn start_dependencies<R: tauri::Runtime>(
                     serve_joined_governing(&app, &source),
                     history::recover(&app, &source),
                     contact_recovery::restore(&app, &source),
+                    contact_recovery::restore_founder(&app, &source),
                     async {
                         if let Some((initial, payment)) = receive {
                             #[cfg(test)]

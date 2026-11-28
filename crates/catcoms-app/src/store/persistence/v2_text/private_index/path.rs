@@ -55,6 +55,15 @@ pub(in crate::store) const PRIVATE_INDEX_PATH_METADATA_BYTES: usize =
         + (MAX_LEAF_ROWS + 1) * std::mem::size_of::<PrivateIndexLeafRowData>()
         + 2 * std::mem::size_of::<PrivateIndexChildRefData>();
 const _: () = assert!(MAX_DESCENT_PAGES == 10);
+
+/// Structural continuation from a completed point path. A sibling lower
+/// bound nominates another exact descent from the same root.
+pub(in crate::store) enum PrivateIndexSuccessorData {
+    Row(PrivateIndexLeafRowData),
+    NextLower([u8; 32]),
+    End,
+}
+
 impl PrivateIndexPathData {
     pub(in crate::store) fn new_data(
         context: PrivateIndexContextData,
@@ -148,6 +157,42 @@ impl PrivateIndexPathData {
         }
         Ok(None)
     }
+
+    /// Find the first leaf row at or beyond this point. When the chosen
+    /// leaf ends first, the nearest right subtree is identified by the
+    /// deepest proven ancestor with an immediate right child.
+    pub(in crate::store) fn successor_data(
+        &self,
+        exclusive: bool,
+    ) -> Result<PrivateIndexSuccessorData> {
+        let leaf = self
+            .nodes
+            .last()
+            .ok_or(PrivateIndexError::Dependency)?
+            .node(self.context);
+        if leaf.kind() != NodeKindData::Leaf {
+            return Err(PrivateIndexError::Dependency);
+        }
+        for i in 0..leaf.row_count() {
+            let row = leaf.leaf_row(i)?;
+            if row.key > self.key || (!exclusive && row.key == self.key) {
+                return Ok(PrivateIndexSuccessorData::Row(row));
+            }
+        }
+        for parent in self.nodes[..self.nodes.len() - 1].iter().rev() {
+            let next = parent.child_index(self.context, self.key)? + 1;
+            let node = parent.node(self.context);
+            if next < node.row_count() {
+                let lower = node.branch_child_data(next)?.lower_data();
+                if lower <= self.key {
+                    return Err(PrivateIndexError::Context);
+                }
+                return Ok(PrivateIndexSuccessorData::NextLower(lower));
+            }
+        }
+        Ok(PrivateIndexSuccessorData::End)
+    }
+
     pub(in crate::store) fn rewrite_leaf_data(
         &self,
         replacement: &PrivateIndexLeafRowData,
@@ -158,13 +203,6 @@ impl PrivateIndexPathData {
         let old = self.nodes.last().ok_or(PrivateIndexError::Dependency)?;
         rewrite_private_leaf_data(&old.node(self.context), replacement, old.placement)
     }
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Retained branch-geometry reference with no owning production consumer; authenticated descent and leaf rewriting remain active."
-        )
-    )]
     pub(in crate::store) fn boundary_page_data(
         &self,
         level: usize,
@@ -182,13 +220,6 @@ impl PrivateIndexPathData {
     /// Exactly one extra boundary child may be opened at a splitting level. Authentication
     /// and real descriptor checks are mandatory; neither next-lower minus one nor a caller
     /// summary can invent that unchanged child's maximum. Drop scratch before next level.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Retained branch-geometry reference with no owning production consumer; authenticated descent and leaf rewriting remain active."
-        )
-    )]
     pub(in crate::store) fn rewrite_branch_data(
         &self,
         level: usize,

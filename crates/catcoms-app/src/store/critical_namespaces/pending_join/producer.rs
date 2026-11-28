@@ -885,6 +885,8 @@ fn archive_suffix_length(current: &codec::Parsed<'_>) -> Result<usize, AppError>
         current.shared_history_payload,
         current.rejoin_payload,
         current.review_hold_payload,
+        current.review_decision_payload,
+        current.review_receive_payload,
     ]
     .into_iter()
     .flatten()
@@ -914,6 +916,8 @@ pub(super) fn preserved_entry_count(current: &codec::Parsed<'_>) -> u32 {
         + u32::from(current.shared_history_payload.is_some())
         + u32::from(current.rejoin_payload.is_some())
         + u32::from(current.review_hold_payload.is_some())
+        + u32::from(current.review_decision_payload.is_some())
+        + u32::from(current.review_receive_payload.is_some())
 }
 
 /// Outer header only; payload version/tag/rows remain the actual JOIN consumer's contract.
@@ -973,7 +977,10 @@ fn append_original_archive(
             .put_u32(current.native_registry_version.ok_or_else(refused)?);
         output.put_bytes(payload).map_err(|_| refused())?;
     }
-    use super::super::{rejoin_namespace, review_hold_namespace, shared_history_namespace};
+    use super::super::{
+        rejoin_namespace, review_decision_namespace, review_hold_namespace,
+        review_receive_namespace, shared_history_namespace,
+    };
     for (id, version, payload) in [
         (
             shared_history_namespace::ID,
@@ -989,6 +996,16 @@ fn append_original_archive(
             review_hold_namespace::ID,
             review_hold_namespace::VERSION,
             current.review_hold_payload,
+        ),
+        (
+            review_decision_namespace::ID,
+            review_decision_namespace::VERSION,
+            current.review_decision_payload,
+        ),
+        (
+            review_receive_namespace::ID,
+            review_receive_namespace::VERSION,
+            current.review_receive_payload,
         ),
     ] {
         if let Some(payload) = payload {

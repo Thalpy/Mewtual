@@ -13,6 +13,9 @@ use super::v2_shared_history::{
     SharedHistoryActionQuery, SharedHistoryProjectionLease, SharedHistoryScope,
     SHARED_HISTORY_RECORD_FEE,
 };
+use crate::store::critical_namespaces::native_registry::founder_review_intake::{
+    FounderReviewCommand, FounderReviewOutcome,
+};
 use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
 use crate::store::critical_namespaces::refused;
 use crate::store::{NativeTextJoinedMemberProjection, ServerStore, V2MemberSaveRefusal as Refusal};
@@ -36,6 +39,9 @@ use catcoms_sync::owner_v2::{
 };
 use std::{collections::BTreeSet, sync::Arc};
 
+mod review;
+pub(in crate::store) use review::{original_review_anchor, prepare_founder_review_delivery_reply};
+
 pub(in crate::store) const FOUNDER_RECEIVE_ACTIONS: usize = 64;
 pub(in crate::store) const FOUNDER_RECEIVE_BYTES: usize = 1024 * 1024;
 pub(in crate::store) const FOUNDER_RECEIVE_WORK: usize = 4 * FOUNDER_RECEIVE_ACTIONS + MAX_PARENTS;
@@ -58,6 +64,7 @@ pub(in crate::store) const FOUNDER_DEPENDENCY_REPLY_FEE: usize =
 pub(in crate::store) struct FounderDependencyReply {
     pub(in crate::store) wire: bytes::Bytes,
     pub(in crate::store) observation: V2MemberPublicationObservation,
+    pub(in crate::store) requester: Option<catcoms_replication::chat::V2LiveMemberObservation>,
     pub(in crate::store) fee: CatalogReadReservation,
 }
 
@@ -242,6 +249,7 @@ pub(in crate::store) fn prepare_founder_dependency_reply<R: CryptoRngCore>(
     Ok(FounderDependencyReply {
         wire: bytes::Bytes::from(wire),
         observation: provider.into_observation(),
+        requester: None,
         fee,
     })
 }
@@ -1035,6 +1043,11 @@ pub(in crate::store) enum FounderReceiveOperation<'a> {
     TargetMessage(ActionId),
     SelectedTarget(ActionId),
     Audit(SharedHistoryActionQuery),
+    HeldAudit(
+        Option<&'a crate::store::NativeTextHeldReviewContinuation>,
+        usize,
+    ),
+    RemovedReview(FounderReviewCommand<'a>, &'a NativeChatMemberDependencies),
 }
 
 /// A founder's paid page of checked local archive records. The scope is a
@@ -1145,5 +1158,7 @@ pub(in crate::store) enum FounderReceiveOutcome {
     ArchiveMessage(Option<FounderArchivedMessage>),
     SelectedTarget(Option<ActionId>),
     Audit(NativeTextFounderAudit),
+    HeldAudit(Box<crate::store::NativeTextHeldReviewPage>),
+    RemovedReview(FounderReviewOutcome),
     RecoveredProjection(Option<NativeTextJoinedMemberProjection>),
 }

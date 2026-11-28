@@ -21,10 +21,11 @@ use crate::store::persistence::v2_text::{
 use crate::store::persistence::{open_archive_directory, OriginalBootstrapReadObservation};
 use crate::store::{RetainedBootstrapSourceData, ServerStore};
 use catcoms_replication::chat::{
-    owner_facts::OwnerFactId, owner_header::OwnerHeaderId,
-    owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE, FounderGenesisAnchorData,
-    ProjectionGroup, ProjectionGroupView, V2FrozenAdmission, V2GeneralExpectation,
-    V2GeneralPrefixVerifier, V2HostSelectionExpectation, V2ProjectionOrigin,
+    owner_facts::OwnerFactId,
+    owner_header::OwnerHeaderId,
+    owner_state::{transition::REPLAY_MATH_PRIVATE_INVOICE, StateFrame},
+    FounderGenesisAnchorData, ProjectionGroup, ProjectionGroupView, V2FrozenAdmission,
+    V2GeneralExpectation, V2GeneralPrefixVerifier, V2HostSelectionExpectation, V2ProjectionOrigin,
 };
 use catcoms_storage::kept::{session_id, SessionId};
 use catcoms_storage::VaultPhysicalWorkLease;
@@ -69,6 +70,50 @@ enum ColdRecoveredArchive {
 }
 
 impl ColdRecoveredArchive {
+    /// Require the exact nonzero epoch and Header on this fully replayed
+    /// membership. Another signed candidate at the same epoch cannot
+    /// become a historical review anchor.
+    fn require_review_membership_anchor(
+        &self,
+        verifier: &V2GeneralPrefixVerifier,
+        selected: (OwnerHeaderId, u64),
+        anchor: (OwnerHeaderId, u64),
+    ) -> Result<(), AppError> {
+        let replay = verifier.replay_data();
+        if (replay.header().id(), replay.mls_epoch_data()) != selected {
+            return Err(refused());
+        }
+        self.require_review_anchor_on_selected(selected, anchor)
+    }
+
+    fn require_review_anchor_on_selected(
+        &self,
+        selected: (OwnerHeaderId, u64),
+        anchor: (OwnerHeaderId, u64),
+    ) -> Result<(), AppError> {
+        if anchor.1 == 0 || anchor.1 > selected.1 {
+            return Err(refused());
+        }
+        if anchor == selected {
+            return Ok(());
+        }
+        let Self::Later(chain) = self else {
+            return Err(refused());
+        };
+        let step = chain
+            .public_steps()
+            .find(|step| step.header.id() == anchor.0)
+            .ok_or_else(refused)?;
+        let image = StateFrame::decode(&step.image).map_err(|_| refused())?;
+        image
+            .verify_header_binding(&step.header)
+            .map_err(|_| refused())?;
+        if image.meta().mls_epoch != anchor.1 {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
     fn selected_admission(&self) -> Option<OwnerFactId> {
         match self {
             Self::First(first) => Some(first.admission.admission_id()),
@@ -644,6 +689,26 @@ impl HeldColdFounderAdd {
         require_exact_held(&self.files.archive_path, &mut self.files.archive)
     }
 
+    /// The warm writer has already proved this actual parent is referenced by
+    /// its selected child. Reverify the exact retained archive for an older
+    /// review anchor; never rebuild or replace the warm membership issuer.
+    pub(in crate::store::persistence::v2_text) fn require_warm_review_parent_anchor(
+        &mut self,
+        guard: &crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard<'_, '_>,
+        anchor: (OwnerHeaderId, u64),
+    ) -> Result<(), AppError> {
+        self.require_writer_parent_archive(guard)?;
+        let parent = self.files.selected.transition;
+        self.recovered
+            .require_review_anchor_on_selected((parent.header, parent.epoch), anchor)?;
+        if anchor != (parent.header, parent.epoch) {
+            self.recovered
+                .require_predecessor_contents(guard.source().source())?;
+        }
+        self.require_writer_parent_archive(guard)?;
+        guard.validate_source_only()
+    }
+
     pub(in crate::store::persistence::v2_text) fn encode_successor_proof(
         &self,
         genesis: &GenesisPublicData<'_>,
@@ -706,12 +771,42 @@ impl HeldColdFounderAdd {
             &mut dyn FnMut() -> Result<(), AppError>,
         ) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
+        self.with_checked_review_parts(store, source, |verifier, view, retired, require| {
+            perform(verifier, view, retired, &mut || require(None))
+        })
+    }
+
+    pub(in crate::store) fn with_checked_review_parts<T>(
+        &mut self,
+        store: &ServerStore,
+        source: &RetainedBootstrapSourceData,
+        perform: impl FnOnce(
+            &V2GeneralPrefixVerifier,
+            &ProjectionGroupView,
+            &[V2FrozenAdmission],
+            &mut dyn FnMut(Option<(OwnerHeaderId, u64)>) -> Result<(), AppError>,
+        ) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
         let core = self.core.as_ref().ok_or_else(refused)?;
-        let mut require = || {
+        let mut require = |anchor| {
             self.recovered.require_predecessors(source)?;
-            self.files.require_current(store, source).map(drop)
+            let selected = self.files.require_current(store, source)?;
+            if let Some(anchor) = anchor {
+                self.recovered.require_review_membership_anchor(
+                    &core.verifier,
+                    selected,
+                    anchor,
+                )?;
+                if anchor != selected {
+                    self.recovered.require_predecessor_contents(source)?;
+                    if self.files.require_current(store, source)? != selected {
+                        return Err(refused());
+                    }
+                }
+            }
+            Ok(())
         };
-        require()?;
+        require(None)?;
         perform(
             &core.verifier,
             &core._view,

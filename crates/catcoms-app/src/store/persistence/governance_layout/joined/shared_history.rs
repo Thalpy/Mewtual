@@ -58,7 +58,12 @@ impl SelectedSharedHistory {
         key: &[u8; 32],
     ) -> Result<Self, AppError> {
         let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
-        let fee = policy.current.archive.pending.pool.try_reserve(16 * 1024)?;
+        let fee = policy
+            .current
+            .archive
+            .pending
+            .pool
+            .try_reserve_classified(16 * 1024, || AppError::ChatV2ArchiveBusy)?;
         let path = fixed(store, false, MARKER_NAME)?;
         let directory = HeldDirectory::open(fixed(store, false, DIRECTORY_NAME)?)?;
         let marker = read(&path, history::MARKER_BYTES)?.ok_or_else(denied)?;
@@ -126,12 +131,12 @@ impl ServerStore {
         opened.validate_original(self)?;
         let key = Zeroizing::new(self.keys.db_key()?);
         let plain = Zeroizing::new(unseal(&key, &unframe(&declaration.prepared.candidate)?)?);
-        let (layout, descriptor, review) = self.parse_joined_catalog_descriptors(&plain)?;
-        if review.is_some() {
+        let parsed = self.parse_joined_catalog_descriptors(&plain)?;
+        if parsed.review_hold.is_some() || parsed.review_decision.is_some() {
             return Err(denied());
         }
-        let descriptor = descriptor.ok_or_else(denied)?;
-        let mounted = SelectedSharedHistory::capture(self, descriptor, layout, &key)?;
+        let descriptor = parsed.shared_history.ok_or_else(denied)?;
+        let mounted = SelectedSharedHistory::capture(self, descriptor, parsed.layout, &key)?;
         let expected_marker = declaration.marker.as_ref().ok_or_else(denied)?;
         if expected_marker.identity != Some(session_id(&mounted.marker.0).map_err(io)?) {
             return Err(denied());

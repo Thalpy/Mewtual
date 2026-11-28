@@ -27,7 +27,7 @@ impl NativeTextColdFounderSource {
         limit: usize,
         caller: &RequestCancellation,
     ) -> Result<NativeTextHeldReviewPage, AppError> {
-        let (_, observation, _fee) = self.prepare_member_subscription(channel, caller)?;
+        let (_, observation, fee) = self.prepare_member_subscription(channel, caller)?;
         let signal = observation.constrain(caller.clone());
         let scope = self.history_scope(channel)?;
         let governed = self.governed.as_mut().ok_or_else(refused)?;
@@ -63,13 +63,47 @@ impl NativeTextColdFounderSource {
                     )
                 })?;
         self.require_recovered_checkpoint(&signal)?;
-        let page = page
-            .map(|(prepared, revision)| prepared.finish_files().map(|page| (page, revision)))
-            .transpose()?;
+        // ID10 contents remain useful if the independent optional ID11
+        // journal is absent, legacy, damaged or interrupted. Such failure
+        // supplies Unavailable, never a fabricated undecided case. Keep
+        // the original live founder negative even when tolerating it.
+        let decisions = if let Some((window, _)) = page.as_ref() {
+            let pin = super::review_decision::original_review_anchor(&self.source);
+            let governed = self.governed.as_mut().ok_or_else(refused)?;
+            self.work
+                .with_recovered_founder_store(&self.selection, &self.source, |store| {
+                    governed.with_checked_review_parts(store, &self.source, |_, _, _, current| {
+                        store.read_founder_review_statuses(
+                            &pin,
+                            channel,
+                            window.records_data(),
+                            |position| {
+                                if signal.is_cancelled() {
+                                    return Err(refused());
+                                }
+                                current(position.map(|position| {
+                                    (position.membership_header, position.membership_epoch)
+                                }))
+                            },
+                        )
+                    })
+                })
+                .ok()
+        } else {
+            None
+        };
+        self.require_recovered_checkpoint(&signal)?;
         if signal.is_cancelled() {
             return Err(refused());
         }
-        Ok(NativeTextHeldReviewPage::new(page, scope, signal))
+        // Check the selected hold files and covering receipts after the
+        // decision journal and the final blocking founder source proof.
+        let page = page
+            .map(|(prepared, revision)| prepared.finish_files().map(|page| (page, revision)))
+            .transpose()?;
+        Ok(NativeTextHeldReviewPage::new(page, scope, signal)
+            .with_decisions(decisions)
+            .with_runtime_fee(fee))
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn selected_history_audit(
@@ -358,6 +392,7 @@ impl NativeTextColdFounderSource {
                                 selected,
                                 _view: view,
                                 _ledger: ledger,
+                                review: None,
                                 _invocation: None,
                                 _fee: fee,
                                 _replay: replay,
@@ -425,7 +460,7 @@ pub(super) fn saved_dependency(
     original: &RetainedBootstrapSourceData,
     scope: SharedHistoryScope,
     id: ActionId,
-    rng: &mut impl CryptoRngCore,
+    rng: &mut dyn CryptoRngCore,
 ) -> Result<Option<MemberSavedOriginal>, V2MemberSaveRefusal> {
     use V2MemberSaveRefusal as Refusal;
     let founder = original

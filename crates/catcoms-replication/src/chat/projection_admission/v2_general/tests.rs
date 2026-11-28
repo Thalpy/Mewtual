@@ -6,6 +6,7 @@ use super::*;
 mod admission_prepare;
 mod read_accessors;
 mod review_regressions;
+mod reviewed_create;
 mod selected_history;
 mod signing;
 use crate::chat::owner_bodies::{AcceptanceSpec, AppendBody, AppendSpec};
@@ -1947,8 +1948,10 @@ fn removed_create_evidence_names_the_selected_remove_and_keeps_signature_bytes()
 fn removed_reply_requires_verified_dependencies_and_never_admits_a_delete() {
     use crate::chat::owner_bodies::{
         ExactReviewDecisionBody, ExactReviewOriginal, ReviewDecision, ReviewDecisionBody,
-        ReviewSpec,
+        ReviewSpec, ReviewStreamEntry, ReviewStreamPosition, ReviewStreamRecord,
+        UnsignedReviewStreamEntry,
     };
+    use crate::chat::owner_facts::OwnerFactId;
     let mut f = Fixture::new();
     let key = DeviceKeypair::from_seed(&[109; 32]);
     let other = DeviceKeypair::from_seed(&[110; 32]);
@@ -2064,22 +2067,8 @@ fn removed_reply_requires_verified_dependencies_and_never_admits_a_delete() {
     approve
         .require_record_data(&V2RemovedCreateRecord::decode(&record).unwrap())
         .unwrap();
-    // An independently signed Ed25519 variant of this deterministic
-    // fixture, checked by the external verifier as well as this verifier.
-    // The test seed and alternate nonce are from test data only.
-    let alternate_signature = [
-        0xe2, 0xfe, 0x2a, 0x39, 0xb7, 0x32, 0x66, 0x42, 0x82, 0x7d, 0x6d, 0x82, 0xd4, 0x97, 0x62,
-        0x2c, 0xd6, 0xc2, 0x97, 0xfe, 0x78, 0x27, 0x0e, 0xaa, 0x43, 0x6b, 0x01, 0xf0, 0x86, 0xb6,
-        0xf3, 0xcb, 0x5b, 0x06, 0xd3, 0xcd, 0xaf, 0xa5, 0x77, 0xbf, 0xfa, 0xc0, 0x54, 0x06, 0xf9,
-        0x5e, 0xa2, 0xee, 0x94, 0x30, 0x7b, 0x83, 0x8b, 0x9f, 0xe6, 0x36, 0xb4, 0x2b, 0x08, 0x62,
-        0xbb, 0x2d, 0xc7, 0x07,
-    ];
-    let mut alternate = original.clone();
-    let signature_offset = alternate.len() - alternate_signature.len();
-    alternate[signature_offset..].copy_from_slice(&alternate_signature);
-    let alternate_action = SignedAction::decode(&alternate).unwrap();
-    assert!(alternate_action.verify());
-    assert_eq!(reply.id(), alternate_action.id());
+    let alternate_action = reviewed_create::alternate_withheld_reply(&reply);
+    let alternate = alternate_action.encode();
     let alternate_evidence = f
         .verifier
         .verify_removed_create_for_review(&alternate, &frozen, &ledger, &view, &[])
@@ -2095,6 +2084,90 @@ fn removed_reply_requires_verified_dependencies_and_never_admits_a_delete() {
         approve.require_record_data(&V2RemovedCreateRecord::decode(&other_record).unwrap()),
         Err(ChatError::Scope)
     );
+    // The journal frame pins the same exact representation. The actual
+    // founder/selection custody is separate from this data format test.
+    let profile = f.verifier.replay_data().profile();
+    let trusted = FounderGenesisAnchorData {
+        group: profile.spec().group.clone(),
+        founder: profile.spec().founder,
+        profile: profile.id(),
+        admission: OwnerFactId::from_bytes([43; 32]),
+        tenure: profile.tenure(),
+        header: OwnerHeaderId::from_bytes([44; 32]),
+        state: f.verifier.replay_data().header().spec().state,
+    };
+    let entry = ReviewStreamEntry::sign_using(
+        &trusted,
+        ReviewStreamPosition {
+            sequence: 1,
+            previous: None,
+            membership_header: f.verifier.replay_data().header().id(),
+            membership_epoch: remove_epoch,
+        },
+        &approve,
+        |bytes| Ok(f.owner.key.sign(bytes)),
+    )
+    .unwrap();
+    let packed = ReviewStreamRecord::encode(&trusted, &entry, &approve, &record).unwrap();
+    let reopened = ReviewStreamRecord::decode(&trusted, &packed).unwrap();
+    assert_eq!(reopened.entry_data(), &entry);
+    assert_eq!(reopened.decision_data(), &approve);
+    assert_eq!(reopened.held_data().original_bytes_data(), &original);
+    assert!(matches!(
+        ReviewStreamRecord::decode_public_approval(&trusted, entry.id(), &packed),
+        Err(ChatError::Dependency)
+    ));
+    let position = entry.position_data();
+    let public_signed = |body| {
+        let prepared = UnsignedReviewStreamEntry::prepare_public(&trusted, position, body).unwrap();
+        let signature = f.owner.key.sign(prepared.signing_bytes());
+        prepared.attach_signature(&trusted, signature).unwrap()
+    };
+    let public_approval = public_signed(&approve);
+    let public_frame =
+        ReviewStreamRecord::encode(&trusted, &public_approval, &approve, &record).unwrap();
+    let public =
+        ReviewStreamRecord::decode_public_approval(&trusted, public_approval.id(), &public_frame)
+            .unwrap();
+    assert_eq!(public.held_data().original_bytes_data(), &original);
+    assert!(matches!(
+        ReviewStreamRecord::decode_public_approval(&trusted, entry.id(), &public_frame),
+        Err(ChatError::Scope)
+    ));
+    let public_rejection = public_signed(&reject);
+    let rejected_frame =
+        ReviewStreamRecord::encode(&trusted, &public_rejection, &reject, &record).unwrap();
+    assert!(matches!(
+        ReviewStreamRecord::decode_public_approval(
+            &trusted,
+            public_rejection.id(),
+            &rejected_frame
+        ),
+        Err(ChatError::Scope)
+    ));
+    assert!(matches!(
+        ReviewStreamRecord::encode(&trusted, &entry, &approve, &other_record),
+        Err(ChatError::Scope)
+    ));
+    // Splice an alternate genuine record on the storage boundary. Do not
+    // use the checked encoder to construct the cold reader's bad input.
+    let prefix = packed.len() - record.len() - 4;
+    let mut crossed = packed[..prefix].to_vec();
+    crossed.extend_from_slice(&(other_record.len() as u32).to_be_bytes());
+    crossed.extend_from_slice(&other_record);
+    assert!(matches!(
+        ReviewStreamRecord::decode(&trusted, &crossed),
+        Err(ChatError::Scope)
+    ));
+    let wrong_pin = FounderGenesisAnchorData {
+        group: trusted.group.clone(),
+        header: OwnerHeaderId::from_bytes([45; 32]),
+        ..trusted
+    };
+    assert!(ReviewStreamRecord::decode(&wrong_pin, &packed).is_err());
+    let mut extra = packed.to_vec();
+    extra.push(0);
+    assert!(ReviewStreamRecord::decode(&trusted, &extra).is_err());
     assert_eq!(ready.case_data(), waiting.case_data());
     assert_eq!(ready.original_digest_data(), waiting.original_digest_data());
     assert_eq!(

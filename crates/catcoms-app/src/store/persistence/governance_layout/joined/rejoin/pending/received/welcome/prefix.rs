@@ -77,8 +77,10 @@ impl ServerStore {
         require_current: impl Fn() -> Result<(), AppError>,
     ) -> Result<NativeTextRejoinPrefixReceipt, AppError> {
         self.select_rejoin_prefix(
-            inventory,
-            (registration, removal),
+            RejoinReadCatalog::Current {
+                inventory,
+                original: (registration, removal),
+            },
             (pending, received, welcome, slot),
             (invite, token),
             Some(rng),
@@ -88,15 +90,18 @@ impl ServerStore {
 
     fn select_rejoin_prefix(
         &self,
-        inventory: &UpgradeInventory,
-        (registration, removal): (NativeTextJoinedRegistrationData, SelectedRejoinRemoval),
+        catalog: RejoinReadCatalog<'_>,
         (pending, received, welcome, slot): RejoinPrefixInputs<'_>,
         (invite, token): (&NativeTextInvitePacketData<'_>, [u8; 32]),
         rng: Option<&mut impl CryptoRngCore>,
         require_current: impl Fn() -> Result<(), AppError>,
     ) -> Result<NativeTextRejoinPrefixReceipt, AppError> {
         require_current()?;
-        let catalog = self.cover_selected_rejoin_catalog(registration, removal, inventory)?;
+        let (inventory, (registration, removal)) = catalog.parts();
+        if catalog.existing_only() && rng.is_some() {
+            return Err(denied());
+        }
+        let digest = catalog.digest(self)?;
         let pool = &self
             .governance_layout_policy
             .as_ref()
@@ -115,7 +120,7 @@ impl ServerStore {
         {
             return Err(denied());
         }
-        let binding = Binding::new(catalog, registration, removal, invite, token)?;
+        let binding = Binding::new(digest, registration, removal, invite, token)?;
         let key = Zeroizing::new(self.keys.db_key()?);
         let attempt_path = fixed(self, false, ATTEMPT)?;
         let pending_path = fixed(self, false, PENDING)?;
@@ -125,6 +130,8 @@ impl ServerStore {
         let prefix_path = fixed(self, false, PREFIX)?;
         let paths = [attempt_path.as_path(), pending_path.as_path()];
         let files = pending.files(&binding)?;
+        catalog.require_leaf(ATTEMPT, files[0])?;
+        catalog.require_leaf(PENDING, files[1])?;
         let original = self.open_covered_rejoin_files(
             inventory,
             &binding,
@@ -133,6 +140,14 @@ impl ServerStore {
             files,
         )?;
         let outcome = welcome.outcome.as_ref().ok_or_else(denied)?;
+        let _ = received
+            .held
+            .replay_file(catalog, RECEIVED, &received.frame)?;
+        let _ = welcome
+            .entry
+            .held
+            .replay_file(catalog, SDK_ATTEMPT, &welcome.entry.frame)?;
+        let _ = outcome.held.replay_file(catalog, OUTCOME, &outcome.frame)?;
         let receipt = welcome.receipt.ok_or_else(denied)?;
         let require = || {
             require_current()?;
@@ -230,6 +245,7 @@ impl ServerStore {
             let expected =
                 prefix_plain((binding.context.original_pending, bind), receipt, &history)?;
             let original = if let Some(original) = read(&prefix_path, MAX_PREFIX)? {
+                catalog.require_leaf(PREFIX, (&original.0, &original.1))?;
                 if open_frame(&key, PREFIX_TAG, &original.1)? != expected {
                     return Err(denied());
                 }
@@ -249,7 +265,7 @@ impl ServerStore {
         if existing_only {
             frame.require(&prefix_path)?;
         }
-        frame.cover(&prefix_path)?;
+        frame.cover_bound(&prefix_path, catalog, PREFIX)?;
         inventory.sync_rejoin_catalog_parent(self)?;
         require()?;
         frame.require(&prefix_path)?;

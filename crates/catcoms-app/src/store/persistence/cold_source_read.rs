@@ -483,7 +483,7 @@ impl ServerStore {
         signer: [u8; 32],
     ) -> Result<ReadWork, AppError> {
         use critical_namespaces::refused;
-        let (fee, key) = self.reserve_bootstrap_source_read(group)?;
+        let (fee, key) = self.reserve_bootstrap_source_read(group, refused)?;
         let root_guard = self.archive_bootstrap_root.lock().map_err(|_| refused())?;
         let root = root_guard.as_ref().ok_or_else(refused)?;
         let capture = self.capture_paid_source_under_root(root, (group, signer), (&fee, &key))?;
@@ -508,7 +508,8 @@ impl ServerStore {
         group: &[u8],
         signer: [u8; 32],
     ) -> Result<RetainedBootstrapSourceData, AppError> {
-        let (fee, key) = self.reserve_bootstrap_source_read(group)?;
+        let (fee, key) =
+            self.reserve_bootstrap_source_read(group, || AppError::ChatV2ArchiveBusy)?;
         let capture = self.capture_paid_source_under_root(root, (group, signer), (&fee, &key))?;
         let data = ReadWork {
             capture,
@@ -526,6 +527,7 @@ impl ServerStore {
     fn reserve_bootstrap_source_read(
         &self,
         group: &[u8],
+        busy: impl FnOnce() -> AppError,
     ) -> Result<(Arc<CatalogReadReservation>, Zeroizing<[u8; 32]>), AppError> {
         use critical_namespaces::refused;
         if group.is_empty() || group.len() > 256 || self.dir.as_os_str().len() > MAX_PATH {
@@ -536,7 +538,7 @@ impl ServerStore {
         validate_fixed_invoice()?;
         // Prepare payment before borrowing the mounted root. An error
         // with the root held cannot retire the last original reservation.
-        let fee = Arc::new(policy.pending.pool.try_reserve(READ_FEE)?);
+        let fee = Arc::new(policy.pending.pool.try_reserve_classified(READ_FEE, busy)?);
         let key = Zeroizing::new(self.keys.db_key()?);
         Ok((fee, key))
     }

@@ -15,6 +15,7 @@ mod add;
 mod invite;
 mod member_signing;
 mod member_transport;
+mod review;
 pub use add::{PreparedV2RecoveredAddInstall, V2RecoveredFounderAddSigning};
 
 /// Paid private graph. Source installation, Core replay and publication have

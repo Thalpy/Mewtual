@@ -190,6 +190,10 @@ pub enum AppError {
     /// confirm the result or acquire the selected rejoin catalog.
     #[error("Reopen the vault to confirm the saved rejoin.")]
     ChatV2RejoinCatalogReopen,
+    /// The first joined review selection may have moved Current. A cold
+    /// reopen verifies the exact existing join and settles the catalog claim.
+    #[error("Reopen the vault to finish setting up approved chat history.")]
+    ChatV2JoinReviewReopen,
     /// The retired mount has no covered request for this expired invitation.
     #[error("This invite expired. Ask for a new invite.")]
     ChatV2RejoinNeedsFreshInvite,

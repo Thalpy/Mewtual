@@ -25,7 +25,9 @@ pub(in crate::store) enum JoinedPinOpening {
 }
 mod pending;
 pub(in crate::store) mod rejoin;
+pub(in crate::store) mod review_decision;
 pub(in crate::store) mod review_hold;
+pub(in crate::store) mod review_receive;
 pub(in crate::store) mod shared_history;
 pub(in crate::store) use pending::{
     AcceptedFirstJoin, AcceptedJoinTransport, JoinedPendingIo, JoinedRegistrationDependency,
@@ -71,6 +73,10 @@ pub(in crate::store) struct ColdJoinedSelection {
     index: SelectedPinIndex,
     shared_history: Option<shared_history::SelectedSharedHistory>,
     review_hold: Option<review_hold::SelectedReviewHold>,
+    review_decision: Option<review_decision::SelectedReviewDecision>,
+    review_decision_declared: bool,
+    review_receive: Option<review_receive::SelectedReviewReceiver>,
+    review_receive_declared: bool,
     _fee: CatalogReadReservation,
 }
 
@@ -186,6 +192,15 @@ impl ColdJoinedSelection {
         if let Some(review) = &self.review_hold {
             review.require(store)?;
         }
+        // Review repair debt is independent of ordinary joined history.
+        // When an authenticated descriptor is selected its missing files
+        // cannot create a fresh review journal during ordinary startup.
+        if !self.review_decision_declared {
+            review_decision::require_absent(store)?;
+        }
+        if !self.review_receive_declared {
+            review_receive::require_absent(store)?;
+        }
         if let Some(((marker, bytes), native)) = &self.original_leaves {
             native.require(store)?;
             exact_held(
@@ -228,18 +243,29 @@ impl ServerStore {
     pub(in crate::store) fn select_joined_pin_catalog(
         &self,
     ) -> Result<ColdJoinedSelection, AppError> {
-        let review = if self
+        let supports_review = self
             .current_layout_policy
             .as_ref()
             .and_then(|policy| policy.native_registry.as_ref())
-            .is_some_and(|handler| handler.accepts_review_recovery())
-        {
+            .is_some_and(|handler| handler.accepts_review_recovery());
+        let receiver = if supports_review {
+            review_receive::recover(self)?
+        } else {
+            review_receive::require_no_claim_stage(self)?;
+            None
+        };
+        let review = if receiver.is_some() {
+            None
+        } else if supports_review {
             review_hold::recover(self)?
         } else {
             review_hold::require_no_scratch(self)?;
             None
         };
-        let recovered = if review.is_none() && self.shared_history_opening() != Opening::Disabled {
+        let recovered = if receiver.is_none()
+            && review.is_none()
+            && self.shared_history_opening() != Opening::Disabled
+        {
             shared_history::recover_declaration(self)?
         } else {
             None
@@ -250,6 +276,15 @@ impl ServerStore {
         }
         if let Some(review) = review {
             review.require(self, &selected)?;
+        }
+        if let Some((file, bytes)) = receiver {
+            if session_id(&file).map_err(io)? != session_id(&selected.current).map_err(io)?
+                || bytes != selected.bytes
+                || selected.review_receive.is_none()
+            {
+                return Err(denied());
+            }
+            selected.require(self)?;
         }
         Ok(selected)
     }
@@ -290,26 +325,52 @@ impl ServerStore {
         let key = Zeroizing::new(self.keys.db_key()?);
         let directory = inventory.directory;
         let opening = self.shared_history_opening();
-        let (shared_history, review_hold) = if opening != Opening::Disabled
-            && inventory.seed.is_none()
-            && inventory.stage.is_none()
-        {
-            let plain = Zeroizing::new(unseal(&key, &unframe(&raw)?)?);
-            let (layout, descriptor, review) = self.parse_joined_catalog_descriptors(&plain)?;
-            let history = descriptor
-                .map(|descriptor| {
-                    shared_history::SelectedSharedHistory::capture(self, descriptor, layout, &key)
-                })
-                .transpose()?;
-            let review = review
-                .map(|descriptor| review_hold::SelectedReviewHold::capture(self, &key, descriptor))
-                .transpose()?;
-            (history, review)
-        } else {
-            (None, None)
-        };
+        let (shared_history, review_hold, review_decision, review_receive, review_receive_declared) =
+            if opening != Opening::Disabled && inventory.seed.is_none() && inventory.stage.is_none()
+            {
+                let plain = Zeroizing::new(unseal(&key, &unframe(&raw)?)?);
+                let parsed = self.parse_joined_catalog_descriptors(&plain)?;
+                let history = parsed
+                    .shared_history
+                    .map(|descriptor| {
+                        shared_history::SelectedSharedHistory::capture(
+                            self,
+                            descriptor,
+                            parsed.layout,
+                            &key,
+                        )
+                    })
+                    .transpose()?;
+                let review = parsed
+                    .review_hold
+                    .map(|descriptor| {
+                        review_hold::SelectedReviewHold::capture(self, &key, descriptor)
+                    })
+                    .transpose()?;
+                let journal = parsed.review_decision.map(|descriptor| {
+                    review_decision::SelectedReviewDecision::capture(self, &key, descriptor)
+                });
+                let receiver = parsed.review_receive.and_then(|descriptor| {
+                    review_receive::SelectedReviewReceiver::capture(self, descriptor, &key).ok()
+                });
+                (
+                    history,
+                    review,
+                    journal,
+                    receiver,
+                    parsed.review_receive.is_some(),
+                )
+            } else {
+                (None, None, None, None, false)
+            };
         if review_hold.is_none() {
             review_hold::require_absent(self)?;
+        }
+        if review_decision.is_none() {
+            review_decision::require_absent(self)?;
+        }
+        if !review_receive_declared {
+            review_receive::require_absent(self)?;
         }
         if shared_history.is_none() {
             if opening == Opening::Required {
@@ -522,6 +583,10 @@ impl ServerStore {
             index,
             shared_history,
             review_hold,
+            review_decision_declared: review_decision.is_some(),
+            review_decision: review_decision.and_then(Result::ok),
+            review_receive,
+            review_receive_declared,
             _fee: fee,
         };
         value.require(self)?;
@@ -632,9 +697,18 @@ impl ServerStore {
         let mut index = self.joined_pin_index.lock().map_err(|_| denied())?;
         let mut shared = self.shared_history_mount.lock().map_err(|_| denied())?;
         let mut review = self.review_hold_mount.lock().map_err(|_| denied())?;
-        if index.is_some() || shared.is_some() || review.is_some() {
+        let mut decisions = self.review_decision_mount.lock().map_err(|_| denied())?;
+        let mut received = self.review_receive_mount.lock().map_err(|_| denied())?;
+        if index.is_some()
+            || shared.is_some()
+            || review.is_some()
+            || decisions.is_some()
+            || received.is_some()
+        {
             return Err(denied());
         }
+        *received = selected.review_receive;
+        *decisions = selected.review_decision;
         *review = selected.review_hold;
         *shared = selected.shared_history;
         *index = Some(selected.index);
@@ -647,6 +721,18 @@ impl ServerStore {
             owner.require(self)?;
         }
         Ok(review.is_some())
+    }
+
+    #[cfg(test)]
+    pub(in crate::store) fn has_mounted_review_decision(&self) -> Result<bool, AppError> {
+        let decisions = self
+            .review_decision_mount
+            .try_lock()
+            .map_err(|_| denied())?;
+        if let Some(owner) = decisions.as_ref() {
+            owner.require(self)?;
+        }
+        Ok(decisions.is_some())
     }
 
     pub(in crate::store) fn require_mounted_shared_history(&self) -> Result<(), AppError> {

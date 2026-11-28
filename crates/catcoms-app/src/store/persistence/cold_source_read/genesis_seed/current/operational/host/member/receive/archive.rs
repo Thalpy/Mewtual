@@ -159,6 +159,7 @@ impl<'a> FounderHistory<'a> {
                 selected,
                 _view: view,
                 _ledger: ledger,
+                review: None,
                 _invocation: None,
                 _fee: fee,
                 _replay: replay,
@@ -172,7 +173,7 @@ impl<'a> FounderHistory<'a> {
         mount: &MemberOutboxMount,
         key: &[u8; 32],
         action: ActionId,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut dyn CryptoRngCore,
     ) -> Result<Option<MemberSavedOriginal>, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
         let context = super::super::super::member_save::member_outbox_context(

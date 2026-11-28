@@ -9,14 +9,17 @@ catcoms_rt::redacted_debug! {
 }
 
 use super::*;
+use crate::store::persistence::governance_layout::joined::review_receive::{
+    pinned_founder, SelectedReceivedApproval,
+};
 use crate::store::persistence::v2_member_outbox::{member_outbox_key, MemberSavedOriginal};
 use crate::store::persistence::v2_member_transport::{
     receive_ledger_refusal, replay_local_member_dependencies,
 };
 use crate::store::persistence::v2_shared_history::{
     PreparedSharedHistoryRecord, SharedHistoryActionPage, SharedHistoryActionQuery,
-    SharedHistoryMessageSelection, SharedHistoryProjectionLease, SharedHistoryReplay,
-    SharedHistoryReplayCredit, SharedHistoryScope, ARCHIVED_LEDGER_LIMITS,
+    SharedHistoryProjectionLease, SharedHistoryReplay, SharedHistoryReplayCredit,
+    SharedHistoryScope, SharedHistoryTargetSelection, ARCHIVED_LEDGER_LIMITS,
     ARCHIVED_PROJECTION_WORK, SHARED_HISTORY_RECORD_FEE,
 };
 use crate::store::ServerStore;
@@ -25,9 +28,10 @@ use catcoms_net::{
     NativeChatMemberGossipError, NativeChatMemberGossipEvent, NativeChatMemberIngress,
 };
 use catcoms_replication::chat::{
-    ActionId, ChatLedger, GuardedMessageProjection, GuardedProjection, LedgerLimits,
-    ProjectionGroupView, ProjectionView, Realm, V2GeneralPrefixVerifier, V2OrdinaryReceiveStatus,
-    MAX_ACTION_BYTES, MAX_PARENTS,
+    owner_bodies::ReviewStreamRecord, ActionId, ActionState, Body, ChatLedger,
+    GuardedMessageProjection, GuardedProjection, LedgerLimits, ProjectionGroupView, ProjectionView,
+    Realm, SignedAction, V2GeneralPrefixVerifier, V2OrdinaryReceiveStatus, MAX_ACTION_BYTES,
+    MAX_PARENTS,
 };
 use catcoms_rt::Topic;
 use catcoms_sync::owner_v2::{SelectedV2MemberEnvelope, MAX_V2_MEMBER_TRANSPORT_BYTES};
@@ -37,9 +41,11 @@ mod archive_discovery;
 mod contact;
 mod contact_recovery;
 mod dependencies;
+mod founder_consent;
 mod governing;
 mod history_discovery;
 mod removed_review;
+mod review_delivery;
 pub(super) use archive_discovery::ArchiveRelayState;
 pub use contact_recovery::NativeTextJoinedSavedContactApprovals;
 pub use dependencies::{
@@ -47,12 +53,20 @@ pub use dependencies::{
     NativeTextJoinedDependencyAttachRefusal, NativeTextJoinedDependencyExchange,
     NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
 };
+pub(super) use founder_consent::FounderRouteConsentState;
+pub use founder_consent::{
+    NativeTextFounderRouteApproval, NativeTextFounderRouteAttempt, NativeTextFounderRouteGesture,
+};
 pub use governing::{
     NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningIncoming,
     NativeTextJoinedGoverningProvider, NativeTextJoinedGoverningResponse,
 };
 pub use history_discovery::{
     NativeTextJoinedHistoryExchange, NativeTextJoinedHistoryPage, NativeTextJoinedHistoryResponse,
+};
+pub use review_delivery::{
+    NativeTextJoinedReviewExchange, NativeTextJoinedReviewResponse,
+    NativeTextJoinedReviewedActions, NativeTextJoinedReviewedPage,
 };
 
 const INGRESS_FEE: usize = 8 * 1024;
@@ -194,6 +208,15 @@ struct ReceiverSource<'a, R: CryptoRngCore> {
     warm: Option<&'a JoinedPendingIo>,
     registration: NativeTextJoinedRegistrationData,
     founder: Option<PeerId>,
+    founder_hint: &'a OnceLock<PeerId>,
+}
+
+struct PaidReceiverLedger {
+    view: ProjectionView,
+    ledger: ChatLedger,
+    // Receipt checks can fail after replay. Drop all paid state before
+    // making its memory available to another caller on either path.
+    fee: CatalogReadReservation,
 }
 
 pub(in crate::store::critical_namespaces::native_registry) struct NativeTextJoinedSharedHistoryRecord
@@ -270,6 +293,14 @@ impl NativeTextJoinedArchivedActions {
 }
 
 impl NativeTextJoinedMemberProjection {
+    /// A detached reviewed copy can be read but cannot supply a new
+    /// ordinary reply parent. A selected ordinary original takes priority.
+    pub fn is_reviewed_only(&self) -> bool {
+        self.archive
+            .as_ref()
+            .is_some_and(|archive| archive.review.is_some())
+    }
+
     /// Exact member of the replayed target's selected archive action set.
     /// Historical dependencies and local outbox entries cannot satisfy it.
     pub fn archived_includes(&self, action: ActionId) -> bool {
@@ -353,7 +384,13 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             }
             let own =
                 catcoms_replication::chat::owner_header::OwnerBodyId::from_bytes(*own.as_bytes());
+            let original_a1 =
+                crate::store::critical_namespaces::joined_pin::require_a1_founder_route_profile(
+                    source.store,
+                )
+                .is_ok();
             crate::store::NativeTextRoster::from_selected(source.store, replay, own)
+                .map(|roster| roster.with_founder_route_option(original_a1))
                 .map_err(|_| V2MemberSaveRefusal::Failed)
         })
     }
@@ -412,21 +449,33 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 channel,
                 (caller.clone(), ReceiverView::LocalArchive),
                 |_| Ok(Some(())),
-                |source, ledger, view, ()| {
-                    let mounted = source
-                        .store
-                        .has_mounted_shared_history()
-                        .map_err(|_| V2MemberSaveRefusal::Busy)?;
-                    if !mounted {
-                        return Ok((false, None));
+                |source, ledger, view, ()| match source.replay_archived_target(
+                    ledger,
+                    view,
+                    create,
+                    &caller,
+                    &mut replay,
+                    rng,
+                )? {
+                    SharedHistoryTargetSelection::Unmounted => Ok((false, None)),
+                    SharedHistoryTargetSelection::Replayed(selected) => {
+                        Ok((true, Some((selected, None))))
                     }
-                    source
-                        .replay_archived_message(ledger, view, create, &caller, &mut replay, rng)
-                        .map(|selected| (true, selected))
+                    SharedHistoryTargetSelection::Empty(ordinary) => {
+                        let receipt = source.replay_reviewed_target(
+                            ledger,
+                            view,
+                            create,
+                            &caller,
+                            &mut replay,
+                            rng,
+                        )?;
+                        Ok((true, receipt.map(|receipt| (ordinary, Some(receipt)))))
+                    }
                 },
             )?
             .ok_or(V2MemberSaveRefusal::Unavailable)?;
-        let Some(selected) = selected else {
+        let Some((selected, review)) = selected else {
             return Ok((mounted, None));
         };
         use V2MemberSaveRefusal as Refusal;
@@ -451,6 +500,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     selected,
                     _view: ledger.view,
                     _ledger: ledger.ledger,
+                    review,
                     _invocation: Some(ledger._invocation),
                     _fee: ledger._fee,
                     _replay: replay,
@@ -604,46 +654,17 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 let Some(original) = prepare(&source)? else {
                     return Ok(None);
                 };
-                let ReceiverSource {
-                    metadata,
-                    node,
-                    prefix,
-                    view: group,
-                    ..
-                } = source;
-                let fee = metadata
-                    .reserve_join_node(LEDGER_FEE)
-                    .map_err(|_| Refusal::Busy)?;
-                let verifier = prefix
-                    .selected_member_verifier()
+                let mut paid = source.fresh_ledger(channel, mode)?;
+                let observed = source
+                    .node
+                    .observe_member_publication(source.prefix)
                     .map_err(|_| Refusal::Unavailable)?;
-                let group_data = &verifier.replay_data().profile().spec().group;
-                let realm = Realm::new(group_data, channel).map_err(|_| Refusal::Failed)?;
-                let limits = match mode {
-                    ReceiverView::Live => LedgerLimits {
-                        max_actions: MAX_RECEIVED_ACTIONS,
-                        max_action_bytes: MAX_RECEIVED_BYTES,
-                    },
-                    ReceiverView::LocalArchive => ARCHIVED_LEDGER_LIMITS,
-                };
-                let mut ledger = ChatLedger::new(realm, limits).map_err(|_| Refusal::Failed)?;
-                let mut view = match mode {
-                    ReceiverView::Live => ledger.begin_projection_view_in(group),
-                    ReceiverView::LocalArchive => {
-                        ledger.begin_local_archive_projection_view_in(group)
-                    }
-                }
-                .map_err(|_| Refusal::Unavailable)?;
-                if !view.try_ready() {
-                    return Err(Refusal::Busy);
-                }
-                let observed = node
-                    .observe_member_publication(prefix)
-                    .map_err(|_| Refusal::Unavailable)?;
-                let authentication = metadata
+                let authentication = source
+                    .metadata
                     .authentication_negative()
                     .map_err(|_| Refusal::Unavailable)?;
-                let result = populate(&source, &mut ledger, &view, original)?;
+                let result = populate(&source, &mut paid.ledger, &paid.view, original)?;
+                let PaidReceiverLedger { view, ledger, fee } = paid;
                 Ok(Some((view, ledger, observed, authentication, result, fee)))
             })?
         else {
@@ -1029,6 +1050,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                         warm: pending.io.as_ref().filter(|_| runtime.recovered.is_none()),
                         registration: data,
                         founder: runtime.founder_contact.get().copied(),
+                        founder_hint: &runtime.founder_contact,
                     })
                 },
             )?
@@ -1049,6 +1071,41 @@ enum ReceiverView {
 }
 
 impl<R: CryptoRngCore> ReceiverSource<'_, R> {
+    fn fresh_ledger(
+        &self,
+        channel: u128,
+        mode: ReceiverView,
+    ) -> Result<PaidReceiverLedger, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let fee = self
+            .metadata
+            .reserve_join_node(LEDGER_FEE)
+            .map_err(|_| Refusal::Busy)?;
+        let verifier = self
+            .prefix
+            .selected_member_verifier()
+            .map_err(|_| Refusal::Unavailable)?;
+        let group_data = &verifier.replay_data().profile().spec().group;
+        let realm = Realm::new(group_data, channel).map_err(|_| Refusal::Failed)?;
+        let limits = match mode {
+            ReceiverView::Live => LedgerLimits {
+                max_actions: MAX_RECEIVED_ACTIONS,
+                max_action_bytes: MAX_RECEIVED_BYTES,
+            },
+            ReceiverView::LocalArchive => ARCHIVED_LEDGER_LIMITS,
+        };
+        let mut ledger = ChatLedger::new(realm, limits).map_err(|_| Refusal::Failed)?;
+        let mut view = match mode {
+            ReceiverView::Live => ledger.begin_projection_view_in(self.view),
+            ReceiverView::LocalArchive => ledger.begin_local_archive_projection_view_in(self.view),
+        }
+        .map_err(|_| Refusal::Unavailable)?;
+        if !view.try_ready() {
+            return Err(Refusal::Busy);
+        }
+        Ok(PaidReceiverLedger { view, ledger, fee })
+    }
+
     fn archived_actions(
         &self,
         channel: u128,
@@ -1068,7 +1125,7 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
             .map_err(|_| Refusal::Failed)
     }
 
-    fn replay_archived_message(
+    fn replay_archived_target(
         &self,
         ledger: &mut ChatLedger,
         view: &ProjectionView,
@@ -1076,7 +1133,7 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
         caller: &RequestCancellation,
         credit: &mut SharedHistoryReplayCredit,
         rng: &mut impl CryptoRngCore,
-    ) -> Result<Option<SharedHistoryMessageSelection>, V2MemberSaveRefusal> {
+    ) -> Result<SharedHistoryTargetSelection, V2MemberSaveRefusal> {
         let channel = ledger.realm().channel();
         SharedHistoryReplay {
             store: self.store,
@@ -1087,7 +1144,7 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
                 .map_err(|_| V2MemberSaveRefusal::Unavailable)?,
             caller,
         }
-        .replay_message(
+        .replay_target(
             ledger,
             view,
             create,
@@ -1107,6 +1164,124 @@ impl<R: CryptoRngCore> ReceiverSource<'_, R> {
             creation: data.selected.profile_creation,
             channel,
         }
+    }
+
+    /// Replay a reviewed Create only after the caller retained an empty
+    /// ordinary target snapshot. Both receipts remain live for publication.
+    fn replay_reviewed_target(
+        &self,
+        ledger: &mut ChatLedger,
+        view: &ProjectionView,
+        create: ActionId,
+        caller: &RequestCancellation,
+        credit: &mut SharedHistoryReplayCredit,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<SelectedReceivedApproval>, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        if !self
+            .store
+            .has_mounted_review_receiver()
+            .map_err(|_| Refusal::Busy)?
+        {
+            return Ok(None);
+        }
+        let verifier = self
+            .prefix
+            .selected_member_verifier()
+            .map_err(|_| Refusal::Unavailable)?;
+        let current = verifier.replay_data();
+        let binding = self
+            .node
+            .require_review_membership_anchor(
+                self.prefix,
+                (current.header().id(), current.mls_epoch_data()),
+            )
+            .map_err(|_| Refusal::Stale)?;
+        let Some(receipt) = self
+            .store
+            .read_received_review_approval(binding, (ledger.realm().channel(), create))
+            .map_err(|error| match error {
+                AppError::ChatV2ArchiveBusy => Refusal::Busy,
+                _ => Refusal::Failed,
+            })?
+        else {
+            return Ok(None);
+        };
+        let pin = pinned_founder(binding);
+        let record = ReviewStreamRecord::decode(&pin, &receipt.raw).map_err(|_| Refusal::Failed)?;
+        let selected = record.entry_data();
+        let position = selected.position_data();
+        let membership = (position.membership_header, position.membership_epoch);
+        for anchor in [membership, record.held_data().removal_data()] {
+            if self
+                .node
+                .require_review_membership_anchor(self.prefix, anchor)
+                .map_err(|_| Refusal::Stale)?
+                != binding
+            {
+                return Err(Refusal::Stale);
+            }
+        }
+        let action = SignedAction::decode(record.held_data().original_bytes_data())
+            .map_err(|_| Refusal::Failed)?;
+        let Body::Create { reply_to, .. } = action.spec().body else {
+            return Err(Refusal::Failed);
+        };
+        if let Some(parent) = reply_to {
+            let channel = ledger.realm().channel();
+            let replay = SharedHistoryReplay {
+                store: self.store,
+                scope: self.history_scope(channel),
+                verifier,
+                caller,
+            };
+            match replay.replay_required_parent(
+                (ledger, view),
+                parent,
+                self.prefix.retired_history_data(),
+                credit,
+                |action| self.read_dependency(channel, action, rng),
+            ) {
+                Ok(()) => {}
+                Err(Refusal::Unavailable) => return Ok(None),
+                Err(other) => return Err(other),
+            };
+        }
+        let retired = self
+            .prefix
+            .retired_history_data()
+            .iter()
+            .collect::<Vec<_>>();
+        let retired_id = record.held_data().target_data().spec().context.admission;
+        let author = retired
+            .iter()
+            .copied()
+            .find(|author| author.admission_id_data() == retired_id)
+            .ok_or(Refusal::Unavailable)?;
+        let result = verifier
+            .project_selected_reviewed_create(
+                (ledger, view),
+                (&pin, membership),
+                (selected, &record),
+                author,
+                &retired,
+                ARCHIVED_PROJECTION_WORK,
+            )
+            .map_err(|_| Refusal::Failed)?;
+        if !matches!(
+            result,
+            V2OrdinaryReceiveStatus::Retained(ActionState::Valid)
+        ) {
+            return Ok(None);
+        }
+        if caller.is_cancelled() {
+            return Err(Refusal::Cancelled);
+        }
+        receipt
+            .observation
+            .with_publication(|| ())
+            .map_err(|_| Refusal::Stale)?;
+        Ok(Some(receipt))
     }
 
     fn prepare_history_original(

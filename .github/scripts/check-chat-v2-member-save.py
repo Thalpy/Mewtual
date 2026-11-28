@@ -174,7 +174,7 @@ def run_logged(
     aggregate limits checked before spawning. Build logs are never buffered.
     """
     limits = marker_limits if marker_limits is not None else (2,) * len(markers)
-    if (len(limits) != len(markers) or any(type(n) is not int or not 1 <= n <= 400 for n in limits)
+    if (len(limits) != len(markers) or any(type(n) is not int or not 1 <= n <= 512 for n in limits)
             or sum(limits) > 1024):
         raise RuntimeError("invalid bounded marker inventory")
     print(f"\n{name}: {' '.join(command)}", flush=True)
@@ -356,10 +356,19 @@ def source_retirement_self_test() -> None:
         # their original two-match cap. Extra names are retained as rejection evidence.
         command = [sys.executable, "-c", "for i in range(8): print('name' + str(i))"]
         pattern = re.compile(r"^(name\d+)$")
-        for cap in (2, 5):
+        for cap in (2, 5, 410):
             code, _, timed_out, found = run_logged("bounded-names-" + str(cap), command, root,
                 markers=(pattern,), marker_limits=(cap,))
-            assert not code and not timed_out and len(found[0]) == cap
+            assert not code and not timed_out and len(found[0]) == min(cap, 8)
+        for limits in ((513,), (512, 512, 1)):
+            try:
+                run_logged("unbounded-names", command, root,
+                    markers=(pattern,) * len(limits), marker_limits=limits)
+            except RuntimeError as error:
+                assert str(error) == "invalid bounded marker inventory"
+            else:
+                raise AssertionError("unbounded marker inventory accepted")
+        assert not (root / "unbounded-names.log").exists()
     # Restore is attempted even when removal fails, and a primary validation
     # exception remains the exception observed by CI.
     for remove_fails, restore_fails in ((False, False), (True, False), (False, True), (True, True)):
