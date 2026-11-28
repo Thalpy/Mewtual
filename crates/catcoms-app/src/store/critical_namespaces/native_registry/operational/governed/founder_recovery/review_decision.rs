@@ -13,9 +13,25 @@ use catcoms_replication::chat::{
 use catcoms_rt::{NativeChatKeyEnds, NativeChatPreparedKeyCut, NativeChatSourceObservation};
 
 impl NativeTextColdFounderSource {
-    pub(in crate::store) fn cover_initial_review_signature(
+    #[cfg(test)]
+    pub(in crate::store) fn require_review_anchor_for_test(
         &mut self,
-        request: NativeTextInitialReviewRequest,
+        anchor: (OwnerHeaderId, u64),
+        caller: &RequestCancellation,
+    ) -> Result<(), AppError> {
+        self.restore_first_add(caller)?;
+        let governed = self.governed.as_mut().ok_or_else(refused)?;
+        self.work
+            .with_recovered_founder_store(&self.selection, &self.source, |store| {
+                governed.with_checked_review_parts(store, &self.source, |_, _, _, require| {
+                    require(Some(anchor))
+                })
+            })
+    }
+
+    pub(in crate::store) fn finish_initial_review(
+        &mut self,
+        (request, select): (NativeTextInitialReviewRequest, bool),
         (native, cut, ends): (
             &NativeChatSourceObservation,
             &mut NativeChatPreparedKeyCut,
@@ -53,13 +69,16 @@ impl NativeTextColdFounderSource {
             work.require_recovered_founder_source(selection, source)
         };
         work.with_recovered_founder_store(selection, source, |store| {
-            governed.with_checked_member_parts(store, source, |verifier, group, frozen, require| {
-                let mut current = || {
-                    current()?;
-                    require()
-                };
+            governed.with_checked_review_parts(store, source, |verifier, group, frozen, require| {
+                let mut check =
+                    |position: Option<ReviewStreamPosition>| {
+                        current()?;
+                        require(position.map(|position| {
+                            (position.membership_header, position.membership_epoch)
+                        }))
+                    };
                 let mut original =
-                    store.prepare_held_review_original(scope, request.case, &mut current)?;
+                    store.prepare_held_review_original(scope, request.case, || check(None))?;
                 original.with_original_data(|bytes, require_held| {
                     let held = V2RemovedCreateRecord::decode(bytes).map_err(|_| refused())?;
                     let target = held.target_data();
@@ -78,7 +97,7 @@ impl NativeTextColdFounderSource {
                         (store, scope, outbox),
                         (verifier, group, frozen),
                         (author, raw_original),
-                        &mut current,
+                        &mut || check(None),
                     )?;
                     let evidence = ancestry.evidence(verifier, author, raw_original)?;
                     let decision = ExactReviewDecisionBody::new(
@@ -111,19 +130,21 @@ impl NativeTextColdFounderSource {
                     };
                     store.with_absent_ordinary_review_target(scope, request.case, || {
                         store.with_review_decision_control(|mount, control| {
-                            control.cover_review_raw(
+                            let spec = ReviewSigningSpec {
+                                pin: &pin,
+                                position,
+                                decision: &decision,
+                                held: bytes,
+                                request_digest: *decision.id().as_bytes(),
+                            };
+                            let mut recheck = |position| {
+                                check(position)?;
+                                require_held()
+                            };
+                            let entry = control.cover_review_raw(
                                 (store, mount),
-                                ReviewSigningSpec {
-                                    pin: &pin,
-                                    position,
-                                    decision: &decision,
-                                    held: bytes,
-                                    request_digest: *decision.id().as_bytes(),
-                                },
-                                || {
-                                    current()?;
-                                    require_held()
-                                },
+                                spec,
+                                &mut recheck,
                                 |preimage| {
                                     sdk.sign_recovered_review_native(
                                         verifier,
@@ -135,7 +156,16 @@ impl NativeTextColdFounderSource {
                                     .map_err(AppError::from)
                                 },
                                 rng,
-                            )
+                            )?;
+                            if select {
+                                control.select_first(
+                                    (store, mount),
+                                    (spec, &entry),
+                                    |position| recheck(Some(position)),
+                                    rng,
+                                )?;
+                            }
+                            Ok(entry)
                         })
                     })
                 })

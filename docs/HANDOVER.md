@@ -73,8 +73,22 @@ Eleven focused App tests passed on Windows. The three-vault TCP fixture
 exercised retries before signing, exact recovery of a short write and
 a full reopen after a torn signature file. The torn file stays
 unchanged while the founder can read its roster and ordinary archive.
-Selected decisions, recovery across a later membership epoch, approval
-delivery and activation remain open.
+The review operation can also check a covered signature against its
+original membership Header after a later Add. It still checks the exact
+current archive and held original, and uses the old Header only to
+verify the retained signature.
+
+The internal founder operation can select the first covered decision.
+One authenticated write-ahead file binds the exact signing files, the
+encrypted decision record and the next journal head. The record is
+synced before the head is installed. An exact retry after that install
+completes its barriers. The operation keeps the write-ahead file and
+signing files in place. Five focused Windows App tests passed. The TCP
+fixture admitted a new member, recovered the earlier signature after
+reopening, and then reopened after an interrupted head install. It
+recovered the exact signature and record without entering the key again.
+Additional decisions, retirement, approval
+delivery, the native admin controls and activation remain open.
 
 ## Rejoin from the retired native session
 

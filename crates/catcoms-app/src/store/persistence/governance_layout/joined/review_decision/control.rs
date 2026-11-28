@@ -3,6 +3,10 @@
 use super::attempt::{
     AttemptParent, JournalKey, ReviewIntent, ATTEMPT_BYTES, MAX_INTENT_BYTES, RAW_BYTES,
 };
+use super::selection::{
+    control_digests, disk, DecisionHead, DecisionSelection, RetainedDecisionRecord,
+    MAX_RECORD_BYTES, MAX_SELECTION_BYTES,
+};
 use super::*;
 use crate::store::persistence::v2_member_outbox::fs::{
     finish_exact_write, observe, open_exact_write, read_bounded_held, require_exact_held, Presence,
@@ -17,8 +21,12 @@ use catcoms_replication::chat::{
 };
 use catcoms_storage::{kept::SessionId, VaultPhysicalWorkLease};
 
-const WORK: usize = 8 * MAX_INTENT_BYTES + 8 * (ATTEMPT_BYTES + RAW_BYTES) + 64 * 1024;
+const WORK: usize = 8 * MAX_INTENT_BYTES
+    + 8 * (ATTEMPT_BYTES + RAW_BYTES)
+    + 6 * (MAX_RECORD_BYTES + MAX_SELECTION_BYTES)
+    + 64 * 1024;
 const _: () = assert!(MAX_INTENT_BYTES <= MAX_FILE);
+const _: () = assert!(MAX_SELECTION_BYTES <= MAX_FILE);
 
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -28,6 +36,9 @@ pub(in crate::store) enum ReviewControlFault {
     BeforeFreshKey,
     ShortRawWrite,
     BeforeRawFileSync,
+    ShortSelectionScratch,
+    AfterSelectionWal,
+    AfterSelectionHeadRename,
 }
 
 #[cfg(test)]
@@ -55,7 +66,7 @@ pub(in crate::store) fn with_review_control_fault<T>(
 }
 
 #[cfg(test)]
-fn take_fault(expected: ReviewControlFault) -> bool {
+pub(super) fn take_fault(expected: ReviewControlFault) -> bool {
     CONTROL_FAULT.with(|slot| {
         if slot.get() == Some(expected) {
             slot.set(None);
@@ -124,6 +135,7 @@ pub(super) struct DecisionControlData {
 
 /// Independent founder, case and stream selection data. Root must still
 /// prove the actual choice, selected ancestry and ordinary absence.
+#[derive(Clone, Copy)]
 pub(in crate::store) struct ReviewSigningSpec<'a> {
     pub(in crate::store) pin: &'a FounderGenesisAnchorData,
     pub(in crate::store) position: ReviewStreamPosition,
@@ -213,6 +225,17 @@ impl DecisionControl {
             return Err(denied());
         }
         require_control_names(&self.data.directory)?;
+        // Selection is downstream of a fully covered Raw. A foreign or
+        // missing control file must never turn selected state into a fresh
+        // signing slot.
+        if self
+            .data
+            .slots
+            .iter()
+            .any(|frame| frame.as_ref().is_none_or(|frame| frame.covering))
+        {
+            disk::require_no_selection(&self.data.directory)?;
+        }
         for role in ControlRole::ALL {
             if Some(role) == except {
                 continue;
@@ -244,7 +267,7 @@ impl DecisionControl {
         &mut self,
         (store, mount): (&ServerStore, &SelectedReviewDecision),
         spec: ReviewSigningSpec<'_>,
-        mut recheck_for_key: impl FnMut() -> Result<(), AppError>,
+        mut recheck: impl FnMut(Option<ReviewStreamPosition>) -> Result<(), AppError>,
         sign: impl FnOnce(&[u8; UNSIGNED_REVIEW_STREAM_ENTRY_BYTES]) -> Result<[u8; 64], AppError>,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<ReviewStreamEntry, AppError> {
@@ -252,17 +275,29 @@ impl DecisionControl {
         let prepared = if let Some(original) = &self.data.slots[ControlRole::Intent as usize] {
             let plain = self.key.open_intent(&original.bytes)?;
             let intent = ReviewIntent::decode(&plain)?;
-            if intent.request_digest != spec.request_digest
-                || &intent.decision != spec.decision
-                || intent.original != spec.held
+            spec.require_intent(&intent)?;
+            // Only an already signed original can use a historical
+            // membership position. An unentered Attempt still needs the
+            // same current epoch and original stream predecessor.
+            let position = if self.data.signed_raw.is_some()
+                || self.data.slots[ControlRole::Raw as usize].is_some()
             {
-                return Err(denied());
-            }
-            let prepared = intent.rederive(spec.pin, spec.position)?;
+                let position = intent.position_data()?;
+                if position.sequence != spec.position.sequence
+                    || position.previous != spec.position.previous
+                {
+                    return Err(denied());
+                }
+                recheck(Some(position))?;
+                position
+            } else {
+                spec.position
+            };
+            let prepared = intent.rederive(spec.pin, position)?;
             self.finish_retained_output(store, mount)?;
             prepared
         } else {
-            recheck_for_key()?;
+            recheck(None)?;
             let input = ReviewIntent::seal(
                 &self.key,
                 spec.request_digest,
@@ -281,12 +316,12 @@ impl DecisionControl {
             let attempt = self.frame(ControlRole::Attempt).ok_or_else(denied)?;
             let entry = parent.recover_raw(&self.key, attempt, raw, (spec.pin, prepared))?;
             self.cover_captured_files(store, mount)?;
-            recheck_for_key()?;
+            recheck(Some(entry.position_data()))?;
             self.data.signed_raw = None;
             return Ok(entry);
         }
         if self.frame(ControlRole::Attempt).is_none() {
-            recheck_for_key()?;
+            recheck(None)?;
             #[cfg(test)]
             if take_fault(ReviewControlFault::BeforeAttempt) {
                 return Err(AppError::Io(
@@ -303,7 +338,7 @@ impl DecisionControl {
                 return Err(denied());
             }
             self.require_original(store, mount)?;
-            recheck_for_key()?;
+            recheck(None)?;
             #[cfg(test)]
             if take_fault(ReviewControlFault::BeforeFreshKey) {
                 return Err(AppError::Io("injected stop before review key entry".into()));
@@ -321,7 +356,100 @@ impl DecisionControl {
             parent.retain_raw(&self.key, attempt, signature, (spec.pin, prepared), rng)?;
         self.cover_new(store, mount, ControlRole::Raw, raw)?;
         self.data.signed_raw = None;
+        recheck(Some(entry.position_data()))?;
         Ok(entry)
+    }
+
+    /// Commit the already covered first signature under the same founder
+    /// loan and ordinary-history absence guard. This only changes private
+    /// storage. The first transaction stays intact until exact retirement
+    /// can be recovered independently of the signing files.
+    pub(in crate::store) fn select_first(
+        &mut self,
+        (store, mount): (&ServerStore, &SelectedReviewDecision),
+        (spec, entry): (ReviewSigningSpec<'_>, &ReviewStreamEntry),
+        mut recheck: impl FnMut(ReviewStreamPosition) -> Result<(), AppError>,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<(), AppError> {
+        let position = entry.position_data();
+        if position.sequence != 1 || position.previous.is_some() {
+            return Err(denied());
+        }
+        self.cover_captured_files(store, mount)?;
+        let key = &self.key;
+        let data = &mut self.data;
+        let root = &data.directory;
+        let slots = &mut data.slots;
+
+        let mut prove_source = |slots: &mut [Option<SelectedFrame>; 3]| {
+            recheck(position)?;
+            mount.require(store)?;
+            require_control_names(root)?;
+            for (role, slot) in ControlRole::ALL.into_iter().zip(slots) {
+                let slot = slot
+                    .as_mut()
+                    .filter(|slot| slot.file_synced && !slot.covering)
+                    .ok_or_else(denied)?;
+                require_exact_held(
+                    &root.child(role.filename()),
+                    &mut slot.original,
+                    &slot.bytes,
+                )?;
+            }
+            mount.require(store)
+        };
+        let read = |role: ControlRole| {
+            slots[role as usize]
+                .as_ref()
+                .map(|slot| slot.bytes.as_slice())
+                .ok_or_else(denied)
+        };
+        let frames = [
+            read(ControlRole::Intent)?,
+            read(ControlRole::Attempt)?,
+            read(ControlRole::Raw)?,
+        ];
+        let plain = key.open_intent(frames[0])?;
+        let intent = ReviewIntent::decode(&plain)?;
+        spec.require_intent(&intent)?;
+        let prepared = intent.rederive(spec.pin, position)?;
+        let parent = AttemptParent::from_authenticated_frame(frames[0])?;
+        let recovered = parent.recover_raw(key, frames[1], frames[2], (spec.pin, prepared))?;
+        if &recovered != entry {
+            return Err(denied());
+        }
+        let digests = control_digests(frames);
+        drop(plain);
+        let verify = |sealed: Option<&[u8]>| {
+            prove_source(slots)?;
+            if let Some(sealed) = sealed {
+                let plain = DecisionSelection::open(key, sealed)?;
+                let selection = DecisionSelection::decode(&plain)?;
+                if selection.previous_head.is_some() {
+                    return Err(denied());
+                }
+                selection.require_controls(digests)?;
+                selection.verify_data(key, spec.pin, (entry, spec.request_digest))?;
+            }
+            Ok(())
+        };
+        let mut wal = disk::cover_selection_wal(root, verify, || {
+            let record = RetainedDecisionRecord::prepare(
+                key,
+                spec.pin,
+                (entry, spec.decision, spec.held),
+                (spec.request_digest, digests[2]),
+                rng,
+            )?;
+            let head = DecisionHead::from_record(entry, &record, None)?.seal(key, rng)?;
+            DecisionSelection::seal(key, digests, None, &record, &head, rng)
+        })?;
+        let plain = DecisionSelection::open(key, &wal.bytes)?;
+        let selection = DecisionSelection::decode(&plain)?;
+        selection.require_controls(digests)?;
+        let head = selection.verify_data(key, spec.pin, (entry, spec.request_digest))?;
+        disk::select_covered_wal(root, &mut wal, &selection, head, || prove_source(slots))?;
+        Ok(())
     }
 
     /// A cold authenticated frame may have stopped after its last byte
@@ -439,12 +567,26 @@ impl DecisionControl {
     }
 }
 
+impl ReviewSigningSpec<'_> {
+    fn require_intent(&self, intent: &ReviewIntent<'_>) -> Result<(), AppError> {
+        if intent.request_digest != self.request_digest
+            || &intent.decision != self.decision
+            || intent.original != self.held
+        {
+            return Err(denied());
+        }
+        Ok(())
+    }
+}
+
 fn require_control_names(directory: &HeldDirectory) -> Result<(), AppError> {
-    let names = bounded_entries(directory, ControlRole::ALL.len())?;
-    if names.len() > ControlRole::ALL.len()
-        || names
-            .iter()
-            .any(|name| !ControlRole::ALL.iter().any(|role| name == role.filename()))
+    let maximum = ControlRole::ALL.len() + disk::NAMES.len();
+    let names = bounded_entries(directory, maximum)?;
+    if names.len() > maximum
+        || names.iter().any(|name| {
+            !ControlRole::ALL.iter().any(|role| name == role.filename())
+                && !disk::NAMES.iter().any(|role| name == *role)
+        })
     {
         return Err(denied());
     }

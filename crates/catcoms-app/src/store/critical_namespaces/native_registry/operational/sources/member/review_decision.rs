@@ -14,6 +14,25 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
         request: NativeTextInitialReviewRequest,
         caller: &RequestCancellation,
     ) -> Result<ReviewStreamEntry, V2MemberSaveRefusal> {
+        self.finish_initial_founder_review((request, false), caller)
+    }
+
+    /// Save the first exact founder decision in the selected private
+    /// journal. This Rust entry point neither changes the ordinary
+    /// projection nor releases a decision to another member.
+    pub fn select_initial_founder_review(
+        self,
+        request: NativeTextInitialReviewRequest,
+        caller: &RequestCancellation,
+    ) -> Result<ReviewStreamEntry, V2MemberSaveRefusal> {
+        self.finish_initial_founder_review((request, true), caller)
+    }
+
+    fn finish_initial_founder_review(
+        self,
+        request: (NativeTextInitialReviewRequest, bool),
+        caller: &RequestCancellation,
+    ) -> Result<ReviewStreamEntry, V2MemberSaveRefusal> {
         use V2MemberSaveRefusal as Refusal;
         if caller.is_cancelled() {
             return Err(Refusal::Cancelled);
@@ -34,7 +53,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
             .recovered_founder
             .as_mut()
             .ok_or(Refusal::Unavailable)?;
-        let result = founder.cover_initial_review_signature(
+        let result = founder.finish_initial_review(
             request,
             (&native, &mut review_cut, &mut ends),
             caller,

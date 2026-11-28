@@ -6,6 +6,7 @@ use crate::store::persistence::v2_member_outbox::fs::{bounded_entries, HeldDirec
 
 mod attempt;
 mod control;
+mod selection;
 #[cfg(test)]
 pub(in crate::store) use control::{with_review_control_fault, ReviewControlFault};
 pub(in crate::store) use control::{DecisionControl, ReviewSigningSpec};

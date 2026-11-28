@@ -4315,8 +4315,20 @@ A same-vault warm retry can finish its own short file and an Attempt
 provably left before its signer was called. Cold or ambiguous Attempt
 has no permission to enter the key again. A file that is merely readable
 is synced by its original identity before use. Result disclosure remains
-bound to the current native command. These checks produce private data
-for a future journal selector.
+bound to the current native command. Historical recovery may use an
+earlier exact membership Header only for a retained signature. It must
+prove that Header and MLS epoch in the selected lineage and recheck the
+original current archive and held record.
+
+The first private selection checks the same exact Raw, signing files
+and held original under the founder loan. An authenticated write-ahead
+file commits the encrypted immutable record and the encrypted first
+head. The record is synced before the staged head is renamed and
+covered. Only the pre-commit scratch name can classify a short frame
+for replacement, and only while all selection outputs are absent.
+A missing write-ahead file with retained outputs refuses selection.
+This checkpoint retains all transaction files, supplies no approval
+delivery and supports only the first decision.
 
 ## Chat history admission and retained audit (20 October, continuation)
 

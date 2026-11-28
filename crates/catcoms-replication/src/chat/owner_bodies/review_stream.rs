@@ -74,6 +74,17 @@ impl UnsignedReviewStreamEntry {
         &self.0
     }
 
+    /// Borrowing an authenticated local intent can name a historical
+    /// membership position. Its ancestry and preimage still need reproof
+    /// against the selected journal and membership.
+    pub fn read_position_data(
+        bytes: &[u8; UNSIGNED_REVIEW_STREAM_ENTRY_BYTES],
+    ) -> Result<ReviewStreamPosition, ChatError> {
+        let mut frame = [0; REVIEW_STREAM_ENTRY_BYTES];
+        frame[..UNSIGNED_REVIEW_STREAM_ENTRY_BYTES].copy_from_slice(bytes);
+        Ok(ReviewStreamEntry::decode(&frame)?.position_data())
+    }
+
     /// Verify retained raw output against the exact input. An interrupted
     /// producer can finish from verified Raw without entering the key again.
     pub fn attach_signature(

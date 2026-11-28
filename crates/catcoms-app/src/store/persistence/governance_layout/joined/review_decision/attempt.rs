@@ -150,6 +150,10 @@ impl<'a> ReviewIntent<'a> {
         }
         Ok(expected)
     }
+
+    pub(super) fn position_data(&self) -> Result<ReviewStreamPosition, AppError> {
+        UnsignedReviewStreamEntry::read_position_data(self.unsigned).map_err(|_| denied())
+    }
 }
 
 /// Parent commitment from an authenticated intent's exact sealed frame.

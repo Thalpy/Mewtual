@@ -78,9 +78,21 @@ older ID10-only build refuses once ID11 is selected. The original
 recovered founder can cover the first signature under the App's exact
 Intent, Attempt and Raw files. It rechecks the original hold, current
 membership and ordinary archive before the dedicated native key call.
-The covered signature is private and has no selected case result.
-Selection, later membership recovery, fork persistence and delivery
-admission remain open.
+The exact covered signature can be recovered after a later membership
+change by proving its original Header and epoch in the same selected
+lineage. A fresh key attempt still requires the current membership
+position.
+
+The Rust-only first-decision path freezes the exact control digests,
+encrypted record and replacement head in an authenticated write-ahead
+file. A separate scratch name precedes it. Once the file is covered,
+the writer can finish only its exact record and head. It covers the
+record before replacing the head and rechecks the original custody
+before each promotion. A retry after the rename proves and covers the
+original outputs. It reuses the retained signature. All three signing
+files and the write-ahead file stay as recovery inputs in this
+checkpoint. The next work is indexed exact outcomes, retirement,
+additional case transitions, fork persistence and delivery admission.
 
 ### Covered founder audit
 

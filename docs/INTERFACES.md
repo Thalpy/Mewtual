@@ -977,9 +977,12 @@ classified transaction files can refuse review without changing the original
 founder history path. Ordinary startup leaves existing vaults on their original
 format. The initial review request names the exact expected case, original digest,
 Remove and stable intent. The original recovered member source can cover its first
-signature through a dedicated native key cut. The returned entry carries no selected
-decision or approval authority. Stream selection, later epoch recovery, delivery
-and native commands remain to be implemented.
+signature through a dedicated native key cut. The exact retained signature can be
+recovered after a later membership change if its original Header is still in the
+selected lineage. A separate Rust operation selects the first private decision after
+covering its authenticated write-ahead file, exact record and journal head. The
+returned entry is private. Additional decisions, completed-transaction retirement,
+approval delivery and native admin commands remain to be implemented.
 [Exact contract](communication-recovery/CHAT-OWNER-V2-REVIEW-DECISION.md).
 
 ## Guarded current chat projection core (5 November; authored, unexecuted)
