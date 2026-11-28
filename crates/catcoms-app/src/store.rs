@@ -144,6 +144,8 @@ pub use persistence::v2_member_transport::{
     NativeTextFounderAudit, NativeTextFounderDependencyExchange,
     NativeTextFounderDependencyResponse, NativeTextFounderFrameOutcome, NativeTextFounderReceived,
 };
+pub(in crate::store) use persistence::v2_review_hold::HeldReviewQuery;
+pub use persistence::v2_review_hold::{NativeTextHeldCase, NativeTextHeldReviewPage};
 mod owner_evidence;
 pub use chat_admission::{
     ChatAdmissionBinding, ChatAdmissionCapture, ChatAdmissionFinish, ChatAdmissionKey,
@@ -673,7 +675,7 @@ mod persistence {
     /// Chat V2 ordinary-member durable outbox; independent of the founder `v2_text` journal.
     pub(in crate::store) mod v2_member_outbox;
     pub(in crate::store) mod v2_member_transport;
-    mod v2_review_hold;
+    pub(super) mod v2_review_hold;
     pub(in crate::store) mod v2_shared_history;
     pub(in crate::store) mod v2_text;
     pub(in crate::store) use cold_source_read::v2_genesis_activation;

@@ -60,6 +60,22 @@ delivery. Full rejected and reopened case details remain in the founder audit.
 The signed frame provides format and linkage checks. The journal, historical membership
 proof, selected case lookup, fork persistence and delivery admission remain open.
 
+### Covered founder audit
+
+After the existing hold writer covers the exact body and its directory, it can
+write a fixed authenticated receipt in a separate sibling directory. The receipt
+binds the selected ID10 marker, channel key, opaque case label and exact retained
+ciphertext. Older writers still use their original catalog and file names. An
+unavailable receipt cannot stop the exact body from being held.
+
+The founder audit reads at most eight cases per window. It checks the covering
+receipt, exact body and authenticated frozen Remove, and keeps both original
+files held until every candidate in the window has been checked again. It can
+advance past unavailable cases without repairing them or reporting a complete
+page. A legacy hold that later entered ordinary history still needs separate
+confirmation to gain a receipt. Native cursor custody and final disclosure are
+separate boundaries.
+
 An explicit selected Review Approve supplies a separate EXACT REVIEWED admission route after a
 removal. It does not append to/change the frozen accepted-log cut or prove accepted-before-removal.
 The Profile's inclusion rule authenticates LOG acceptance; its closed v2 review-body grammar

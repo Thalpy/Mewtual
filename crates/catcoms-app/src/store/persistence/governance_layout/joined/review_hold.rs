@@ -10,11 +10,13 @@ use crate::store::persistence::v2_member_outbox::fs::{
     bounded_entries, create_namespace, observe_directory, HeldDirectory, Presence,
 };
 use crate::store::persistence::v2_review_hold::{
-    disk::{HoldCandidate, HoldDisk, WORK},
+    disk::{HeldReviewQuery, HoldCandidate, HoldDisk, SelectedHeldWindow, WORK},
     HeldCase, HoldScope,
 };
 use crate::store::persistence::v2_shared_history::{disk::DISK_FEE, SharedHistoryScope};
-use catcoms_replication::chat::{V2GeneralPrefixVerifier, V2RemovedCreateEvidence};
+use catcoms_replication::chat::{
+    SignedAction, V2GeneralPrefixVerifier, V2RemovedCreateEvidence, V2RemovedCreateRecord,
+};
 pub(super) use declaration::{recover, require_no_scratch};
 use std::collections::BTreeMap;
 
@@ -22,11 +24,13 @@ const MAX_SCOPES: usize = 8;
 
 pub(in crate::store) const DIRECTORY_NAME: &str = "chat-v2-removed-holds";
 pub(in crate::store) const MARKER_NAME: &str = "chat-critical-namespaces.review-hold.marker";
+const WITNESS_DIRECTORY: &str = "chat-v2-removed-hold-receipts";
 
 pub(in crate::store) struct SelectedReviewHold {
     marker: OpenedArchiveObject,
     directory: HeldDirectory,
     partitions: BTreeMap<[u8; 32], HeldDirectory>,
+    witnesses: Option<HeldDirectory>,
     mount: PhysicalMountNegative,
     _fee: CatalogReadReservation,
 }
@@ -38,13 +42,13 @@ impl SelectedReviewHold {
         descriptor: &[u8],
     ) -> Result<Self, AppError> {
         let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
-        // The root and up to eight held path copies plus the current
-        // operation's clone remain paid for the actual mount's lifetime.
+        // Keep the hold root, up to eight scoped names, the optional
+        // witness directory and this operation's path copies paid.
         let paths = fixed(store, false, DIRECTORY_NAME)?
             .as_os_str()
             .len()
             .checked_add(80)
-            .and_then(|bytes| bytes.checked_mul(2 * (MAX_SCOPES + 2)))
+            .and_then(|bytes| bytes.checked_mul(2 * (MAX_SCOPES + 4)))
             .and_then(|bytes| bytes.checked_add(16 * 1024))
             .ok_or_else(denied)?;
         let fee = policy.current.archive.pending.pool.try_reserve(paths)?;
@@ -61,6 +65,7 @@ impl SelectedReviewHold {
             marker,
             directory: HeldDirectory::open(fixed(store, false, DIRECTORY_NAME)?)?,
             partitions: BTreeMap::new(),
+            witnesses: None,
             mount: store.capture_physical_mount_negative(),
             _fee: fee,
         };
@@ -87,6 +92,59 @@ impl SelectedReviewHold {
 }
 
 impl ServerStore {
+    /// Read only the selected scoped directory and authenticated covering
+    /// witnesses. An unrelated archive WAL is never opened by this read.
+    pub(in crate::store) fn read_selected_review_window(
+        &self,
+        scope: SharedHistoryScope,
+        query: HeldReviewQuery,
+        mut require_current: impl FnMut() -> Result<(), AppError>,
+        verify: impl FnMut(&V2RemovedCreateRecord<'_>) -> Result<SignedAction, AppError>,
+    ) -> Result<Option<SelectedHeldWindow>, AppError> {
+        if scope.vault != self.chat_vault_domain()? || !(1..=8).contains(&query.limit) {
+            return Err(denied());
+        }
+        self.validate_mounted_governance_layout()?;
+        let _lease = self._session.retain_for_physical_work();
+        let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        let pool = &policy.current.archive.pending.pool;
+        let _work = pool.try_reserve(16 * 1024)?;
+        let mount = self.review_hold_mount.try_lock().map_err(|_| denied())?;
+        let Some(owner) = mount.as_ref() else {
+            return Ok(None);
+        };
+        require_current()?;
+        owner.require(self)?;
+        let key = Zeroizing::new(self.keys.db_key()?);
+        let label = HoldScope::new(scope).partition_label(&key);
+        let partition_path = owner.directory.child(&hex::encode(label));
+        let directory = if let Some(directory) = owner.partitions.get(&label) {
+            directory.try_clone()?
+        } else if observe_directory(&partition_path)? == Presence::Present {
+            HeldDirectory::open(partition_path)?
+        } else {
+            owner.require(self)?;
+            require_current()?;
+            return Ok(Some(SelectedHeldWindow::empty(pool.try_reserve(1024)?)));
+        };
+        let mut disk = HoldDisk::from_held(directory, scope, &key, pool.clone())?;
+        if let Ok(Some(witnesses)) = owner.read_witness_directory(self) {
+            let marker = owner.marker.1.as_slice().try_into().map_err(|_| denied())?;
+            disk = disk.with_selection_witnesses(witnesses, marker);
+        }
+        disk.selected_review_window(
+            &key,
+            query,
+            &self._session,
+            || {
+                require_current()?;
+                owner.require(self)
+            },
+            verify,
+        )
+        .map(Some)
+    }
+
     #[cfg(test)]
     pub(in crate::store) fn review_hold_partition_for_test(
         &self,
@@ -153,12 +211,17 @@ impl ServerStore {
             let owner = mount.as_mut().ok_or_else(denied)?;
             require_current()?;
             owner.require(self)?;
-            let mut disk = HoldDisk::from_held(
-                owner.partition(self, scope, key, &mut require_current)?,
-                scope,
-                key,
-                pool.clone(),
-            )?;
+            let partition = owner.partition(self, scope, key, &mut require_current)?;
+            let witnesses = owner.prepare_witness_directory(self, &mut require_current);
+            // Failure to prepare optional audit evidence cannot strand
+            // the exact body. The original authority still has to be live.
+            require_current()?;
+            owner.require(self)?;
+            let mut disk = HoldDisk::from_held(partition, scope, key, pool.clone())?;
+            if let Ok(witnesses) = witnesses {
+                let marker = owner.marker.1.as_slice().try_into().map_err(|_| denied())?;
+                disk = disk.with_selection_witnesses(witnesses, marker);
+            }
             let resulting = disk.retain(
                 key,
                 HoldCandidate {
@@ -180,6 +243,46 @@ impl ServerStore {
 }
 
 impl SelectedReviewHold {
+    fn read_witness_directory(
+        &self,
+        store: &ServerStore,
+    ) -> Result<Option<HeldDirectory>, AppError> {
+        if let Some(held) = &self.witnesses {
+            return held.try_clone().map(Some);
+        }
+        let path = fixed(store, false, WITNESS_DIRECTORY)?;
+        if observe_directory(&path)? == Presence::Absent {
+            return Ok(None);
+        }
+        HeldDirectory::open(path).map(Some)
+    }
+
+    // Keep this optional sibling outside the legacy ID10 scope inventory.
+    // An older writer can still add exact bodies without audit witnesses.
+    fn prepare_witness_directory(
+        &mut self,
+        store: &ServerStore,
+        require_current: &mut impl FnMut() -> Result<(), AppError>,
+    ) -> Result<HeldDirectory, AppError> {
+        self.require(store)?;
+        if let Some(directory) = &self.witnesses {
+            return directory.try_clone();
+        }
+        let path = fixed(store, false, WITNESS_DIRECTORY)?;
+        if observe_directory(&path)? == Presence::Absent {
+            require_current()?;
+            create_namespace(&path)?;
+        }
+        let directory = HeldDirectory::open(path)?;
+        // Cover the sibling's name before any receipt can name a held body.
+        sync_directory(&store.dir).map_err(io)?;
+        self.require(store)?;
+        require_current()?;
+        let original = directory.try_clone()?;
+        self.witnesses = Some(directory);
+        Ok(original)
+    }
+
     fn partition(
         &mut self,
         store: &ServerStore,

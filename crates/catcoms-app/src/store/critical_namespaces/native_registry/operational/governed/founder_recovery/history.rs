@@ -11,12 +11,61 @@ use crate::store::persistence::v2_shared_history::{
     ARCHIVED_PROJECTION_WORK,
 };
 use crate::store::{
-    NativeTextFounderAudit, NativeTextJoinedArchivedActions, NativeTextJoinedMemberProjection,
-    ServerStore, V2MemberSaveRefusal, V2MemberSignRequest,
+    HeldReviewQuery, NativeTextFounderAudit, NativeTextHeldReviewPage,
+    NativeTextJoinedArchivedActions, NativeTextJoinedMemberProjection, ServerStore,
+    V2MemberSaveRefusal, V2MemberSignRequest,
 };
 use catcoms_replication::chat::{ActionId, ChatLedger, Realm, MAX_ACTION_BYTES};
 
 impl NativeTextColdFounderSource {
+    /// Read at most eight covered, independently reverified held posts for
+    /// this original founder and channel. This supplies admin evidence only.
+    pub fn selected_held_review_window(
+        &mut self,
+        channel: u128,
+        after: Option<[u8; 32]>,
+        limit: usize,
+        caller: &RequestCancellation,
+    ) -> Result<NativeTextHeldReviewPage, AppError> {
+        let (_, observation, _fee) = self.prepare_member_subscription(channel, caller)?;
+        let signal = observation.constrain(caller.clone());
+        let scope = self.history_scope(channel)?;
+        let query = HeldReviewQuery { after, limit };
+        let governed = self.governed.as_mut().ok_or_else(refused)?;
+        let page =
+            self.work
+                .with_recovered_founder_store(&self.selection, &self.source, |store| {
+                    governed.with_checked_member_parts(
+                        store,
+                        &self.source,
+                        |verifier, _, removed, current| {
+                            store.read_selected_review_window(
+                                scope,
+                                query,
+                                || {
+                                    if signal.is_cancelled() {
+                                        return Err(refused());
+                                    }
+                                    current()
+                                },
+                                |record| {
+                                    let author = record.target_data().spec().context.admission;
+                                    let frozen = removed
+                                        .iter()
+                                        .find(|origin| origin.admission_id_data() == author)
+                                        .ok_or_else(refused)?;
+                                    verifier
+                                        .verify_removed_create_record_for_audit(record, frozen)
+                                        .map_err(|_| refused())
+                                },
+                            )
+                        },
+                    )
+                })?;
+        self.require_recovered_checkpoint(&signal)?;
+        Ok(NativeTextHeldReviewPage::new(page, signal))
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn selected_history_audit(
         &mut self,
         channel: u128,

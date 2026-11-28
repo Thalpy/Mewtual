@@ -8,10 +8,12 @@ use catcoms_replication::chat::{
     ActionId, V2GeneralPrefixVerifier, V2RemovedCreateEvidence, V2RemovedCreateRecord,
     MAX_REMOVED_CREATE_RECORD_BYTES,
 };
-use catcoms_rt::CryptoRngCore;
+use catcoms_rt::{CryptoRngCore, RequestCancellation};
 use zeroize::Zeroizing;
 
 pub(in crate::store::persistence) mod disk;
+pub(in crate::store) use disk::HeldReviewQuery;
+pub use disk::SelectedHeldCase as NativeTextHeldCase;
 
 const KEY_DOMAIN: &str = "catcoms/private-chat-v2-removed-create-vault-key/v1";
 const LEAF_DOMAIN: &str = "catcoms/private-chat-v2-removed-create-leaf/v1";
@@ -125,6 +127,48 @@ impl HoldScope {
 pub(super) struct OpenedHold {
     plain: Zeroizing<Vec<u8>>,
     pub(super) identity: HeldCase,
+}
+
+/// Paid, read-only data from the original mounted founder. The negative
+/// follows the selected membership and the caller. Native still orders its
+/// final publication against lock and original registry-row replacement.
+pub struct NativeTextHeldReviewPage {
+    window: Option<disk::SelectedHeldWindow>,
+    signal: RequestCancellation,
+}
+
+catcoms_rt::redacted_debug! { NativeTextHeldReviewPage; }
+
+impl NativeTextHeldReviewPage {
+    pub(in crate::store) fn new(
+        window: Option<disk::SelectedHeldWindow>,
+        signal: RequestCancellation,
+    ) -> Self {
+        Self { window, signal }
+    }
+
+    pub fn is_current_cached(&self) -> bool {
+        !self.signal.is_cancelled()
+    }
+
+    /// None means the hold namespace is unavailable. A complete empty page
+    /// requires a selected namespace and an observed empty window.
+    pub fn with_records<T>(
+        &self,
+        read: impl FnOnce(Option<&[NativeTextHeldCase]>, Option<[u8; 32]>, usize) -> T,
+    ) -> Result<T, AppError> {
+        if !self.is_current_cached() {
+            return Err(refused());
+        }
+        let records = self.window.as_ref().map(|page| page.records.as_slice());
+        let next = self.window.as_ref().and_then(|page| page.next);
+        let unavailable = self.window.as_ref().map_or(0, |page| page.unavailable);
+        let value = read(records, next, unavailable);
+        if !self.is_current_cached() {
+            return Err(refused());
+        }
+        Ok(value)
+    }
 }
 
 #[cfg(test)]
