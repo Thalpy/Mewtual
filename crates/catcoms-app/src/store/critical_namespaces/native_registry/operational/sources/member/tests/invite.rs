@@ -14,6 +14,7 @@ use std::cell::Cell;
 use std::time::Duration;
 
 mod review_projection;
+mod warm_review_authority;
 
 struct TestArchiveAdmission;
 
@@ -490,16 +491,30 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
     };
     let founder_dir = tempfile::tempdir().unwrap();
     let (founder, founder_budget) = selected_joined(founder_dir.path());
-    let (owner, row) = activate(
-        prepared_mesh_founder_with_clock(
-            &founder,
-            &founder_budget,
-            seed,
-            Box::new(catcoms_rt::SystemClock),
-        ),
+    let owner = prepared_mesh_founder_with_clock(
         &founder,
         &founder_budget,
+        seed,
+        Box::new(catcoms_rt::SystemClock),
     );
+    let (owner, row) = if successor == Some(MountedSuccessor::WarmReview) {
+        let creation = || {
+            owner
+                .prepare_creation(
+                    command(&founder, &founder_budget),
+                    request(1, "Original"),
+                    inputs(),
+                )
+                .unwrap()
+        };
+        creation().cover_founder_activation().unwrap();
+        creation().cover_founder_review_storage().unwrap();
+        let row = creation().select_stored_review_runtime().unwrap();
+        (owner, row)
+    } else {
+        activate(owner, &founder, &founder_budget)
+    };
+    let founder_row = &row;
     let (sender, receiver) = tokio::sync::watch::channel(false);
     let negative = RequestCancellation::new(receiver, None);
     let saved = prepare(&owner, &row, &founder, &founder_budget)
@@ -876,6 +891,12 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
     assert_eq!(std::fs::read(&index).unwrap(), prior_index);
     std::fs::remove_file(&outcome_path).unwrap();
     std::fs::rename(&registration_parked, &outcome_path).unwrap();
+    if !recover_stage {
+        assert!(
+            dir.path().join("chat-v2-a1-founder-peer.bin").is_file(),
+            "the exact signed founder hint was covered before the Register Stage was retained"
+        );
+    }
     let original_member_outbox = *registration
         .member_outbox_context_data()
         .unwrap()
@@ -908,6 +929,9 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         use crate::store::persistence::governance_layout::joined::review_receive::{
             with_receiver_fault, with_receiver_hook, ReceiverFault,
         };
+        // The native adapter drops the installation continuation after
+        // success. Return its TCP loan before testing live member work.
+        drop(installation);
         let row = register(&mut rng).unwrap();
         let current = dir
             .path()
@@ -1010,6 +1034,14 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             assert!(inspect().governed_roster(&view, &fresh).is_ok());
             assert_eq!(register(&mut rng).unwrap(), row);
             assert_eq!(rng.next_u64(), unchanged.next_u64());
+            warm_review_authority::prove_empty_review_on_original_live_owner(
+                (&owner, founder_row, &founder, &founder_budget),
+                (&view, &vault, &budget),
+                &original,
+                &invite,
+                &fresh,
+            )
+            .await;
         }
         assert_ne!(std::fs::read(&current).unwrap(), previous);
         assert!(review.join("manifest.current").is_file());
@@ -1020,7 +1052,6 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         );
 
         let mut retirement = original.prepare_retirement().unwrap();
-        drop(installation);
         tokio::time::timeout(Duration::from_secs(5), async {
             while retirement.try_retire().unwrap()
                 == crate::store::NativeTextSourceRetirementStatus::Pending
@@ -3056,6 +3087,9 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         assert_eq!(unavailable, 0);
                         let records = records.unwrap();
                         assert_eq!(records.len(), 2);
+                        assert!(records.iter().all(|record| {
+                            record.decision == crate::store::NativeTextHeldReviewDecision::Undecided
+                        }));
                         let record = records.iter().find(|record| record.signed.id() == action).unwrap();
                         assert_eq!(record.signed.id(), action);
                         assert_eq!(record.admission, third_own);
@@ -3077,8 +3111,33 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         (coordinates(record), coordinates(other))
                     }).unwrap();
                     drop(audit);
+                    // Replace the exact original ID10 marker after the ID11
+                    // read has verified both case statuses. Only the same
+                    // guarded hold files may produce the audit's plaintext.
+                    let marker = founder_dir.path().join(
+                        crate::store::persistence::governance_layout::joined::review_hold::MARKER_NAME,
+                    );
+                    assert!(warm_review_authority::replace_file_after_review_status(&marker, || {
+                        cold.selected_held_review_window(channel, None, 3, &fresh)
+                    }).is_err());
+                    assert!(cold.selected_held_review_window(channel, None, 3, &fresh).is_ok());
                     let directory = std::fs::read_dir(founder_dir.path().join("chat-v2-removed-holds"))
                         .unwrap().next().unwrap().unwrap().path();
+                    let original = std::fs::read_dir(&directory)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path())
+                        .find(|path| path.extension().is_some_and(|ext| ext == "held"))
+                        .unwrap();
+                    let filtered = warm_review_authority::replace_file_after_review_status(&original, || {
+                        cold.selected_held_review_window(channel, None, 3, &fresh)
+                    }).unwrap();
+                    filtered.with_records(|records, unavailable| {
+                        assert_eq!(unavailable, 1);
+                        let records = records.unwrap();
+                        assert_eq!(records.len(), 1);
+                        assert_eq!(records[0].decision, crate::store::NativeTextHeldReviewDecision::Unavailable);
+                    }).unwrap();
+                    drop(filtered);
                     let parked = directory.with_extension("parked");
                     std::fs::rename(&directory, &parked).unwrap();
                     std::fs::create_dir(&directory).unwrap();

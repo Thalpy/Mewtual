@@ -80,10 +80,18 @@ impl ColdRecoveredArchive {
         anchor: (OwnerHeaderId, u64),
     ) -> Result<(), AppError> {
         let replay = verifier.replay_data();
-        if (replay.header().id(), replay.mls_epoch_data()) != selected
-            || anchor.1 == 0
-            || anchor.1 > selected.1
-        {
+        if (replay.header().id(), replay.mls_epoch_data()) != selected {
+            return Err(refused());
+        }
+        self.require_review_anchor_on_selected(selected, anchor)
+    }
+
+    fn require_review_anchor_on_selected(
+        &self,
+        selected: (OwnerHeaderId, u64),
+        anchor: (OwnerHeaderId, u64),
+    ) -> Result<(), AppError> {
+        if anchor.1 == 0 || anchor.1 > selected.1 {
             return Err(refused());
         }
         if anchor == selected {
@@ -679,6 +687,26 @@ impl HeldColdFounderAdd {
         self.files.origin.original.require_same_original(source)?;
         self.recovered.require_predecessors(source)?;
         require_exact_held(&self.files.archive_path, &mut self.files.archive)
+    }
+
+    /// The warm writer has already proved this actual parent is referenced by
+    /// its selected child. Reverify the exact retained archive for an older
+    /// review anchor; never rebuild or replace the warm membership issuer.
+    pub(in crate::store::persistence::v2_text) fn require_warm_review_parent_anchor(
+        &mut self,
+        guard: &crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard<'_, '_>,
+        anchor: (OwnerHeaderId, u64),
+    ) -> Result<(), AppError> {
+        self.require_writer_parent_archive(guard)?;
+        let parent = self.files.selected.transition;
+        self.recovered
+            .require_review_anchor_on_selected((parent.header, parent.epoch), anchor)?;
+        if anchor != (parent.header, parent.epoch) {
+            self.recovered
+                .require_predecessor_contents(guard.source().source())?;
+        }
+        self.require_writer_parent_archive(guard)?;
+        guard.validate_source_only()
     }
 
     pub(in crate::store::persistence::v2_text) fn encode_successor_proof(

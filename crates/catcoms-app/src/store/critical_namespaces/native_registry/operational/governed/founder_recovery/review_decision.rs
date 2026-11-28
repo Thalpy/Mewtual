@@ -11,26 +11,11 @@ use catcoms_replication::chat::{
         ExactReviewDecisionBody, ExactReviewOriginal, ReviewDecisionBody, ReviewSpec,
         ReviewStreamEntry, ReviewStreamPosition,
     },
-    FounderGenesisAnchorData, V2RemovedCreateRecord,
+    V2RemovedCreateRecord,
 };
 use catcoms_rt::{NativeChatKeyEnds, NativeChatPreparedKeyCut, NativeChatSourceObservation};
 
-pub(super) fn original_review_anchor(
-    source: &RetainedBootstrapSourceData,
-) -> FounderGenesisAnchorData {
-    let genesis = source.data().genesis_public_data();
-    let profile = genesis.profile_data();
-    let header = genesis.header_data();
-    FounderGenesisAnchorData {
-        group: profile.spec().group.clone(),
-        founder: profile.spec().founder,
-        profile: profile.id(),
-        tenure: profile.tenure(),
-        admission: genesis.admission_data().admission_id(),
-        header: header.id(),
-        state: header.spec().state,
-    }
-}
+pub(super) use crate::store::persistence::v2_member_transport::original_review_anchor;
 
 impl NativeTextColdFounderSource {
     #[cfg(test)]

@@ -494,7 +494,7 @@ impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> 
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
-    fn run_founder_member_receive(
+    pub(super) fn run_founder_member_receive(
         mut self,
         channel: u128,
         operation: FounderReceiveOperation<'_>,
@@ -676,5 +676,8 @@ fn run_recovered_receive(
         FounderReceiveOperation::Audit(query) => {
             FounderReceiveOutcome::Audit(founder.selected_history_audit(channel, query, caller)?)
         }
+        FounderReceiveOperation::HeldAudit(after, limit) => FounderReceiveOutcome::HeldAudit(
+            Box::new(founder.selected_held_review_window(channel, after, limit, caller)?),
+        ),
     })
 }

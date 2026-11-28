@@ -99,14 +99,15 @@ impl ServerStore {
     /// Failure disables only the optional decision statuses. The caller
     /// keeps independently authenticated ID10 contents usable, and must
     /// still reject a cancelled/stale overall founder read.
-    pub(in crate::store) fn read_founder_review_statuses(
+    pub(in crate::store) fn read_founder_review_statuses<'a>(
         &self,
         pin: &FounderGenesisAnchorData,
         channel: u128,
-        held: &[NativeTextHeldCase],
+        held: impl ExactSizeIterator<Item = &'a NativeTextHeldCase>,
         mut require: impl FnMut(Option<ReviewStreamPosition>) -> Result<(), AppError>,
     ) -> Result<FounderReviewStatuses, AppError> {
-        if held.len() > MAX_CASES {
+        let len = held.len();
+        if len > MAX_CASES {
             return Err(denied());
         }
         let mounted = self
@@ -132,7 +133,7 @@ impl ServerStore {
         mount.require(self)?;
         let mut result = FounderReviewStatuses {
             states,
-            len: held.len(),
+            len,
             original: mount.directory.try_clone()?,
             marker_path: fixed(self, false, MARKER_NAME)?,
             marker: (
@@ -148,6 +149,10 @@ impl ServerStore {
         };
         require(None)?;
         result.require(self)?;
+        #[cfg(test)]
+        if let Some(hook) = AFTER_REVIEW_STATUS_READ.with(std::cell::Cell::take) {
+            hook();
+        }
         Ok(result)
     }
 }
@@ -161,12 +166,12 @@ fn require_settled(root: &HeldDirectory) -> Result<(), AppError> {
     root.require()
 }
 
-fn read_cases(
+fn read_cases<'a>(
     root: &HeldDirectory,
     key: &JournalKey,
     pin: &FounderGenesisAnchorData,
     channel: u128,
-    held: &[NativeTextHeldCase],
+    held: impl ExactSizeIterator<Item = &'a NativeTextHeldCase>,
     require: &mut impl FnMut(Option<ReviewStreamPosition>) -> Result<(), AppError>,
 ) -> Result<
     (
@@ -241,6 +246,12 @@ fn read_cases(
         states,
         SelectedStatusFiles::Indexed(Box::new(IndexedStatusFiles { snapshot, cases })),
     ))
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(in crate::store) static AFTER_REVIEW_STATUS_READ: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]

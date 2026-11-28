@@ -117,6 +117,14 @@ impl SelectedCaseRead {
 }
 
 impl PreparedHeldWindow {
+    /// The same paid candidates, in their retained order, for the
+    /// independent decision lease. Exact hold files still belong here.
+    pub(in crate::store) fn records_data(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &SelectedHeldCase> {
+        self.candidates.iter().map(|(record, _)| record)
+    }
+
     pub(in crate::store) fn empty(fee: CatalogReadReservation) -> Self {
         Self {
             candidates: Vec::new(),

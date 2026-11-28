@@ -164,6 +164,18 @@ const WRITER_BYTES: usize = 3 * MAX_TEXT_PATH
     + 1024;
 
 impl PreparedGovernedAddFence {
+    pub(in crate::store) fn require_warm_review_parent_anchor(
+        &mut self,
+        guard: &V2TextCurrentGroupGuard<'_, '_>,
+        anchor: (catcoms_replication::chat::owner_header::OwnerHeaderId, u64),
+    ) -> Result<(), AppError> {
+        self.held
+            .later
+            .as_mut()
+            .ok_or_else(refused)?
+            .require_warm_review_parent_anchor(guard, anchor)
+    }
+
     pub(in crate::store) fn has_prepared_outcome_data(&self) -> bool {
         self.outcome.is_some()
     }

@@ -1,15 +1,18 @@
 //! One paid founder receiver ledger in the original selected text host.
 use super::*;
 use crate::store::persistence::v2_member_transport::{
-    first_founder_missing, prepare_founder_dependency_exchange, prepare_founder_dependency_reply,
+    first_founder_missing, original_review_anchor, prepare_founder_dependency_exchange,
+    prepare_founder_dependency_reply, prepare_founder_review_delivery_reply,
     project_founder_member, FounderReceiveOperation, FounderReceiveOutcome, NativeTextFounderAudit,
     NativeTextFounderFrameOutcome, NativeTextFounderReceived, FOUNDER_DEPENDENCY_REPLY_FEE,
     FOUNDER_RECEIVE_LEDGER_FEE as LEDGER_FEE, FOUNDER_RECEIVE_WORK as WORK_LIMIT,
 };
 use crate::store::persistence::v2_shared_history::SharedHistoryActionQuery;
 use catcoms_replication::chat::{ActionState, V2OrdinaryReceiveStatus};
+use catcoms_sync::owner_v2::{OpenedV2ReviewDelivery, REVIEW_STREAM_CARRIER};
 
 mod archive;
+mod review;
 use archive::FounderHistory;
 
 impl V2MemberLane {
@@ -102,6 +105,35 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                 let fee = pool
                     .try_reserve(FOUNDER_DEPENDENCY_REPLY_FEE)
                     .map_err(|_| Refusal::Busy)?;
+                let (_, wire) = incoming.current_data().ok_or(Refusal::Cancelled)?;
+                if OpenedV2ReviewDelivery::recognizes(wire) {
+                    let provider = self
+                        .owner
+                        .select_governed_dependency_access(store, verifier, REVIEW_STREAM_CARRIER)
+                        .map_err(|_| Refusal::Unavailable)?;
+                    let original = self.owner.borrow_current().map_err(|_| Refusal::Stale)?;
+                    let pin = original_review_anchor(original.source().source());
+                    let reply = prepare_founder_review_delivery_reply(
+                        store,
+                        (&pin, verifier, &lane.retired_history),
+                        provider,
+                        (incoming, caller),
+                        fee,
+                        |anchor| {
+                            check_governed_member_at(
+                                &self.owner,
+                                governed,
+                                &lane.domain,
+                                verifier,
+                                store,
+                                anchor,
+                            )
+                        },
+                        rng,
+                    )
+                    .map_err(|_| Refusal::Failed)?;
+                    return Ok(FounderReceiveOutcome::Dependency(reply));
+                }
                 let provider = self
                     .owner
                     .select_governed_dependency_access(store, verifier, channel)
@@ -454,6 +486,45 @@ impl<T: MeshTransport, R: CryptoRngCore> PreparedV2TextHost<T, R> {
                     .map_err(|_| Refusal::Stale)?;
                 Ok(FounderReceiveOutcome::Audit(NativeTextFounderAudit::new(
                     page, signal,
+                )))
+            }
+            FounderReceiveOperation::HeldAudit(after, limit) => {
+                let fee = pool.try_reserve(8 * 1024).map_err(|_| Refusal::Busy)?;
+                let (_, observation) = self
+                    .owner
+                    .prepare_governed_member_subscription(store, verifier, channel)
+                    .map_err(|_| Refusal::Stale)?;
+                let signal = observation.constrain(caller.clone());
+                let original = self.owner.borrow_current().map_err(|_| Refusal::Stale)?;
+                let pin = original_review_anchor(original.source().source());
+                let history = FounderHistory::new(
+                    store,
+                    verifier,
+                    original,
+                    channel,
+                    lane.admission,
+                    lane.outbox_context(),
+                )?;
+                let page = review::read_warm_founder_review(
+                    store,
+                    history.scope,
+                    (&pin, verifier, &lane.retired_history),
+                    (after, limit),
+                    signal,
+                    |anchor| {
+                        check_governed_member_at(
+                            &self.owner,
+                            governed,
+                            &lane.domain,
+                            verifier,
+                            store,
+                            anchor,
+                        )
+                    },
+                )
+                .map_err(|_| Refusal::Unavailable)?;
+                Ok(FounderReceiveOutcome::HeldAudit(Box::new(
+                    page.with_runtime_fee(fee),
                 )))
             }
         }

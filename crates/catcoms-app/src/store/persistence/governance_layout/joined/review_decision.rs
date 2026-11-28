@@ -19,6 +19,8 @@ pub(in crate::store) use control::{
 };
 pub(in crate::store) use delivery::ReviewDelivery;
 pub(in crate::store) use read::FounderReviewStatuses;
+#[cfg(test)]
+pub(in crate::store) use read::AFTER_REVIEW_STATUS_READ;
 
 pub(super) const DIRECTORY_NAME: &str = "chat-v2-review-decisions";
 pub(super) const MARKER_NAME: &str = "chat-critical-namespaces.review-decision.marker";

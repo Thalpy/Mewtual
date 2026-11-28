@@ -1,6 +1,7 @@
 //! Encrypted custody for exact removed-member Create bytes. A frame read
 //! from this namespace grants no prior acceptance, visibility or decision.
 use super::v2_shared_history::SharedHistoryScope;
+use crate::store::critical_namespaces::read_pool::CatalogReadReservation;
 use crate::store::{critical_namespaces::refused, frame, unframe};
 use crate::AppError;
 use catcoms_replication::chat::{
@@ -211,6 +212,7 @@ pub struct NativeTextHeldReviewPage {
     // Keeps the paid selected ID11 files and independent revision alive
     // after the RuntimeLoan is returned and through native publication.
     decisions: Option<FounderReviewStatuses>,
+    _runtime_fee: Option<CatalogReadReservation>,
 }
 
 catcoms_rt::redacted_debug! { NativeTextHeldReviewPage; NativeTextHeldReviewContinuation; }
@@ -226,7 +228,13 @@ impl NativeTextHeldReviewPage {
             scope,
             signal,
             decisions: None,
+            _runtime_fee: None,
         }
+    }
+
+    pub(in crate::store) fn with_runtime_fee(mut self, fee: CatalogReadReservation) -> Self {
+        self._runtime_fee = Some(fee);
+        self
     }
 
     pub(in crate::store) fn with_decisions(
@@ -234,8 +242,9 @@ impl NativeTextHeldReviewPage {
         decisions: Option<FounderReviewStatuses>,
     ) -> Self {
         if let (Some((window, _)), Some(decisions)) = (&mut self.window, decisions) {
-            // Only the closed reader constructs this exact ordered batch.
-            // Keep the conservative default on an unexpected mismatch.
+            // The closed reader uses this page's original ordered candidates.
+            // Final file checks only remove entries. If any were removed,
+            // withhold the entire decision batch so positions cannot shift.
             if window.records.len() == decisions.states().len() {
                 for (record, state) in window.records.iter_mut().zip(decisions.states()) {
                     record.decision = *state;

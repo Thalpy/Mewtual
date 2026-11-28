@@ -4429,6 +4429,10 @@ A main-window decision command takes exact held-case coordinates and an
 intent. It uses the recovered founder's own key and signed Case index.
 The held-post status read checks the original hold and current decision
 independently. Missing required files cannot prove an undecided case.
+The original mounted warm founder also rechecks the exact current
+membership and its authenticated archived predecessors when reading or
+serving decisions from earlier epochs. The private journal and signed
+requester retain their independent checks through the final response.
 The result of a retried mutation belongs to that exact intent and may be
 older than the case's current status. An authenticated miss in the Intent
 index and a different selected revision of the exact case can retire a

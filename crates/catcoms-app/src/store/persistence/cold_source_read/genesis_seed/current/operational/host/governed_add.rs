@@ -9,6 +9,7 @@ use crate::store::persistence::v2_text::{
 };
 use crate::store::ServerStore;
 use catcoms_mls::persist::text_current_add::TextCurrentAddAdmission;
+use catcoms_replication::chat::owner_header::OwnerHeaderId;
 use catcoms_sync::{
     owner_v2::V2InstalledFounderAddData, V2JoinRequestPacketData, V2MemberAddRequestData,
     MAX_V2_JOIN_REQUEST_PACKET_BYTES,
@@ -42,6 +43,29 @@ impl PendingGovernedAdd {
             self.parent.selected_data().ok_or_else(refused)?,
             head,
         )
+    }
+
+    pub(super) fn require_selected_review_anchor(
+        &mut self,
+        guard: &crate::store::critical_namespaces::current_layout::V2TextCurrentGroupGuard<'_, '_>,
+        replay: &catcoms_replication::chat::owner_state::transition::ReplayMath,
+        anchor: (OwnerHeaderId, u64),
+    ) -> Result<(), AppError> {
+        let selected = (replay.header().id(), replay.mls_epoch_data());
+        if anchor.1 == 0 || anchor.1 > selected.1 {
+            return Err(refused());
+        }
+        self.require_selected_member_head(guard, replay)?;
+        if anchor == selected {
+            return Ok(());
+        }
+        if let Some(removal) = &mut self.removal {
+            removal.require_warm_review_parent_anchor(guard, anchor)?;
+        } else {
+            self.fence
+                .require_warm_review_parent_anchor(guard, anchor)?;
+        }
+        self.require_selected_member_head(guard, replay)
     }
 
     pub(super) fn require_selected_replay(

@@ -58,6 +58,7 @@ use crate::store::persistence::v2_shared_history::disk::SavedSharedOriginal;
 use crate::store::persistence::v2_text::{PreparedV2TextParentCapture, V2TextFounderAnchorData};
 use crate::store::{NativeTextJoinedRowSelection, ServerStore};
 use catcoms_replication::chat::owner_facts::OwnerFactId;
+use catcoms_replication::chat::owner_header::OwnerHeaderId;
 use catcoms_replication::chat::owner_state::transition::REPLAY_MATH_PRIVATE_INVOICE;
 use catcoms_replication::chat::{
     ActionDraft, ActionId, ActionSpec, Body, ChatError, ChatLedger, LedgerLimits,
@@ -196,12 +197,28 @@ fn check_governed_member<T: MeshTransport, R: CryptoRngCore>(
     verifier: &V2GeneralPrefixVerifier,
     store: &ServerStore,
 ) -> Result<(), AppError> {
+    check_governed_member_at(owner, governed, domain, verifier, store, None)
+}
+
+fn check_governed_member_at<T: MeshTransport, R: CryptoRngCore>(
+    owner: &V2TextOwnedCurrent<T, R>,
+    governed: &mut super::governed_add::PendingGovernedAdd,
+    domain: &V2TextProjectionDomain,
+    verifier: &V2GeneralPrefixVerifier,
+    store: &ServerStore,
+    anchor: Option<(OwnerHeaderId, u64)>,
+) -> Result<(), AppError> {
     let original = owner.borrow_current()?;
     let resources = governed.parent.resources().clone();
     store.with_v2_text_current(&original, |admission| {
         let guard = store.lock_v2_text_current_group(admission, &resources)?;
         domain.require_current_source(admission)?;
-        governed.require_selected_member_head(&guard, verifier.replay_data())
+        match anchor {
+            Some(anchor) => {
+                governed.require_selected_review_anchor(&guard, verifier.replay_data(), anchor)
+            }
+            None => governed.require_selected_member_head(&guard, verifier.replay_data()),
+        }
     })
 }
 

@@ -161,6 +161,16 @@ page. A legacy hold that later entered ordinary history still needs separate
 confirmation to gain a receipt. Native cursor custody and final disclosure are
 separate boundaries.
 
+The mounted warm founder can read this audit after its first selected Add.
+The original member loan keeps the SDK and pinned genesis in place. Audit
+publication checks caller and membership revocation and the independent
+hold and decision revisions. The warm founder can also answer authenticated
+connected review queries using the same ID11 reader as a recovered founder.
+An older decision anchor must match an exact retained predecessor of the
+currently selected warm membership. An approval body is served only on
+its requested channel after checking the exact frozen author and Remove.
+Hold intake and decision signing still use the recovered founder path.
+
 An explicit selected Review Approve supplies a separate EXACT REVIEWED admission route after a
 removal. It does not append to/change the frozen accepted-log cut or prove accepted-before-removal.
 The Profile's inclusion rule authenticates LOG acceptance; its closed v2 review-body grammar

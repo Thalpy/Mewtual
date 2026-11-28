@@ -14,6 +14,24 @@ the signed zero-address reservation. A final file and its byte-identical
 Stage can survive an interrupted write and be read together. A Stage
 alone yields no hint. ID9 and A2 continue to require their own route
 proof. The ordinary startup path can open a row with no saved hint.
+The four-vault TCP regression recovers the original survivor before any
+invite-based reconnect. It proves the hint cannot authorize a poll by
+itself and that the next header is fetched once the connection is live.
+
+## Audit held posts while the original founder stays online
+
+After its first Add, the original founder can audit held posts and answer
+authenticated review header and approved-original requests on its live
+TCP actor. Both this actor and the recovered founder recheck the selected
+governing prefix and keep the held files through decision status lookup.
+Replacing a held file with an identical copy during that lookup removes
+the affected row and withholds the old statuses.
+
+The focused App run passed 12 tests. It exercised the same-session audit
+and a real checked empty-journal response after a warm Join, plus the
+four-vault restart, retained registration, changed-file and torn-stage
+cases. Accepting new held posts and signing decisions on the original
+founder still require the warm mutation path.
 
 ## Recover signed founder decisions on a joined vault
 
@@ -75,9 +93,9 @@ it publishes the original founder row. It keeps the same live TCP actor
 and rejects an older or replaced Current. Pre-write pressure can retry
 the original request. An interrupted write can need a cold reopen.
 
-First-session founder review authority, automatic reconnection, existing
-ID9 migration and combined acceptance remain open. The desktop Chat V2
-switch remains off.
+First-session hold intake and decision signing, automatic reconnection,
+existing ID9 migration and combined acceptance remain open. The desktop
+Chat V2 switch remains off.
 
 The ordinary received archive still enforces a 2,048-record limit and
 a 256 MiB quota. Hot ledger rotation still reaches that durable limit.

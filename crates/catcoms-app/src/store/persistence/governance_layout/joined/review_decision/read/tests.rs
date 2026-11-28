@@ -104,7 +104,7 @@ fn read(fixture: &Fixture) -> Result<NativeTextHeldReviewDecision, AppError> {
         &fixture.key,
         &fixture.pin,
         channel,
-        std::slice::from_ref(&fixture.case),
+        std::iter::once(&fixture.case),
         &mut |position| {
             if let Some(position) = position {
                 assert_eq!(position, fixture.entry.position_data());
@@ -197,7 +197,7 @@ fn founder_status_refuses_legacy_or_missing_selected_pages_without_repair() {
         &fixture.key,
         &fixture.pin,
         fixture.decision.decision().spec().target.spec().channel,
-        std::slice::from_ref(&fixture.case),
+        std::iter::once(&fixture.case),
         &mut |_| Err(denied())
     )
     .is_err());

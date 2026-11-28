@@ -36,6 +36,9 @@ use catcoms_sync::owner_v2::{
 };
 use std::{collections::BTreeSet, sync::Arc};
 
+mod review;
+pub(in crate::store) use review::{original_review_anchor, prepare_founder_review_delivery_reply};
+
 pub(in crate::store) const FOUNDER_RECEIVE_ACTIONS: usize = 64;
 pub(in crate::store) const FOUNDER_RECEIVE_BYTES: usize = 1024 * 1024;
 pub(in crate::store) const FOUNDER_RECEIVE_WORK: usize = 4 * FOUNDER_RECEIVE_ACTIONS + MAX_PARENTS;
@@ -1037,6 +1040,10 @@ pub(in crate::store) enum FounderReceiveOperation<'a> {
     TargetMessage(ActionId),
     SelectedTarget(ActionId),
     Audit(SharedHistoryActionQuery),
+    HeldAudit(
+        Option<&'a crate::store::NativeTextHeldReviewContinuation>,
+        usize,
+    ),
 }
 
 /// A founder's paid page of checked local archive records. The scope is a
@@ -1147,5 +1154,6 @@ pub(in crate::store) enum FounderReceiveOutcome {
     ArchiveMessage(Option<FounderArchivedMessage>),
     SelectedTarget(Option<ActionId>),
     Audit(NativeTextFounderAudit),
+    HeldAudit(Box<crate::store::NativeTextHeldReviewPage>),
     RecoveredProjection(Option<NativeTextJoinedMemberProjection>),
 }

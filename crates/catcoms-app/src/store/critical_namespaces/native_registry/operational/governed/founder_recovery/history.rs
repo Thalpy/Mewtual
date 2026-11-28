@@ -27,7 +27,7 @@ impl NativeTextColdFounderSource {
         limit: usize,
         caller: &RequestCancellation,
     ) -> Result<NativeTextHeldReviewPage, AppError> {
-        let (_, observation, _fee) = self.prepare_member_subscription(channel, caller)?;
+        let (_, observation, fee) = self.prepare_member_subscription(channel, caller)?;
         let signal = observation.constrain(caller.clone());
         let scope = self.history_scope(channel)?;
         let governed = self.governed.as_mut().ok_or_else(refused)?;
@@ -63,9 +63,6 @@ impl NativeTextColdFounderSource {
                     )
                 })?;
         self.require_recovered_checkpoint(&signal)?;
-        let page = page
-            .map(|(prepared, revision)| prepared.finish_files().map(|page| (page, revision)))
-            .transpose()?;
         // ID10 contents remain useful if the independent optional ID11
         // journal is absent, legacy, damaged or interrupted. Such failure
         // supplies Unavailable, never a fabricated undecided case. Keep
@@ -79,7 +76,7 @@ impl NativeTextColdFounderSource {
                         store.read_founder_review_statuses(
                             &pin,
                             channel,
-                            &window.records,
+                            window.records_data(),
                             |position| {
                                 if signal.is_cancelled() {
                                     return Err(refused());
@@ -99,7 +96,14 @@ impl NativeTextColdFounderSource {
         if signal.is_cancelled() {
             return Err(refused());
         }
-        Ok(NativeTextHeldReviewPage::new(page, scope, signal).with_decisions(decisions))
+        // Check the selected hold files and covering receipts after the
+        // decision journal and the final blocking founder source proof.
+        let page = page
+            .map(|(prepared, revision)| prepared.finish_files().map(|page| (page, revision)))
+            .transpose()?;
+        Ok(NativeTextHeldReviewPage::new(page, scope, signal)
+            .with_decisions(decisions)
+            .with_runtime_fee(fee))
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn selected_history_audit(
