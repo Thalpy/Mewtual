@@ -69,6 +69,7 @@ impl ServerStore {
             .map_err(|_| denied())?;
         let mount = installed.as_ref().ok_or_else(denied)?;
         mount.require(self)?;
+        mount.publication.invalidate()?;
         let root = &mount.directory;
         let path = root.child(disk::SELECTION_WAL);
         if observe(&path)? == Presence::Absent {

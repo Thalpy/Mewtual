@@ -4,7 +4,9 @@ use super::v2_shared_history::SharedHistoryScope;
 use crate::store::{critical_namespaces::refused, frame, unframe};
 use crate::AppError;
 use catcoms_replication::chat::{
-    cold_actions::OriginalActionDigest, owner_bodies::ReviewCaseId, owner_header::OwnerHeaderId,
+    cold_actions::OriginalActionDigest,
+    owner_bodies::{ReviewCaseId, ReviewDecision, ReviewStreamEntryId},
+    owner_header::{OwnerBodyId, OwnerHeaderId},
     ActionId, V2GeneralPrefixVerifier, V2RemovedCreateEvidence, V2RemovedCreateRecord,
     MAX_REMOVED_CREATE_RECORD_BYTES,
 };
@@ -13,7 +15,25 @@ use std::sync::{Arc, Mutex, Weak};
 use zeroize::Zeroizing;
 
 pub(in crate::store::persistence) mod disk;
+use super::governance_layout::joined::review_decision::FounderReviewStatuses;
 pub use disk::SelectedHeldCase as NativeTextHeldCase;
+
+/// Read-only status of this exact held case in the founder's selected
+/// journal. Unavailable is not an undecided case and grants no new attempt.
+/// The IDs deliberately distinguish the exact decision-body predecessor
+/// from its separately signed public stream entry.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum NativeTextHeldReviewDecision {
+    Unavailable,
+    Undecided,
+    Selected {
+        choice: ReviewDecision,
+        decision_body: OwnerBodyId,
+        public_entry: ReviewStreamEntryId,
+    },
+}
+
+catcoms_rt::redacted_debug! { NativeTextHeldReviewDecision; }
 
 const KEY_DOMAIN: &str = "catcoms/private-chat-v2-removed-create-vault-key/v1";
 const LEAF_DOMAIN: &str = "catcoms/private-chat-v2-removed-create-leaf/v1";
@@ -188,6 +208,9 @@ pub struct NativeTextHeldReviewPage {
     window: Option<(disk::SelectedHeldWindow, HeldAuditObservation)>,
     scope: SharedHistoryScope,
     signal: RequestCancellation,
+    // Keeps the paid selected ID11 files and independent revision alive
+    // after the RuntimeLoan is returned and through native publication.
+    decisions: Option<FounderReviewStatuses>,
 }
 
 catcoms_rt::redacted_debug! { NativeTextHeldReviewPage; NativeTextHeldReviewContinuation; }
@@ -202,17 +225,39 @@ impl NativeTextHeldReviewPage {
             window,
             scope,
             signal,
+            decisions: None,
         }
     }
 
-    /// Recheck the original hold revision through the final synchronous
-    /// release. This acquires a readiness check without performing file I/O.
+    pub(in crate::store) fn with_decisions(
+        mut self,
+        decisions: Option<FounderReviewStatuses>,
+    ) -> Self {
+        if let (Some((window, _)), Some(decisions)) = (&mut self.window, decisions) {
+            // Only the closed reader constructs this exact ordered batch.
+            // Keep the conservative default on an unexpected mismatch.
+            if window.records.len() == decisions.states().len() {
+                for (record, state) in window.records.iter_mut().zip(decisions.states()) {
+                    record.decision = *state;
+                }
+                self.decisions = Some(decisions);
+            }
+        }
+        self
+    }
+
+    /// Recheck the original hold revision and, when statuses were read,
+    /// the independent decision revision through the final synchronous
+    /// release. This performs no file I/O and supplies no decision authority.
     pub fn with_publication<T>(&self, publish: impl FnOnce() -> T) -> Result<T, AppError> {
         let check = || {
             if self.signal.is_cancelled() {
                 return Err(refused());
             }
-            Ok(publish())
+            match &self.decisions {
+                Some(decisions) => decisions.with_publication(publish),
+                None => Ok(publish()),
+            }
         };
         match self.window.as_ref() {
             Some((_, observation)) => observation.with_current(check)?,

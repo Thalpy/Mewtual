@@ -23,6 +23,7 @@ export function createVisualNativeTextFixture(empty = false) {
     caseId: "da".repeat(32), action: "db".repeat(32), signer: "dc".repeat(32),
     admission: "dd".repeat(32), originalDigest: "de".repeat(32), removalHeader: "df".repeat(32),
     removalEpoch: "3",
+    decision: { status: "undecided" },
     body: { kind: "create", text: "A late post held for review.", reply_to: null },
   };
   const rows: NativeOriginal[] = empty ? [] : [

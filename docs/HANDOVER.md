@@ -36,8 +36,20 @@ the last header, and shares inventory turns with ordinary history. It
 uses the original route when that route is already available. Cold A1
 startup still needs a way to restore this route without the invite.
 
-First-session initialization, automatic approval fetch, admin actions,
-receipt enumeration and combined acceptance are still open. The desktop
+The joined worker also fetches exact approvals for its attached channel
+in bounded turns. It revisits a waiting reply without holding up later
+cases. The current row can refresh a covered post. A verified review
+freeze clears the current display and reloads ordinary history.
+History pagination still needs to enumerate receipts, including after
+reopen or when an approval notice went to an inactive conversation.
+
+The recovered founder can see selected decision status in Held posts.
+The exact native decision command uses the original founder, held case and
+previous decision label. The renderer still needs the action controls and
+durable retry ownership before offering them to the founder.
+
+First-session initialization, cold route restoration, receipt enumeration,
+review action controls and combined acceptance remain open. The desktop
 Chat V2 switch remains off.
 
 ## View held posts in founder chat history

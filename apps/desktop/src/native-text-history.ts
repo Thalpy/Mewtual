@@ -16,9 +16,13 @@ export type NativeAuditRecord = {
   presented_ms: string; parents: string[]; body: NativeOriginal["body"];
 };
 export type NativeAuditPage = { items: NativeAuditRecord[] | null; next: string | null };
+export type NativeHeldDecision =
+  | { status: "unavailable" | "undecided" }
+  | { status: "selected"; choice: "approve" | "reject" | "reopen"; decisionBodyId: string; streamEntryId: string };
 export type NativeHeldPost = {
   caseId: string; action: string; signer: string; admission: string; originalDigest: string;
   removalHeader: string; removalEpoch: string;
+  decision: NativeHeldDecision;
   body: Extract<NativeOriginal["body"], { kind: "create" }>;
 };
 export type NativeHeldPage = { items: NativeHeldPost[] | null; next: string | null; unavailable: number };
@@ -157,18 +161,34 @@ export async function readNativeHeldPosts(
   const seen = new Set<string>();
   const items = result.items.map((raw): NativeHeldPost => {
     const row = object(raw);
-    fields(row, ["caseId", "action", "signer", "admission", "originalDigest", "removalHeader", "removalEpoch", "body"]);
+    fields(row, ["caseId", "action", "signer", "admission", "originalDigest", "removalHeader", "removalEpoch", "decision", "body"]);
     const caseId = hex(row.caseId);
     const body = decodeBody(row.body);
     const removalEpoch = decimal(row.removalEpoch);
     if (body.kind !== "create" || removalEpoch === "0" || seen.has(caseId)) return fail();
     seen.add(caseId);
     return {
-      caseId, body, removalEpoch, action: hex(row.action), signer: hex(row.signer),
+      caseId, body, removalEpoch, decision: decodeHeldDecision(row.decision), action: hex(row.action), signer: hex(row.signer),
       admission: hex(row.admission), originalDigest: hex(row.originalDigest), removalHeader: hex(row.removalHeader),
     };
   });
   return { items, next, unavailable: result.unavailable };
+}
+
+function decodeHeldDecision(raw: unknown): NativeHeldDecision {
+  const decision = object(raw);
+  const status = decision.status;
+  if (status === "unavailable" || status === "undecided") {
+    fields(decision, ["status"]);
+    return { status };
+  }
+  if (status !== "selected") return fail();
+  fields(decision, ["status", "choice", "decisionBodyId", "streamEntryId"]);
+  const choice = decision.choice;
+  if (choice !== "approve" && choice !== "reject" && choice !== "reopen") return fail();
+  const decisionBodyId = hex(decision.decisionBodyId), streamEntryId = hex(decision.streamEntryId);
+  if (/^0+$/.test(decisionBodyId) || /^0+$/.test(streamEntryId)) return fail();
+  return { status, choice, decisionBodyId, streamEntryId };
 }
 
 export function decodeNativeOwnMessage(value: unknown, target: string): NativeOwnMessage {

@@ -201,6 +201,7 @@
     "allow-share-native-chat-contact",
     "allow-connect-native-chat-contact",
     "allow-forget-native-chat-contacts",
+    "allow-decide-native-chat-held-post",
     "allow-revoke-device",
 
     "allow-change-vault-secret",

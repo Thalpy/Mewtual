@@ -96,6 +96,7 @@
 
   const labels = { create: "Original message", edit: "Edit", delete: "Deletion", join: "Combined revisions" };
   const localStatus = { pending: "Saved here", submitted: "Submitted", held: "Held on this device" };
+  const reviewChoice = { approve: "Approved", reject: "Rejected", reopen: "Reopened" };
 </script>
 
 <button type="button" class="ghost small" onclick={() => {
@@ -139,7 +140,9 @@
           <ul>
             {#each heldPage.items as item (item.caseId)}
               <li>
-                <strong>Awaiting review</strong>
+                <strong>{item.decision.status === "selected"
+                  ? reviewChoice[item.decision.choice]
+                  : item.decision.status === "undecided" ? "Awaiting review" : "Review status unavailable"}</strong>
                 <p class="message">{item.body.text}</p>
                 <details>
                   <summary>Signed record details</summary>

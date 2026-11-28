@@ -9,6 +9,8 @@ use crate::store::persistence::v2_member_outbox::fs::{
 mod attempt;
 mod control;
 mod delivery;
+mod observation;
+mod read;
 mod selection;
 #[cfg(test)]
 pub(in crate::store) use control::{with_review_control_fault, ReviewControlFault};
@@ -16,6 +18,7 @@ pub(in crate::store) use control::{
     DecisionControl, PreparedIndexedReviewSource, PreparedReviewBase, ReviewSigningSpec,
 };
 pub(in crate::store) use delivery::ReviewDelivery;
+pub(in crate::store) use read::FounderReviewStatuses;
 
 pub(super) const DIRECTORY_NAME: &str = "chat-v2-review-decisions";
 pub(super) const MARKER_NAME: &str = "chat-critical-namespaces.review-decision.marker";
@@ -109,6 +112,7 @@ pub(in crate::store) struct SelectedReviewDecision {
     pub(super) directory: HeldDirectory,
     mount: PhysicalMountNegative,
     warm: Option<control::DecisionControlData>,
+    publication: observation::ReviewDecisionRevision,
     _fee: CatalogReadReservation,
 }
 
@@ -124,6 +128,7 @@ impl SelectedReviewDecision {
             .as_os_str()
             .len()
             .checked_add(16 * 1024)
+            .and_then(|bytes| bytes.checked_add(observation::REVISION_BYTES))
             .ok_or_else(denied)?;
         let fee = policy.current.archive.pending.pool.try_reserve(bytes)?;
         let expected =
@@ -138,6 +143,7 @@ impl SelectedReviewDecision {
             directory: HeldDirectory::open(directory)?,
             mount: store.capture_physical_mount_negative(),
             warm: None,
+            publication: observation::ReviewDecisionRevision::new(),
             _fee: fee,
         };
         value.require(store)?;

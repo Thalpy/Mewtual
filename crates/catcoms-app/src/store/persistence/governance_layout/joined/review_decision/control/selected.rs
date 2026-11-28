@@ -16,6 +16,7 @@ impl ServerStore {
             .map_err(|_| denied())?;
         let mount = original.as_ref().ok_or_else(denied)?;
         mount.require(self)?;
+        mount.publication.invalidate()?;
         let root = &mount.directory;
         let policy = self.governance_layout_policy.as_ref().ok_or_else(denied)?;
         let _fee = policy

@@ -17,6 +17,9 @@ pub struct SelectedHeldCase {
     pub removal: (OwnerHeaderId, u64),
     pub admission: catcoms_replication::chat::owner_facts::OwnerFactId,
     pub signed: SignedAction,
+    /// Current selected founder decision, independently guarded from the
+    /// hold receipt. The ID10-only reader always leaves this unavailable.
+    pub decision: NativeTextHeldReviewDecision,
 }
 
 catcoms_rt::redacted_debug! { SelectedHeldCase; }
@@ -210,9 +213,11 @@ impl HoldDisk {
         if cases.len() > MAX_CASES {
             return Err(refused());
         }
-        let invoice = self
-            .pool
-            .try_reserve(16 * 1024 + query.limit * 3 * MAX_FRAME)?;
+        let invoice = self.pool.try_reserve(
+            16 * 1024
+                + query.limit
+                    * (3 * MAX_FRAME + 2 * std::mem::size_of::<NativeTextHeldReviewDecision>()),
+        )?;
         let mut checked = Vec::with_capacity(query.limit);
         let mut candidates = cases
             .into_iter()
@@ -265,6 +270,7 @@ impl HoldDisk {
                 original: opened.identity.original,
                 admission: data.target_data().spec().context.admission,
                 signed,
+                decision: NativeTextHeldReviewDecision::Unavailable,
             },
             proof,
         ))

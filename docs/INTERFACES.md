@@ -1001,17 +1001,33 @@ covering its authenticated write-ahead file, exact record and journal head. The
 head commits separate intent and case indexes. A fresh first review starts at
 the authenticated empty head covered by the declaration. A later request binds
 the exact previous case decision and the original encrypted journal head.
+The held-post audit also returns an independently guarded current status
+of unavailable, proven undecided, or selected with its exact
+decision-body ID, public stream-entry ID and choice. This read uses the
+selected keyed Case index and retains its paid native file evidence through
+the combined hold and decision publication guard. A missing or damaged
+required case proof, legacy status, or an interrupted transaction leaves
+the held original readable with unavailable decision status. The audit
+does no signing or repair.
 The native recovered-founder operation supports independent cases and
 Reject, Reopen and Approve transitions. Exact retry looks up the original
-intent before consulting the latest case. Joined callers can select a
+intent before consulting the latest case. The main-window
+`decide_native_chat_held_post` command binds the original row, channel, case,
+action, signed-original digest, Remove, choice, previous decision-body ID
+and a 16-byte intent. Its response describes that exact saved decision.
+The history view displays current status. Renderer controls and durable
+intent recovery remain separate work.
+Joined callers can select a
 checked public header from the original connected response. The recipient
 journal reports a covered header, duplicate, missing predecessor or frozen
 review lane. An exact approved body is available over the founder route.
 The joined recipient can save the original as an encrypted review receipt
 after the selected header, historical Remove and reply parent agree. Its
 result distinguishes saved, duplicate, waiting for a header, waiting for a
-reply parent and frozen. Message projection and native admin commands
-remain open.
+reply parent and frozen. Exact-ID display requires an independent guarded
+lookup. The joined worker scans approved headers for its attached channel
+and can refresh an active view after a receipt is selected. History
+pagination still needs to include receipt IDs after navigation or restart.
 [Exact contract](communication-recovery/CHAT-OWNER-V2-REVIEW-DECISION.md).
 
 ## Guarded current chat projection core (5 November; authored, unexecuted)

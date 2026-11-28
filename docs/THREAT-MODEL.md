@@ -4383,14 +4383,26 @@ remain held through retirement. The immutable decision records stay
 available for original-intent recovery. The connected route can disclose the
 exact selected Approve proof to a current member. The joined member can
 cover its own receipt for that original. Exact-ID display uses the
-separate guarded archive path described above. History discovery and
-renderer invalidation after a review conflict remain open.
+separate guarded archive path described above. Normal receipt discovery
+on navigation or restart remains open.
 
 The background header poll uses the same original connected founder and
 selected member prefix as the explicit request. The durable cursor is
 scoped to the original pin. A cached local signed card stays on its
 original native row and is revalidated against the selected membership
-on every send. There is no new dial or automatic approval body request.
+on every send. The same source can fetch an approved body by exact ordinal
+and entry for its already attached channel. It keeps a bounded cache of
+recent active-row receipts. Waiting for a parent leaves later approvals
+eligible. An authenticated selected review freeze suppresses further
+review work and invalidates the original row's displayed receipt data.
+Receipt enumeration after navigation or restart is still needed.
+
+A main-window decision command takes exact held-case coordinates and an
+intent. It uses the recovered founder's own key and signed Case index.
+The held-post status read checks the original hold and current decision
+independently. Missing required files cannot prove an undecided case.
+The result of a retried mutation belongs to that exact intent and may be
+older than the case's current status.
 
 ## Chat history admission and retained audit (20 October, continuation)
 

@@ -162,6 +162,9 @@ impl DecisionControl {
         let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
         let lease = store._session.retain_for_physical_work();
         mount.require(store)?;
+        // A returned audit must not publish a current-case status across
+        // a later signing/control transaction, including uncertain work.
+        mount.publication.invalidate()?;
         let vault_key = Zeroizing::new(store.keys.db_key()?);
         let marker = mount.marker.1.as_slice().try_into().map_err(|_| denied())?;
         let key = JournalKey::new(&vault_key, marker);
@@ -643,7 +646,14 @@ fn require_synced_controls(
     Ok(())
 }
 
-fn require_control_names(directory: &HeldDirectory) -> Result<(), AppError> {
+pub(super) fn require_no_signing_controls(directory: &HeldDirectory) -> Result<(), AppError> {
+    for role in ControlRole::ALL {
+        absent(&directory.child(role.filename()))?;
+    }
+    Ok(())
+}
+
+pub(super) fn require_control_names(directory: &HeldDirectory) -> Result<(), AppError> {
     let maximum = ControlRole::ALL.len() + disk::NAMES.len();
     let names = bounded_entries(directory, maximum)?;
     if names.len() > maximum

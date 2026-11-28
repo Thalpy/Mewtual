@@ -17,7 +17,7 @@ pub(super) mod append;
 pub(super) mod disk;
 pub(super) mod index;
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 const RECORD: &[u8] = b"catcoms/private-chat-v2-review-journal-record/v1\0";
 const HEAD: &[u8] = b"catcoms/private-chat-v2-review-journal-head/v1\0";

@@ -8,6 +8,7 @@ use std::net::IpAddr;
 use tauri::ipc::InvokeResponseBody;
 
 mod review;
+mod review_decision;
 
 pub(super) const BUSY: &str = "Chat membership is busy. Retry the request.";
 const FAILED: &str = "Chat membership is unavailable for this conversation.";
@@ -18,6 +19,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "connect_native_chat_contact",
     "forget_native_chat_contacts",
     "check_native_chat_removed_posts",
+    "decide_native_chat_held_post",
 ];
 const LIST: &str = COMMANDS[0];
 const REMOVE: &str = COMMANDS[1];
@@ -25,6 +27,7 @@ const SHARE: &str = COMMANDS[2];
 const CONNECT: &str = COMMANDS[3];
 const FORGET: &str = COMMANDS[4];
 const REVIEW: &str = COMMANDS[5];
+const DECIDE: &str = COMMANDS[6];
 
 enum Operation {
     List,
@@ -37,6 +40,7 @@ enum Operation {
         contact: [u8; V2_MEMBER_CONTACT_BYTES],
         deadline: review::Deadline,
     },
+    Decide(review_decision::Input),
 }
 
 pub(super) fn handles(command: &str) -> bool {
@@ -84,7 +88,11 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             &row.data().selection,
             server_table::NativeSelection::Founder(_)
         );
-        if (!founder && matches!(operation, Operation::Remove(_) | Operation::Review { .. }))
+        if (!founder
+            && matches!(
+                operation,
+                Operation::Remove(_) | Operation::Review { .. } | Operation::Decide(_)
+            ))
             || (founder
                 && matches!(
                     operation,
@@ -92,6 +100,11 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                 ))
         {
             return Err(FAILED);
+        }
+        if let Operation::Decide(decision) = &operation {
+            if decision.channel != row.data().channel {
+                return Err(listing::STALE);
+            }
         }
         let consent = match (&operation, &row.data().selection) {
             (Operation::Connect(_, _, true), server_table::NativeSelection::Joined(selection)) => {
@@ -177,6 +190,9 @@ async fn perform(
                         .remove_governed_admission(target, &negative)
                         .map_err(refusal)?;
                     Ok(("null".into(), None))
+                }
+                Operation::Decide(input) => {
+                    review_decision::select(prepared, input, &negative).map(|body| (body, None))
                 }
                 _ => Err(FAILED),
             }
@@ -382,6 +398,7 @@ fn parse(command: &str, body: &InvokeBody) -> Result<(u64, [u8; 32], Operation),
                 deadline: review::Deadline::new(Arc::new(SystemClock)),
             }
         }
+        DECIDE => Operation::Decide(review_decision::parse(fields)?),
         REMOVE if fields.len() == 3 => {
             let label = fields
                 .get("expectedAdmission")

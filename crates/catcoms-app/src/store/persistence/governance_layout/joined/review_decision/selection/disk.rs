@@ -17,7 +17,7 @@ mod selected;
 mod tests;
 pub(in super::super) use selected::FirstDecisionFiles;
 
-pub(super) const RECORD_DIRECTORY: &str = "records";
+pub(in super::super) const RECORD_DIRECTORY: &str = "records";
 pub(super) const HEAD_CURRENT: &str = super::super::HEAD_NAME;
 pub(super) const HEAD_STAGE: &str = "head.stage";
 pub(in super::super) const SELECTION_WAL: &str = "selection.pending";

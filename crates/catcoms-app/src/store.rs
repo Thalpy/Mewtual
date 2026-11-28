@@ -152,7 +152,8 @@ pub use persistence::v2_member_transport::{
     NativeTextFounderDependencyResponse, NativeTextFounderFrameOutcome, NativeTextFounderReceived,
 };
 pub use persistence::v2_review_hold::{
-    NativeTextHeldCase, NativeTextHeldReviewContinuation, NativeTextHeldReviewPage,
+    NativeTextHeldCase, NativeTextHeldReviewContinuation, NativeTextHeldReviewDecision,
+    NativeTextHeldReviewPage,
 };
 mod owner_evidence;
 pub use chat_admission::{

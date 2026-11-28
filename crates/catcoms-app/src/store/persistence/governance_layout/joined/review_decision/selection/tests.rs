@@ -13,7 +13,7 @@ use catcoms_replication::chat::{
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
-pub(super) fn signed_case_fixture(
+pub(in super::super) fn signed_case_fixture(
     choice: ReviewDecision,
 ) -> (
     DeviceKeypair,

@@ -3099,9 +3099,32 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         sources.policy.prepare_member().unwrap(),
                     ).select_initial_founder_review(request, &fresh);
                     assert!(advance(exact_request([0xb4; 16], ReviewDecision::Reopen)).is_err());
+                    // Read the real selected Case index through the same
+                    // recovered founder and keep both audit observations
+                    // alive while the next physical decision begins.
+                    let decision_audit = sources.capture_member(
+                        &recovered_row, command(&vault, &founder_budget),
+                        sources.policy.prepare_member().unwrap(),
+                    ).audit_founder_held_posts(channel, None, 2, &fresh).unwrap();
+                    decision_audit.with_records(|records, unavailable| {
+                        assert_eq!(unavailable, 0);
+                        let records = records.unwrap();
+                        let current = records.iter().find(|record| record.case == case.id).unwrap();
+                        assert_eq!(current.decision, crate::store::NativeTextHeldReviewDecision::Selected {
+                            choice: ReviewDecision::Reject,
+                            decision_body: selected.decision_id_data(),
+                            public_entry: selected.id(),
+                        });
+                        let untouched = records.iter().find(|record| record.case == other_case.id).unwrap();
+                        assert_eq!(untouched.decision, crate::store::NativeTextHeldReviewDecision::Undecided);
+                    }).unwrap();
                     let (stopped, used) = with_review_control_fault(
                         ReviewControlFault::AfterSelectionWal, || advance(reopen_request()),
                     );
+                    assert!(decision_audit.with_publication(|| panic!(
+                        "an older decision status must not cross the ID11 write"
+                    )).is_err());
+                    drop(decision_audit);
                     assert!(stopped.is_err() && used);
                     assert_eq!(std::fs::read(&head).unwrap(), sealed_head);
                     let (stopped, used) = with_review_control_fault(
@@ -3146,6 +3169,19 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     assert_eq!(approved.case_step_data().unwrap().choice_data(), ReviewDecision::Approve);
                     assert_eq!(approved.position_data().previous, Some(reopened.id()));
                     assert!(!pending.exists());
+                    let approved_audit = sources.capture_member(
+                        &recovered_row, command(&vault, &founder_budget),
+                        sources.policy.prepare_member().unwrap(),
+                    ).audit_founder_held_posts(channel, None, 2, &fresh).unwrap();
+                    approved_audit.with_records(|records, _| {
+                        let current = records.unwrap().iter().find(|record| record.case == case.id).unwrap();
+                        assert_eq!(current.decision, crate::store::NativeTextHeldReviewDecision::Selected {
+                            choice: ReviewDecision::Approve,
+                            decision_body: approved.decision_id_data(),
+                            public_entry: approved.id(),
+                        });
+                    }).unwrap();
+                    drop(approved_audit);
                     assert_eq!(std::fs::read_dir(record.parent().unwrap()).unwrap()
                         .filter(|entry| entry.as_ref().unwrap().path().extension().is_some_and(|ext| ext == "page"))
                         .count(), 2);

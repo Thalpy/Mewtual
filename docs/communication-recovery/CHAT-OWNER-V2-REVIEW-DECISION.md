@@ -232,8 +232,12 @@ original founder connection. It reads the durable ordinal from ID12, gives
 ordinary inventory a turn between review polls when needed, and checks
 the exact current membership card on every request. An empty response
 ends that attempt without advancing the journal. A cold A1 vault needs
-its original founder route restored before polling begins. Automatic
-approval fetching and receipt discovery remain open.
+its original founder route restored before polling begins. The joined
+worker scans up to four selected header ordinals per turn and requests
+an exact Approve for its attached channel. A missing body or ancestry
+stays eligible on later passes. The worker refreshes an active view
+from its guarded receipt. The separate receipt index still needs normal
+history pagination for inactive views and cold navigation.
 
 ## Exact case transitions
 

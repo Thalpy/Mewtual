@@ -47,11 +47,19 @@ test("held review pages advance across an unavailable window and reject stale or
   await assert.rejects(readNativeHeldPosts(async () => reply, target, cursor, () => true));
   await assert.rejects(readNativeHeldPosts(async () => ({ ...reply, items: null }), target, null, () => true));
   const held = { caseId: cursor, action: item.action, signer: item.signer, body: item.body,
-    admission: "05".repeat(32), originalDigest: "06".repeat(32), removalHeader: "07".repeat(32), removalEpoch: "3" };
+    admission: "05".repeat(32), originalDigest: "06".repeat(32), removalHeader: "07".repeat(32), removalEpoch: "3",
+    decision: { status: "undecided" } };
   const second = { ...reply, next: null, items: [held], unavailable: 0 };
   assert.deepEqual(await readNativeHeldPosts(async () => second, target, cursor, () => true),
     { next: null, items: [held], unavailable: 0 });
   await assert.rejects(readNativeHeldPosts(async () => ({ ...second, items: [held, held] }), target, cursor, () => true));
+  const selected = { ...held, decision: { status: "selected", choice: "approve",
+    decisionBodyId: "0a".repeat(32), streamEntryId: "0b".repeat(32) } };
+  assert.deepEqual(await readNativeHeldPosts(async () => ({ ...second, items: [selected] }), target, cursor, () => true),
+    { next: null, items: [selected], unavailable: 0 });
+  await assert.rejects(readNativeHeldPosts(async () => ({ ...second, items: [
+    { ...selected, decision: { ...selected.decision, decisionBodyId: "0".repeat(64) } },
+  ] }), target, cursor, () => true));
   let current = true;
   assert.equal(await readNativeHeldPosts(async () => {
     current = false;

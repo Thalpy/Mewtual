@@ -1,7 +1,10 @@
 //! Founder-only held-post pages. The renderer receives a short-lived token
 //! for the currently published continuation, not its keyed filename.
 use super::*;
-use catcoms_app::store::{NativeTextHeldReviewContinuation, NativeTextHeldReviewPage};
+use catcoms_app::store::{
+    NativeTextHeldReviewContinuation, NativeTextHeldReviewDecision, NativeTextHeldReviewPage,
+};
+use catcoms_replication::chat::owner_bodies::ReviewDecision;
 use catcoms_rt::RngCore;
 
 const CURSOR_MS: u64 = 5 * 60 * 1000;
@@ -151,7 +154,46 @@ struct Post<'a> {
     original_digest: String,
     removal_header: String,
     removal_epoch: String,
+    decision: Decision,
     body: BodyData<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
+enum Decision {
+    Unavailable,
+    Undecided,
+    Selected {
+        choice: &'static str,
+        decision_body_id: String,
+        stream_entry_id: String,
+    },
+}
+
+impl From<&NativeTextHeldReviewDecision> for Decision {
+    fn from(decision: &NativeTextHeldReviewDecision) -> Self {
+        match decision {
+            NativeTextHeldReviewDecision::Unavailable => Self::Unavailable,
+            NativeTextHeldReviewDecision::Undecided => Self::Undecided,
+            NativeTextHeldReviewDecision::Selected {
+                choice,
+                decision_body,
+                public_entry,
+            } => Self::Selected {
+                choice: match choice {
+                    ReviewDecision::Approve => "approve",
+                    ReviewDecision::Reject => "reject",
+                    ReviewDecision::Reopen => "reopen",
+                },
+                decision_body_id: hex::encode(decision_body.as_bytes()),
+                stream_entry_id: hex::encode(public_entry.as_bytes()),
+            },
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -176,6 +218,7 @@ fn serialize(page: &NativeTextHeldReviewPage, next: Option<&Cursor>) -> Result<S
                     original_digest: hex::encode(record.original.as_bytes()),
                     removal_header: hex::encode(record.removal.0.as_bytes()),
                     removal_epoch: record.removal.1.to_string(),
+                    decision: Decision::from(&record.decision),
                     body: action_body(&record.signed),
                 })
                 .collect()
@@ -209,6 +252,11 @@ mod tests {
             original_digest: "05".repeat(32),
             removal_header: "06".repeat(32),
             removal_epoch: u64::MAX.to_string(),
+            decision: Decision::Selected {
+                choice: "approve",
+                decision_body_id: "08".repeat(32),
+                stream_entry_id: "09".repeat(32),
+            },
             body: BodyData::Create {
                 text: &text,
                 reply_to: Some("07".repeat(32)),
