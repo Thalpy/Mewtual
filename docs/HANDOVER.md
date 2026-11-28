@@ -15,8 +15,9 @@ and row before releasing text.
 The App TCP fixture retrieves one withheld post through a survivor
 and reads it after a second founder restart. It verifies that ordinary
 chat cannot display the post and that audit refuses a replaced directory.
-The durable decision journal, application of approvals, first-session
-hold provisioning and final acceptance remain open.
+The first private decision can be recovered in the journal. Application
+of approvals, first-session hold provisioning and final acceptance
+remain open.
 
 ## Recover removed-member posts for founder review
 
@@ -56,10 +57,11 @@ keeps its place in history. First-session founder provisioning,
 signed decisions and the admin view remain open. Chat V2 remains disabled.
 
 An internal declaration can extend a recovered founder's selected hold
-catalog with an empty decision journal. The exact original hold marker,
-joined pins and archive must still agree when cold recovery selects the
-new catalog. Startup can read that format but does not provision it
-automatically. An ID10-only build refuses a vault once ID11 is selected.
+catalog with a decision journal. The authenticated empty head is covered
+before the catalog is selected. The original hold marker, joined pins
+and archive must still agree when cold recovery selects the catalog.
+Startup can read that format. Automatic provisioning remains open.
+An ID10-only build refuses a vault once ID11 is selected.
 The Windows cold fixture selects the original covered Stage after the
 hold marker is restored. Once the declaration is settled, an unexpected
 journal file stays on disk and stops review work. The founder row still
@@ -79,16 +81,21 @@ current archive and held original, and uses the old Header only to
 verify the retained signature.
 
 The internal founder operation can select the first covered decision.
-One authenticated write-ahead file binds the exact signing files, the
-encrypted decision record and the next journal head. The record is
-synced before the head is installed. An exact retry after that install
-completes its barriers. The operation keeps the write-ahead file and
-signing files in place. Five focused Windows App tests passed. The TCP
-fixture admitted a new member, recovered the earlier signature after
-reopening, and then reopened after an interrupted head install. It
-recovered the exact signature and record without entering the key again.
-Additional decisions, retirement, approval
-delivery, the native admin controls and activation remain open.
+An authenticated write-ahead file binds the exact signing files, the
+encrypted decision record, the intent and case indexes, and the next
+journal head. The writer syncs the record and both index pages before
+installing the head. An exact retry after installation rechecks the
+record and indexes, finishes retiring the signing files, and retires
+the write-ahead file last. The saved result can be read independently
+of the original hold file. Earlier authenticated first-decision files
+can still recover using their original controls. If the entire journal
+contents are lost, review refuses to create a new first decision.
+Ten focused Windows App regressions passed for this checkpoint. The
+TCP fixture reopens after head installation and partial input
+retirement, checks the original outcome with its hold file unavailable,
+and verifies ordinary founder recovery when all journal files are lost.
+Additional decisions, approval delivery, native admin controls and
+activation remain open.
 
 ## Rejoin from the retired native session
 

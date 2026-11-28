@@ -2,7 +2,9 @@
 //! A mounted namespace cannot authorize a decision or select a stream head.
 use super::*;
 use crate::store::chat_admission::PhysicalMountNegative;
-use crate::store::persistence::v2_member_outbox::fs::{bounded_entries, HeldDirectory};
+use crate::store::persistence::v2_member_outbox::fs::{
+    bounded_entries, finish_exact_write, open_exact_write, HeldDirectory, WriteMode,
+};
 
 mod attempt;
 mod control;
@@ -13,6 +15,90 @@ pub(in crate::store) use control::{DecisionControl, ReviewSigningSpec};
 
 pub(super) const DIRECTORY_NAME: &str = "chat-v2-review-decisions";
 pub(super) const MARKER_NAME: &str = "chat-critical-namespaces.review-decision.marker";
+pub(super) const HEAD_NAME: &str = "head.current";
+
+/// The original catalog claim covers an authenticated empty head before
+/// any signer may enter this journal. Absence is never a new baseline.
+pub(super) struct InitialReviewHead {
+    file: (File, SessionId),
+    bytes: [u8; 32],
+}
+
+impl InitialReviewHead {
+    pub(super) fn capture(
+        directory: &HeldDirectory,
+        key: &[u8; 32],
+        marker: &[u8; 32],
+        mode: WriteMode,
+    ) -> Result<Self, AppError> {
+        let bytes = attempt::JournalKey::new(key, marker).initial_head();
+        Self::require_names(directory, matches!(mode, WriteMode::Create))?;
+        let file = open_exact_write(&directory.child(HEAD_NAME), mode)?;
+        Ok(Self { file, bytes })
+    }
+
+    pub(super) fn cover(
+        &mut self,
+        directory: &HeldDirectory,
+        already_covered: bool,
+    ) -> Result<(), AppError> {
+        Self::require_names(directory, false)?;
+        if already_covered {
+            self.require(directory)?;
+        }
+        finish_exact_write(&directory.child(HEAD_NAME), &mut self.file, &self.bytes)?;
+        directory.sync()?;
+        self.require(directory)
+    }
+
+    pub(super) fn require_names(
+        directory: &HeldDirectory,
+        allow_absent: bool,
+    ) -> Result<(), AppError> {
+        let names = bounded_entries(directory, 1)?;
+        match names.as_slice() {
+            [] if allow_absent => Ok(()),
+            [name] if name == HEAD_NAME => Ok(()),
+            _ => Err(denied()),
+        }
+    }
+
+    pub(super) fn require(&self, directory: &HeldDirectory) -> Result<(), AppError> {
+        Self::require_names(directory, false)?;
+        exact_held(
+            &directory.child(HEAD_NAME),
+            &self.file.0,
+            self.file.1,
+            &self.bytes,
+        )?;
+        directory.require()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn review_selection_refuses_a_replacement_initial_head_on_warm_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("journal");
+        std::fs::create_dir(&path).unwrap();
+        let directory = HeldDirectory::open(path).unwrap();
+        let mut initial =
+            InitialReviewHead::capture(&directory, &[1; 32], &[2; 32], WriteMode::Create).unwrap();
+        let head = directory.child(HEAD_NAME);
+        finish_exact_write(&head, &mut initial.file, &initial.bytes[..16]).unwrap();
+        let parked = temp.path().join("saved-head");
+        std::fs::rename(&head, &parked).unwrap();
+        std::fs::write(&head, initial.bytes).unwrap();
+        assert!(initial.cover(&directory, false).is_err());
+        assert_eq!(std::fs::read(&head).unwrap(), initial.bytes);
+        std::fs::remove_file(&head).unwrap();
+        std::fs::rename(&parked, &head).unwrap();
+        initial.cover(&directory, false).unwrap();
+    }
+}
 
 pub(in crate::store) struct SelectedReviewDecision {
     pub(super) marker: OpenedArchiveObject,
@@ -65,18 +151,6 @@ impl SelectedReviewDecision {
             bytes,
         )?;
         self.directory.require()
-    }
-
-    /// A live declaration must stay empty before its shared claim retires.
-    /// An already selected declaration can have uncertain decision files.
-    /// The separate review transaction classifies those without stopping
-    /// ordinary history reads, sends or membership work.
-    pub(super) fn require_empty_declaration(&self, store: &ServerStore) -> Result<(), AppError> {
-        self.require(store)?;
-        if !bounded_entries(&self.directory, 0)?.is_empty() {
-            return Err(denied());
-        }
-        self.require(store)
     }
 }
 

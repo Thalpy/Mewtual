@@ -981,8 +981,11 @@ signature through a dedicated native key cut. The exact retained signature can b
 recovered after a later membership change if its original Header is still in the
 selected lineage. A separate Rust operation selects the first private decision after
 covering its authenticated write-ahead file, exact record and journal head. The
-returned entry is private. Additional decisions, completed-transaction retirement,
-approval delivery and native admin commands remain to be implemented.
+head commits separate intent and case indexes. Exact retry can recover the
+first outcome from the selected files after the signing controls and write-ahead
+file have retired. A fresh review starts only at the authenticated empty head
+covered by the declaration. Additional decisions, approval delivery and native
+admin commands remain to be implemented.
 [Exact contract](communication-recovery/CHAT-OWNER-V2-REVIEW-DECISION.md).
 
 ## Guarded current chat projection core (5 November; authored, unexecuted)

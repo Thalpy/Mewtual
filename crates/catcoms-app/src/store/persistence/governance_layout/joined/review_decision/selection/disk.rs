@@ -9,14 +9,17 @@ use crate::store::persistence::v2_member_outbox::fs::{
     HeldDirectory, Presence, WriteMode,
 };
 use catcoms_storage::kept::SessionId;
+use catcoms_storage::private_chat_page::PrivateChatPageId;
 
+mod selected;
 #[cfg(test)]
 mod tests;
+pub(in super::super) use selected::FirstDecisionFiles;
 
 pub(super) const RECORD_DIRECTORY: &str = "records";
-pub(super) const HEAD_CURRENT: &str = "head.current";
+pub(super) const HEAD_CURRENT: &str = super::super::HEAD_NAME;
 pub(super) const HEAD_STAGE: &str = "head.stage";
-pub(super) const SELECTION_WAL: &str = "selection.pending";
+pub(in super::super) const SELECTION_WAL: &str = "selection.pending";
 pub(super) const SELECTION_SCRATCH: &str = "selection.scratch";
 
 pub(in super::super) const NAMES: [&str; 5] = [
@@ -27,15 +30,27 @@ pub(in super::super) const NAMES: [&str; 5] = [
     SELECTION_SCRATCH,
 ];
 
-pub(in super::super) fn require_no_selection(root: &HeldDirectory) -> Result<(), AppError> {
+pub(in super::super) fn require_no_selection(
+    root: &HeldDirectory,
+    key: &JournalKey,
+) -> Result<(), AppError> {
     absent(&root.child(SELECTION_SCRATCH))?;
     absent(&root.child(SELECTION_WAL))?;
-    require_unstarted_outputs(root)
+    require_unstarted_outputs(root, Some(&key.initial_head()))
 }
 
-fn require_unstarted_outputs(root: &HeldDirectory) -> Result<(), AppError> {
+fn require_unstarted_outputs(root: &HeldDirectory, initial: Option<&[u8]>) -> Result<(), AppError> {
     absent(&root.child(HEAD_STAGE))?;
-    absent(&root.child(HEAD_CURRENT))?;
+    let path = root.child(HEAD_CURRENT);
+    if let Some(initial) = initial {
+        let mut head = HeldDecisionFile::read(path, HEAD_BYTES)?.ok_or_else(denied)?;
+        if head.bytes.as_slice() != initial {
+            return Err(denied());
+        }
+        head.require()?;
+    } else {
+        absent(&path)?;
+    }
     if observe_directory(&root.child(RECORD_DIRECTORY))? != Presence::Absent {
         return Err(denied());
     }
@@ -43,13 +58,13 @@ fn require_unstarted_outputs(root: &HeldDirectory) -> Result<(), AppError> {
 }
 
 pub(in super::super) struct HeldDecisionFile {
-    path: PathBuf,
+    pub(in super::super) path: PathBuf,
     file: (File, SessionId),
     pub(in super::super) bytes: Zeroizing<Vec<u8>>,
 }
 
 impl HeldDecisionFile {
-    pub(super) fn read(path: PathBuf, maximum: usize) -> Result<Option<Self>, AppError> {
+    pub(in super::super) fn read(path: PathBuf, maximum: usize) -> Result<Option<Self>, AppError> {
         if observe(&path)? == Presence::Absent {
             return Ok(None);
         }
@@ -61,11 +76,11 @@ impl HeldDecisionFile {
         }))
     }
 
-    fn require(&mut self) -> Result<(), AppError> {
+    pub(in super::super) fn require(&mut self) -> Result<(), AppError> {
         require_exact_held(&self.path, &mut self.file, &self.bytes)
     }
 
-    fn sync_complete(&mut self) -> Result<(), AppError> {
+    pub(in super::super) fn sync_complete(&mut self) -> Result<(), AppError> {
         self.require()?;
         let mut writer = open_exact_write(&self.path, WriteMode::Existing)?;
         if writer.1 != self.file.1 {
@@ -75,6 +90,34 @@ impl HeldDecisionFile {
         sync_selected_catalog(&writer.0).map_err(io)?;
         self.require()
     }
+
+    fn cover(
+        path: PathBuf,
+        bytes: &[u8],
+        maximum: usize,
+        already_selected: bool,
+    ) -> Result<Self, AppError> {
+        let mut held = if already_selected {
+            let existing = Self::read(path, maximum)?.ok_or_else(denied)?;
+            if existing.bytes.as_slice() != bytes {
+                return Err(denied());
+            }
+            existing
+        } else {
+            let file = ensure_exact_held(&path, bytes)?;
+            Self {
+                path,
+                file,
+                bytes: Zeroizing::new(bytes.to_vec()),
+            }
+        };
+        held.sync_complete()?;
+        Ok(held)
+    }
+}
+
+fn index_name(page: PrivateChatPageId) -> String {
+    format!("{}.page", hex::encode(page.as_bytes()))
 }
 
 /// Keep the incomplete first write in a private scratch name. Only a
@@ -83,6 +126,7 @@ impl HeldDecisionFile {
 /// cut. A missing frame requests the exact pre-selection absence proof.
 pub(in super::super) fn cover_selection_wal(
     root: &HeldDirectory,
+    initial: Option<&[u8]>,
     mut verify: impl FnMut(Option<&[u8]>) -> Result<(), AppError>,
     prepare: impl FnOnce() -> Result<Zeroizing<Vec<u8>>, AppError>,
 ) -> Result<HeldDecisionFile, AppError> {
@@ -108,7 +152,7 @@ pub(in super::super) fn cover_selection_wal(
         };
         if DecisionSelection::incomplete_scratch(&original.bytes) {
             verify(None)?;
-            require_unstarted_outputs(root)?;
+            require_unstarted_outputs(root, initial)?;
             absent(&pending_path)?;
             original.require()?;
             remove_listed(&scratch_path)?;
@@ -119,7 +163,7 @@ pub(in super::super) fn cover_selection_wal(
             None
         } else {
             verify(Some(&original.bytes))?;
-            require_unstarted_outputs(root)?;
+            require_unstarted_outputs(root, initial)?;
             original.sync_complete()?;
             Some(original)
         }
@@ -129,11 +173,11 @@ pub(in super::super) fn cover_selection_wal(
 
     if scratch.is_none() {
         verify(None)?;
-        require_unstarted_outputs(root)?;
+        require_unstarted_outputs(root, initial)?;
         absent(&pending_path)?;
         let bytes = prepare()?;
         verify(Some(&bytes))?;
-        require_unstarted_outputs(root)?;
+        require_unstarted_outputs(root, initial)?;
         let mut file = open_exact_write(&scratch_path, WriteMode::Create)?;
         #[cfg(test)]
         if take_fault(ReviewControlFault::ShortSelectionScratch) {
@@ -150,7 +194,7 @@ pub(in super::super) fn cover_selection_wal(
     let mut scratch = scratch.ok_or_else(denied)?;
     root.sync()?;
     verify(Some(&scratch.bytes))?;
-    require_unstarted_outputs(root)?;
+    require_unstarted_outputs(root, initial)?;
     absent(&pending_path)?;
     scratch.require()?;
     install_catalog_stage(&scratch_path, &pending_path).map_err(io)?;
@@ -175,6 +219,7 @@ pub(in super::super) fn select_covered_wal(
     wal: &mut HeldDecisionFile,
     transaction: &DecisionSelection<'_>,
     selected: DecisionHead,
+    initial: Option<&[u8]>,
     mut require_current: impl FnMut() -> Result<(), AppError>,
 ) -> Result<HeldDecisionFile, AppError> {
     root.require()?;
@@ -199,7 +244,9 @@ pub(in super::super) fn select_covered_wal(
     if already_selected {
         // A completed rename may have stopped before the directory barrier.
         absent(&stage_path)?;
-    } else if old.as_ref().map(|head| head.bytes.as_slice()) != transaction.previous_head {
+    } else if old.as_ref().map(|head| head.bytes.as_slice())
+        != transaction.previous_head.or(initial)
+    {
         return Err(denied());
     }
 
@@ -214,39 +261,58 @@ pub(in super::super) fn select_covered_wal(
         create_namespace(&records_path)?;
     }
     let records = HeldDirectory::open(records_path)?;
-    let record_name = format!("{:016x}.record", selected.sequence);
-    let entries = bounded_entries(&records, 1)?;
-    if entries.len() > 1
-        || entries
-            .first()
-            .is_some_and(|name| name != record_name.as_str())
-    {
-        return Err(denied());
+    let mut outputs = vec![(
+        format!("{:016x}.record", selected.sequence),
+        transaction.record,
+        MAX_RECORD_BYTES,
+    )];
+    match (selected.roots, transaction.pages) {
+        (Some(roots), Some(pages)) => {
+            for (root, frame) in roots.into_iter().zip(pages) {
+                outputs.push((index_name(root.page), frame, MAX_INDEX_FRAME_BYTES));
+            }
+        }
+        (None, None) => (),
+        _ => return Err(denied()),
     }
-    records.sync()?;
-    root.sync()?;
-    let record_path = records.child(&record_name);
-    let mut record = if already_selected {
-        let existing = HeldDecisionFile::read(record_path, MAX_RECORD_BYTES)?.ok_or_else(denied)?;
-        if existing.bytes.as_slice() != transaction.record {
+    let require_output_names = || {
+        let names = bounded_entries(&records, outputs.len())?;
+        if names.len() > outputs.len()
+            || names
+                .iter()
+                .any(|name| !outputs.iter().any(|(output, _, _)| name == output.as_str()))
+        {
             return Err(denied());
         }
-        existing
-    } else {
+        Ok(())
+    };
+    require_output_names()?;
+    records.sync()?;
+    root.sync()?;
+    if !already_selected {
         require_current()?;
+    }
+    let mut captured = Vec::with_capacity(outputs.len());
+    for (name, frame, cap) in &outputs {
         records.require()?;
         root.require()?;
         wal.require()?;
-        let file = ensure_exact_held(&record_path, transaction.record)?;
-        HeldDecisionFile {
-            path: record_path,
-            file,
-            bytes: Zeroizing::new(transaction.record.to_vec()),
+        captured.push(HeldDecisionFile::cover(
+            records.child(name),
+            frame,
+            *cap,
+            already_selected,
+        )?);
+    }
+    let mut require_outputs = || -> Result<(), AppError> {
+        require_output_names()?;
+        for file in &mut captured {
+            file.require()?;
         }
+        Ok(())
     };
-    record.sync_complete()?;
     records.sync()?;
-    record.require()?;
+    require_outputs()?;
     root.require()?;
 
     if already_selected {
@@ -256,7 +322,7 @@ pub(in super::super) fn select_covered_wal(
         require_current()?;
         absent(&stage_path)?;
         records.require()?;
-        record.require()?;
+        require_outputs()?;
         head.require()?;
         wal.require()?;
         return Ok(head);
@@ -266,7 +332,7 @@ pub(in super::super) fn select_covered_wal(
     root.sync()?;
     require_current()?;
     records.require()?;
-    record.require()?;
+    require_outputs()?;
     wal.require()?;
     require_exact_held(&stage_path, &mut stage, transaction.head)?;
     if let Some(previous) = old.as_mut() {
@@ -287,7 +353,7 @@ pub(in super::super) fn select_covered_wal(
     root.sync()?;
     require_current()?;
     records.require()?;
-    record.require()?;
+    require_outputs()?;
     wal.require()?;
     require_exact_held(&head_path, &mut stage, transaction.head)?;
     Ok(HeldDecisionFile {

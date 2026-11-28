@@ -2,7 +2,9 @@
 //! until the producer proves the original head and covers both files.
 use super::attempt::JournalKey;
 use super::*;
+use crate::store::persistence::v2_text::TextRootData;
 use catcoms_replication::chat::{
+    cold_index::{NodeRefData, MAX_INDEX_FRAME_BYTES},
     owner_bodies::{
         ExactReviewDecisionBody, ReviewStreamEntry, ReviewStreamRecord,
         MAX_REVIEW_STREAM_RECORD_BYTES,
@@ -12,11 +14,17 @@ use catcoms_replication::chat::{
 use catcoms_wire::{Decoder, Encoder};
 
 pub(super) mod disk;
+pub(super) mod index;
+#[cfg(test)]
+mod tests;
 
 const RECORD: &[u8] = b"catcoms/private-chat-v2-review-journal-record/v1\0";
 const HEAD: &[u8] = b"catcoms/private-chat-v2-review-journal-head/v1\0";
+const INDEXED_HEAD: &[u8] = b"catcoms/private-chat-v2-review-journal-head/v2\0";
 const WAL: &[u8] = b"catcoms/private-chat-v2-review-journal-selection/v1\0";
 const WAL_FRAME: &[u8; 8] = b"CTV2RVJ\x01";
+const INDEXED_WAL: &[u8] = b"catcoms/private-chat-v2-review-journal-selection/v2\0";
+const INDEXED_WAL_FRAME: &[u8; 8] = b"CTV2RVJ\x02";
 const WAL_HEADER: usize = WAL_FRAME.len() + 4;
 const INTENT_DIGEST_DOMAIN: &str = "catcoms/private-chat-v2-review-journal-selected-intent/v1";
 const ATTEMPT_DIGEST_DOMAIN: &str = "catcoms/private-chat-v2-review-journal-selected-attempt/v1";
@@ -27,15 +35,18 @@ const SEAL_BYTES: usize = 40;
 const DIGEST_FIELD: usize = 4 + 32;
 pub(super) const MAX_RECORD_BYTES: usize =
     SEAL_BYTES + 4 + RECORD.len() + 2 * DIGEST_FIELD + 4 + MAX_REVIEW_STREAM_RECORD_BYTES;
-pub(super) const HEAD_BYTES: usize = SEAL_BYTES + 4 + HEAD.len() + 8 + 3 * DIGEST_FIELD;
+const LEGACY_HEAD_BYTES: usize = SEAL_BYTES + 4 + HEAD.len() + 8 + 3 * DIGEST_FIELD;
+const INDEX_ROOT_BYTES: usize = 1 + 1 + 8 + 3 * DIGEST_FIELD;
+pub(super) const HEAD_BYTES: usize = LEGACY_HEAD_BYTES + 2 * INDEX_ROOT_BYTES;
 pub(super) const MAX_SELECTION_BYTES: usize = WAL_HEADER
     + SEAL_BYTES
     + 4
-    + WAL.len()
+    + INDEXED_WAL.len()
     + 3 * DIGEST_FIELD
-    + 3 * 4
+    + 5 * 4
     + 2 * HEAD_BYTES
-    + MAX_RECORD_BYTES;
+    + MAX_RECORD_BYTES
+    + 2 * MAX_INDEX_FRAME_BYTES;
 
 pub(super) struct RetainedDecisionRecord<'a> {
     pub(super) request_digest: [u8; 32],
@@ -104,6 +115,7 @@ pub(super) struct DecisionHead {
     entry: [u8; 32],
     record: [u8; 32],
     previous_head: [u8; 32],
+    pub(super) roots: Option<[NodeRefData; 2]>,
 }
 
 impl DecisionHead {
@@ -113,6 +125,7 @@ impl DecisionHead {
         entry: &ReviewStreamEntry,
         sealed_record: &[u8],
         previous_head: Option<(Self, &[u8])>,
+        roots: [NodeRefData; 2],
     ) -> Result<Self, AppError> {
         let value = Self {
             sequence: entry.position_data().sequence,
@@ -121,6 +134,7 @@ impl DecisionHead {
             previous_head: previous_head.map_or([0; 32], |(_, frame)| {
                 blake3::derive_key(HEAD_DIGEST_DOMAIN, frame)
             }),
+            roots: Some(roots),
         };
         value.require_shape()?;
         value.require_predecessor(entry, previous_head)?;
@@ -135,6 +149,14 @@ impl DecisionHead {
         {
             return Err(denied());
         }
+        if let Some([intent, case]) = self.roots {
+            if intent.page == case.page
+                || intent.summary.keys != self.sequence
+                || case.summary.keys > self.sequence
+            {
+                return Err(denied());
+            }
+        }
         Ok(())
     }
 
@@ -145,29 +167,42 @@ impl DecisionHead {
     ) -> Result<Zeroizing<Vec<u8>>, AppError> {
         self.require_shape()?;
         let mut encoder = Encoder::with_capacity(HEAD_BYTES - SEAL_BYTES);
-        encoder.put_bytes(HEAD).map_err(|_| denied())?;
+        encoder.put_bytes(INDEXED_HEAD).map_err(|_| denied())?;
         encoder.put_u64(self.sequence);
         for field in [self.entry, self.record, self.previous_head] {
             encoder.put_bytes(&field).map_err(|_| denied())?;
+        }
+        for root in self.roots.ok_or_else(denied)? {
+            TextRootData::Present(root).encode(&mut encoder)?;
         }
         key.seal(encoder, rng)
     }
 
     pub(super) fn open(key: &JournalKey, frame: &[u8]) -> Result<Self, AppError> {
-        if frame.len() != HEAD_BYTES {
+        if !valid_head_size(frame) {
             return Err(denied());
         }
         let plain = key.open(frame)?;
         let mut decoder = Decoder::new(&plain);
-        if read_field(&mut decoder)? != HEAD {
-            return Err(denied());
-        }
-        let value = Self {
+        let version = read_field(&mut decoder)?;
+        let mut value = Self {
             sequence: decoder.get_u64().map_err(|_| denied())?,
             entry: digest(&mut decoder)?,
             record: digest(&mut decoder)?,
             previous_head: digest(&mut decoder)?,
+            roots: None,
         };
+        match (version, frame.len()) {
+            (tag, LEGACY_HEAD_BYTES) if tag == HEAD => (),
+            (tag, HEAD_BYTES) if tag == INDEXED_HEAD => {
+                let mut read_root = || match TextRootData::decode(&mut decoder)? {
+                    TextRootData::Present(root) => Ok(root),
+                    TextRootData::Empty => Err(denied()),
+                };
+                value.roots = Some([read_root()?, read_root()?]);
+            }
+            _ => return Err(denied()),
+        }
         decoder.finish().map_err(|_| denied())?;
         value.require_shape()?;
         Ok(value)
@@ -212,14 +247,18 @@ impl DecisionHead {
     }
 }
 
-/// Freeze both encrypted outputs in one authenticated transaction. A
-/// cold writer can finish an exact partial Record or Head without ever
-/// invoking the key signer again.
+fn valid_head_size(frame: &[u8]) -> bool {
+    matches!(frame.len(), LEGACY_HEAD_BYTES | HEAD_BYTES)
+}
+
+/// Freeze the encrypted outputs in one authenticated transaction. A
+/// cold writer can finish exact partial writes without invoking the signer.
 pub(super) struct DecisionSelection<'a> {
     controls: [[u8; 32]; 3],
     pub(super) previous_head: Option<&'a [u8]>,
     pub(super) record: &'a [u8],
     pub(super) head: &'a [u8],
+    pub(super) pages: Option<[&'a [u8]; 2]>,
 }
 
 impl<'a> DecisionSelection<'a> {
@@ -229,27 +268,46 @@ impl<'a> DecisionSelection<'a> {
         previous_head: Option<&[u8]>,
         record: &[u8],
         head: &[u8],
+        pages: [&[u8]; 2],
         rng: &mut dyn CryptoRngCore,
     ) -> Result<Zeroizing<Vec<u8>>, AppError> {
         let previous = previous_head.unwrap_or_default();
         if !(SEAL_BYTES + 1..=MAX_RECORD_BYTES).contains(&record.len())
             || head.len() != HEAD_BYTES
-            || previous_head.is_some_and(|frame| frame.len() != HEAD_BYTES)
+            || previous_head.is_some_and(|frame| !valid_head_size(frame))
+            || pages
+                .iter()
+                .any(|page| page.is_empty() || page.len() > MAX_INDEX_FRAME_BYTES)
         {
             return Err(denied());
         }
         let mut plain = Encoder::with_capacity(
-            28 + WAL.len() + 96 + previous.len() + record.len() + head.len(),
+            36 + INDEXED_WAL.len()
+                + 96
+                + previous.len()
+                + record.len()
+                + head.len()
+                + pages.iter().map(|page| page.len()).sum::<usize>(),
         );
         let [intent, attempt, raw] = controls;
-        for field in [WAL, &intent, &attempt, &raw, previous, record, head] {
+        for field in [
+            INDEXED_WAL,
+            &intent,
+            &attempt,
+            &raw,
+            previous,
+            record,
+            head,
+            pages[0],
+            pages[1],
+        ] {
             plain.put_bytes(field).map_err(|_| denied())?;
         }
         let sealed = key.seal(plain, rng)?;
         let size = WAL_HEADER.checked_add(sealed.len()).ok_or_else(denied)?;
         let length = u32::try_from(size).map_err(|_| denied())?;
         let mut frame = Zeroizing::new(Vec::with_capacity(size));
-        frame.extend_from_slice(WAL_FRAME);
+        frame.extend_from_slice(INDEXED_WAL_FRAME);
         frame.extend_from_slice(&length.to_be_bytes());
         frame.extend_from_slice(&sealed);
         Ok(frame)
@@ -259,11 +317,25 @@ impl<'a> DecisionSelection<'a> {
         if Self::declared_size(frame) != Some(frame.len()) {
             return Err(denied());
         }
-        key.open(&frame[WAL_HEADER..])
+        let plain = key.open(&frame[WAL_HEADER..])?;
+        let expected = if frame.starts_with(WAL_FRAME) {
+            WAL
+        } else {
+            INDEXED_WAL
+        };
+        if read_field(&mut Decoder::new(&plain))? != expected {
+            return Err(denied());
+        }
+        Ok(plain)
     }
 
     fn declared_size(frame: &[u8]) -> Option<usize> {
-        let length = frame.strip_prefix(WAL_FRAME)?.get(..4)?.try_into().ok()?;
+        let length = frame
+            .strip_prefix(WAL_FRAME)
+            .or_else(|| frame.strip_prefix(INDEXED_WAL_FRAME))?
+            .get(..4)?
+            .try_into()
+            .ok()?;
         let length = u32::from_be_bytes(length) as usize;
         (WAL_HEADER + SEAL_BYTES + 1..=MAX_SELECTION_BYTES)
             .contains(&length)
@@ -274,10 +346,10 @@ impl<'a> DecisionSelection<'a> {
     /// A complete corrupt frame cannot be silently replaced.
     pub(super) fn incomplete_scratch(frame: &[u8]) -> bool {
         if frame.len() < WAL_FRAME.len() {
-            return WAL_FRAME.starts_with(frame);
+            return WAL_FRAME.starts_with(frame) || INDEXED_WAL_FRAME.starts_with(frame);
         }
         if frame.len() < WAL_HEADER {
-            return frame.starts_with(WAL_FRAME);
+            return frame.starts_with(WAL_FRAME) || frame.starts_with(INDEXED_WAL_FRAME);
         }
         Self::declared_size(frame).is_some_and(|length| length > frame.len())
     }
@@ -287,7 +359,8 @@ impl<'a> DecisionSelection<'a> {
             return Err(denied());
         }
         let mut reader = Decoder::new(plain);
-        if read_field(&mut reader)? != WAL {
+        let domain = read_field(&mut reader)?;
+        if domain != WAL && domain != INDEXED_WAL {
             return Err(denied());
         }
         let controls = [
@@ -298,10 +371,22 @@ impl<'a> DecisionSelection<'a> {
         let previous = read_field(&mut reader)?;
         let record = read_field(&mut reader)?;
         let head = read_field(&mut reader)?;
+        let pages = if domain == INDEXED_WAL {
+            let pages = [read_field(&mut reader)?, read_field(&mut reader)?];
+            if pages
+                .iter()
+                .any(|page| page.is_empty() || page.len() > MAX_INDEX_FRAME_BYTES)
+            {
+                return Err(denied());
+            }
+            Some(pages)
+        } else {
+            None
+        };
         reader.finish().map_err(|_| denied())?;
         if !(SEAL_BYTES + 1..=MAX_RECORD_BYTES).contains(&record.len())
-            || head.len() != HEAD_BYTES
-            || (!previous.is_empty() && previous.len() != HEAD_BYTES)
+            || !valid_head_size(head)
+            || (!previous.is_empty() && !valid_head_size(previous))
         {
             return Err(denied());
         }
@@ -310,12 +395,32 @@ impl<'a> DecisionSelection<'a> {
             previous_head: (!previous.is_empty()).then_some(previous),
             record,
             head,
+            pages,
         })
     }
 
     pub(super) fn require_controls(&self, supplied: [[u8; 32]; 3]) -> Result<(), AppError> {
         if supplied != self.controls {
             return Err(denied());
+        }
+        Ok(())
+    }
+
+    /// Only a reader holding the independently covered selected head can
+    /// use this check. A pending append still needs all original inputs.
+    pub(super) fn require_remaining_controls(
+        &self,
+        frames: [Option<&[u8]>; 3],
+    ) -> Result<(), AppError> {
+        let domains = [
+            INTENT_DIGEST_DOMAIN,
+            ATTEMPT_DIGEST_DOMAIN,
+            RAW_DIGEST_DOMAIN,
+        ];
+        for ((frame, domain), expected) in frames.into_iter().zip(domains).zip(self.controls) {
+            if frame.is_some_and(|frame| blake3::derive_key(domain, frame) != expected) {
+                return Err(denied());
+            }
         }
         Ok(())
     }
@@ -337,6 +442,14 @@ impl<'a> DecisionSelection<'a> {
         }
         record.verify_raw_predecessor(self.controls[2])?;
         selected.require_record(record.record.entry_data(), self.record)?;
+        match (selected.roots, self.pages) {
+            (Some(roots), Some(pages)) => {
+                key.indexes()
+                    .require_first(roots, pages, &record, self.record)?;
+            }
+            (None, None) => (),
+            _ => return Err(denied()),
+        }
         let previous = self
             .previous_head
             .map(|bytes| DecisionHead::open(key, bytes).map(|head| (head, bytes)))

@@ -77,9 +77,18 @@ impl NativeTextColdFounderSource {
                             (position.membership_header, position.membership_epoch)
                         }))
                     };
+                if select {
+                    if let Some(saved) =
+                        store.finish_selected_initial_review(&pin, &request, |position| {
+                            check(Some(position))
+                        })?
+                    {
+                        return Ok(saved);
+                    }
+                }
                 let mut original =
                     store.prepare_held_review_original(scope, request.case, || check(None))?;
-                original.with_original_data(|bytes, require_held| {
+                let entry = original.with_original_data(|bytes, require_held| {
                     let held = V2RemovedCreateRecord::decode(bytes).map_err(|_| refused())?;
                     let target = held.target_data();
                     // This vault's ID5 author is the original founder only.
@@ -168,7 +177,20 @@ impl NativeTextColdFounderSource {
                             Ok(entry)
                         })
                     })
-                })
+                })?;
+                drop(original);
+                if select {
+                    if let Some(saved) =
+                        store.finish_selected_initial_review(&pin, &request, |position| {
+                            check(Some(position))
+                        })?
+                    {
+                        if saved != entry {
+                            return Err(refused());
+                        }
+                    }
+                }
+                Ok(entry)
             })
         })
     }

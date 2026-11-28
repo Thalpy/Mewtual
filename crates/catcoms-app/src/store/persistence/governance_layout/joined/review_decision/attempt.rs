@@ -55,6 +55,18 @@ impl JournalKey {
         Ok(Zeroizing::new(unseal(&self.0, &unframe(raw)?)?))
     }
 
+    pub(super) fn indexes(&self) -> super::selection::index::DecisionIndexes {
+        super::selection::index::DecisionIndexes::new(&self.0)
+    }
+
+    pub(super) fn initial_head(&self) -> [u8; 32] {
+        *blake3::keyed_hash(
+            &self.0,
+            b"catcoms/private-chat-v2-review-journal-empty-head/v1\0",
+        )
+        .as_bytes()
+    }
+
     pub(super) fn open_intent(&self, raw: &[u8]) -> Result<Zeroizing<Vec<u8>>, AppError> {
         if !(SEAL_BYTES + 1..=MAX_INTENT_BYTES).contains(&raw.len()) {
             return Err(denied());

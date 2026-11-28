@@ -71,7 +71,7 @@ delivery. Full rejected and reopened case details remain in the founder audit.
 The ID11 storage declaration reserves a separate journal in a recovered
 founder's ID10 catalog. It preserves the occupied descriptors and uses a new
 keyed marker and a domain-specific declaration seed. Cold startup proves
-the covered claim, exact original hold and the empty selected directory.
+the covered claim, exact original hold and authenticated empty head.
 It can recover an admitted declaration, but ordinary founder startup does
 not provision the journal before the decision writer is integrated. An
 older ID10-only build refuses once ID11 is selected. The original
@@ -84,15 +84,18 @@ lineage. A fresh key attempt still requires the current membership
 position.
 
 The Rust-only first-decision path freezes the exact control digests,
-encrypted record and replacement head in an authenticated write-ahead
+encrypted record, intent and case index pages, and replacement head in an authenticated write-ahead
 file. A separate scratch name precedes it. Once the file is covered,
 the writer can finish only its exact record and head. It covers the
-record before replacing the head and rechecks the original custody
+record and both index pages before replacing the head and rechecks the original custody
 before each promotion. A retry after the rename proves and covers the
-original outputs. It reuses the retained signature. All three signing
-files and the write-ahead file stay as recovery inputs in this
-checkpoint. The next work is indexed exact outcomes, retirement,
-additional case transitions, fork persistence and delivery admission.
+original outputs. The indexed outcome owns its exact record and can be
+read after retirement of the signing files and write-ahead file. The
+write-ahead file survives until every original input has retired. An
+earlier valid unindexed transaction still recovers with its original
+files. The missing empty head of an older bare declaration cannot
+authorize a new attempt. Additional case transitions, fork persistence
+and delivery admission remain open.
 
 ### Covered founder audit
 

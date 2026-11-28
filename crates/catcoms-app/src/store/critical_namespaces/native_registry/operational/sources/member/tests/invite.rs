@@ -2892,6 +2892,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         sources.policy.prepare_member().unwrap(),
                     ).select_initial_founder_review(review_request(ReviewDecision::Approve), &fresh);
                     let head = journal.join("head.current");
+                    let empty_head = std::fs::read(&head).unwrap();
                     let pending = journal.join("selection.pending");
                     let scratch = journal.join("selection.scratch");
                     let record = journal.join("records").join("0000000000000001.record");
@@ -2900,13 +2901,15 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     );
                     assert!(stopped.is_err() && cut_used);
                     assert!(scratch.is_file());
-                    assert!(!head.exists() && !pending.exists() && !record.exists());
+                    assert_eq!(std::fs::read(&head).unwrap(), empty_head);
+                    assert!(!pending.exists() && !record.exists());
                     let (stopped, cut_used) = with_review_control_fault(
                         ReviewControlFault::AfterSelectionWal, select,
                     );
                     assert!(stopped.is_err() && cut_used);
                     assert!(!scratch.exists() && pending.is_file());
-                    assert!(!head.exists() && !record.exists());
+                    assert_eq!(std::fs::read(&head).unwrap(), empty_head);
+                    assert!(!record.exists());
                     let sealed_wal = std::fs::read(&pending).unwrap();
                     let (stopped, cut_used) = with_review_control_fault(
                         ReviewControlFault::AfterSelectionHeadRename, select,
@@ -2914,26 +2917,103 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     assert!(stopped.is_err() && cut_used);
                     let sealed_head = std::fs::read(&head).unwrap();
                     let sealed_record = std::fs::read(&record).unwrap();
+                    let mut pages = std::fs::read_dir(record.parent().unwrap())
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path())
+                        .filter(|path| path.extension().is_some_and(|ext| ext == "page"))
+                        .map(|path| (std::fs::read(&path).unwrap(), path))
+                        .collect::<Vec<_>>();
+                    assert_eq!(pages.len(), 2, "both point roots precede the selected head");
                     assert_eq!(std::fs::read(&pending).unwrap(), sealed_wal);
                     retire(vault, sources, recovered_row).await;
                     let settled = crate::store::NativeTextJoinedStorage::open_for_native_startup(
                         founder_dir.path(), SECRET, &mut history_rng, current_policy(),
                     ).unwrap().prepare_recovered_founder().map_err(|(_, error)| error).unwrap();
                     let (vault, sources, recovered_row) = mount(settled);
-                    let (recovered, entered_again) = with_review_control_fault(
-                        ReviewControlFault::BeforeFreshKey,
+                    let (stopped, cut_used) = with_review_control_fault(
+                        ReviewControlFault::AfterRetiringRaw,
                         || sources.capture_member(
-                            &recovered_row,
-                            command(&vault, &founder_budget),
+                            &recovered_row, command(&vault, &founder_budget),
                             sources.policy.prepare_member().unwrap(),
                         ).select_initial_founder_review(review_request(ReviewDecision::Approve), &fresh),
                     );
+                    assert!(stopped.is_err() && cut_used);
+                    assert!(!raw_path.exists());
+                    assert_eq!(std::fs::read(&pending).unwrap(), sealed_wal);
+                    retire(vault, sources, recovered_row).await;
+                    let interrupted = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+                        founder_dir.path(), SECRET, &mut history_rng, current_policy(),
+                    ).unwrap().prepare_recovered_founder().map_err(|(_, error)| error).unwrap();
+                    let (vault, sources, recovered_row) = mount(interrupted);
+                    let retry_selection = || sources.capture_member(
+                        &recovered_row,
+                        command(&vault, &founder_budget),
+                        sources.policy.prepare_member().unwrap(),
+                    ).select_initial_founder_review(review_request(ReviewDecision::Approve), &fresh);
+                    for (cut, retired_file) in [
+                        (ReviewControlFault::AfterRetiringAttempt, "key.attempt"),
+                        (ReviewControlFault::AfterRetiringIntent, "intent.pending"),
+                        (ReviewControlFault::BeforeRetiringWal, "key.raw"),
+                    ] {
+                        let (stopped, cut_used) = with_review_control_fault(cut, retry_selection);
+                        assert!(stopped.is_err() && cut_used);
+                        assert!(!journal.join(retired_file).exists());
+                        assert_eq!(std::fs::read(&pending).unwrap(), sealed_wal);
+                    }
+                    let (recovered, entered_again) = with_review_control_fault(
+                        ReviewControlFault::BeforeFreshKey, retry_selection,
+                    );
                     assert!(!entered_again, "the selected decision must not sign again");
                     assert_eq!(recovered.unwrap(), selected);
-                    assert_eq!(std::fs::read(&pending).unwrap(), sealed_wal);
+                    assert!(!pending.exists());
                     assert_eq!(std::fs::read(&head).unwrap(), sealed_head);
                     assert_eq!(std::fs::read(&record).unwrap(), sealed_record);
+                    for (original, path) in pages.drain(..) {
+                        assert_eq!(std::fs::read(&path).unwrap(), original);
+                        std::fs::remove_file(&path).unwrap();
+                        assert!(retry_selection().is_err());
+                        assert!(!path.exists(), "a selected missing index page is held for repair");
+                        std::fs::write(path, original).unwrap();
+                    }
+                    assert_eq!(retry_selection().unwrap(), selected);
+                    let original_hold = std::fs::read_dir(&directory)
+                        .unwrap().map(|entry| entry.unwrap().path())
+                        .find(|path| path.extension().is_some_and(|ext| ext == "held")).unwrap();
+                    let parked_hold = original_hold.with_extension("parked");
+                    std::fs::rename(&original_hold, &parked_hold).unwrap();
+                    assert_eq!(retry_selection().unwrap(), selected,
+                        "the covered outcome is independent of the old holding file");
+                    assert!(sources.capture_member(
+                        &recovered_row,
+                        command(&vault, &founder_budget),
+                        sources.policy.prepare_member().unwrap(),
+                    ).select_initial_founder_review(review_request(ReviewDecision::Reject), &fresh).is_err());
+                    std::fs::rename(&parked_hold, &original_hold).unwrap();
                     retire(vault, sources, recovered_row).await;
+                    // Lose every child of the original mounted journal,
+                    // leaving its actual directory and catalog marker.
+                    let parked_head = founder_dir.path().join("fixture-review-head");
+                    let records = journal.join("records");
+                    let parked_records = founder_dir.path().join("fixture-review-records");
+                    std::fs::rename(&head, &parked_head).unwrap();
+                    std::fs::rename(&records, &parked_records).unwrap();
+                    assert!(std::fs::read_dir(&journal).unwrap().next().is_none());
+                    let incomplete = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+                        founder_dir.path(), SECRET, &mut history_rng, current_policy(),
+                    ).unwrap().prepare_recovered_founder().map_err(|(_, error)| error).unwrap();
+                    let (vault, sources, recovered_row) = mount(incomplete);
+                    let (refusal, entered) = with_review_control_fault(
+                        ReviewControlFault::BeforeFreshKey,
+                        || sources.capture_member(
+                            &recovered_row, command(&vault, &founder_budget),
+                            sources.policy.prepare_member().unwrap(),
+                        ).select_initial_founder_review(review_request(ReviewDecision::Reject), &fresh),
+                    );
+                    assert!(refusal.is_err() && !entered);
+                    assert!(std::fs::read_dir(&journal).unwrap().next().is_none());
+                    retire(vault, sources, recovered_row).await;
+                    std::fs::rename(&parked_records, &records).unwrap();
+                    std::fs::rename(&parked_head, &head).unwrap();
                     // Reopen without any warm bytes. A short Raw cannot mint
                     // a decision or make the ordinary founder unavailable.
                     std::fs::write(&raw_path, &partial).unwrap();

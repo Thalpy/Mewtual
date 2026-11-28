@@ -4296,10 +4296,11 @@ selection does not establish when another device received an original.
 Remote originals under an obsolete Admission still require separate
 authorization evidence. Local outbox ancestry carries no display effect.
 
-The empty ID11 decision namespace succeeds only the founder's authenticated
+The ID11 decision namespace succeeds only the founder's authenticated
 ID10 catalog. Its recovery seed uses a separate key and domain. Declaration
 retains the original ID10 marker and directory, shared history, pin and native
-founder leaves through exact Stage selection. A foreign claim, crossed
+founder leaves through exact Stage selection. The declaration covers the
+original authenticated empty decision head before Stage selection. A foreign claim, crossed
 marker, unexpected entry or unsupported opener stops before the journal
 can acquire authority. Once selected, ID11 prevents an ID10-only binary
 from treating the vault as an older layout. Native startup does not yet
@@ -4322,13 +4323,16 @@ original current archive and held record.
 
 The first private selection checks the same exact Raw, signing files
 and held original under the founder loan. An authenticated write-ahead
-file commits the encrypted immutable record and the encrypted first
-head. The record is synced before the staged head is renamed and
+file commits the encrypted immutable record, the intent and case index
+pages, and the encrypted first head. These outputs are synced before the staged head is renamed and
 covered. Only the pre-commit scratch name can classify a short frame
 for replacement, and only while all selection outputs are absent.
-A missing write-ahead file with retained outputs refuses selection.
-This checkpoint retains all transaction files, supplies no approval
-delivery and supports only the first decision.
+After covering the exact selected head, recovery proves the immutable
+record and both index pages before retiring the exact signing inputs.
+The write-ahead file retires last, with a final absence check for the
+inputs. Loss of the whole journal cannot supply a new empty baseline.
+The supported first-decision retry is private. Approval delivery and
+additional decisions remain open.
 
 ## Chat history admission and retained audit (20 October, continuation)
 

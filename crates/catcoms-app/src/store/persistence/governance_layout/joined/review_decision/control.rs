@@ -21,6 +21,8 @@ use catcoms_replication::chat::{
 };
 use catcoms_storage::{kept::SessionId, VaultPhysicalWorkLease};
 
+mod selected;
+
 const WORK: usize = 8 * MAX_INTENT_BYTES
     + 8 * (ATTEMPT_BYTES + RAW_BYTES)
     + 6 * (MAX_RECORD_BYTES + MAX_SELECTION_BYTES)
@@ -39,6 +41,10 @@ pub(in crate::store) enum ReviewControlFault {
     ShortSelectionScratch,
     AfterSelectionWal,
     AfterSelectionHeadRename,
+    AfterRetiringRaw,
+    AfterRetiringAttempt,
+    AfterRetiringIntent,
+    BeforeRetiringWal,
 }
 
 #[cfg(test)]
@@ -234,7 +240,7 @@ impl DecisionControl {
             .iter()
             .any(|frame| frame.as_ref().is_none_or(|frame| frame.covering))
         {
-            disk::require_no_selection(&self.data.directory)?;
+            disk::require_no_selection(&self.data.directory, &self.key)?;
         }
         for role in ControlRole::ALL {
             if Some(role) == except {
@@ -339,6 +345,7 @@ impl DecisionControl {
             }
             self.require_original(store, mount)?;
             recheck(None)?;
+            self.require_original(store, mount)?;
             #[cfg(test)]
             if take_fault(ReviewControlFault::BeforeFreshKey) {
                 return Err(AppError::Io("injected stop before review key entry".into()));
@@ -433,7 +440,8 @@ impl DecisionControl {
             }
             Ok(())
         };
-        let mut wal = disk::cover_selection_wal(root, verify, || {
+        let initial = key.initial_head();
+        let mut wal = disk::cover_selection_wal(root, Some(&initial), verify, || {
             let record = RetainedDecisionRecord::prepare(
                 key,
                 spec.pin,
@@ -441,14 +449,22 @@ impl DecisionControl {
                 (spec.request_digest, digests[2]),
                 rng,
             )?;
-            let head = DecisionHead::from_record(entry, &record, None)?.seal(key, rng)?;
-            DecisionSelection::seal(key, digests, None, &record, &head, rng)
+            let plain = RetainedDecisionRecord::open(key, &record)?;
+            let retained = RetainedDecisionRecord::decode(spec.pin, &plain)?;
+            let [intent, case] = key.indexes().prepare_first(&retained, &record, rng)?;
+            let roots = [intent.root, case.root];
+            let pages = [intent.page.as_bytes(), case.page.as_bytes()];
+            let head = DecisionHead::from_record(entry, &record, None, roots)?.seal(key, rng)?;
+            DecisionSelection::seal(key, digests, None, &record, &head, pages, rng)
         })?;
         let plain = DecisionSelection::open(key, &wal.bytes)?;
         let selection = DecisionSelection::decode(&plain)?;
         selection.require_controls(digests)?;
         let head = selection.verify_data(key, spec.pin, (entry, spec.request_digest))?;
-        disk::select_covered_wal(root, &mut wal, &selection, head, || prove_source(slots))?;
+        let expected_base = selection.pages.map(|_| initial.as_slice());
+        disk::select_covered_wal(root, &mut wal, &selection, head, expected_base, || {
+            prove_source(slots)
+        })?;
         Ok(())
     }
 

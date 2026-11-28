@@ -1,4 +1,4 @@
-//! Separate token/publication index DATA codecs and bounded COW geometry.
+//! Private text point-index DATA codecs and bounded COW geometry.
 //!
 //! Cid is a caller expectation, never source/Current/acceptance authority. These domains
 //! are NOT accepted-index scopes and introduce no synthetic Admission. Actual selected O,
@@ -16,10 +16,12 @@ use catcoms_wire::{Decoder, Encoder};
 use zeroize::Zeroizing;
 
 mod path;
+mod review;
 mod rewrite;
 pub(in crate::store) use path::{
     PrivateIndexPathData, PRIVATE_INDEX_BOUNDARY_OPEN_BYTES, PRIVATE_INDEX_PATH_METADATA_BYTES,
 };
+pub(in crate::store) use review::ReviewIndexValueData;
 pub(in crate::store) use rewrite::{
     rewrite_private_branch_data, rewrite_private_leaf_data, PrivateIndexRewriteData,
     PRIVATE_INDEX_REWRITE_METADATA_BYTES, PRIVATE_INDEX_REWRITE_TEMPORARY_BYTES,
@@ -27,11 +29,17 @@ pub(in crate::store) use rewrite::{
 
 const TOKEN_DOMAIN: &[u8] = b"catcoms/private-chat-text-token-index/v1\0";
 const PUBLICATION_DOMAIN: &[u8] = b"catcoms/private-chat-text-publication-index/v1\0";
+const REVIEW_INTENT_DOMAIN: &[u8] = b"catcoms/private-chat-review-intent-index/v1\0";
+const REVIEW_CASE_DOMAIN: &[u8] = b"catcoms/private-chat-review-case-index/v1\0";
 const VERSION: u16 = 1;
 const BRANCH_ROW_BYTES: usize = 80;
 const MAX_VALUE_BYTES: usize = 384;
 const TOKEN_HEADER_BYTES: usize = 180;
 const PUBLICATION_HEADER_BYTES: usize = 186;
+const REVIEW_INTENT_HEADER_BYTES: usize =
+    TOKEN_HEADER_BYTES - TOKEN_DOMAIN.len() + REVIEW_INTENT_DOMAIN.len();
+const REVIEW_CASE_HEADER_BYTES: usize =
+    TOKEN_HEADER_BYTES - TOKEN_DOMAIN.len() + REVIEW_CASE_DOMAIN.len();
 const _: () = assert!(
     4 + TOKEN_DOMAIN.len() + 2 + 36 + 1 + 1 + 1 + 2 + 16 + 36 + 36 + 4 == TOKEN_HEADER_BYTES
 );
@@ -61,24 +69,32 @@ type Result<T> = std::result::Result<T, PrivateIndexError>;
 pub(in crate::store) enum PrivateIndexKindData {
     Token,
     Publication,
+    ReviewIntent,
+    ReviewCase,
 }
 impl PrivateIndexKindData {
     fn domain(self) -> &'static [u8] {
         match self {
             Self::Token => TOKEN_DOMAIN,
             Self::Publication => PUBLICATION_DOMAIN,
+            Self::ReviewIntent => REVIEW_INTENT_DOMAIN,
+            Self::ReviewCase => REVIEW_CASE_DOMAIN,
         }
     }
     fn code(self) -> u8 {
         match self {
             Self::Token => 1,
             Self::Publication => 2,
+            Self::ReviewIntent => 3,
+            Self::ReviewCase => 4,
         }
     }
     fn header_bytes(self) -> usize {
         match self {
             Self::Token => TOKEN_HEADER_BYTES,
             Self::Publication => PUBLICATION_HEADER_BYTES,
+            Self::ReviewIntent => REVIEW_INTENT_HEADER_BYTES,
+            Self::ReviewCase => REVIEW_CASE_HEADER_BYTES,
         }
     }
 }
@@ -95,6 +111,7 @@ pub(in crate::store) struct PrivateIndexContextData {
 pub(in crate::store) enum PrivateIndexValueData {
     Token(TokenValueData),
     Publication(PublicationValueData),
+    Review(ReviewIndexValueData),
 }
 impl PrivateIndexValueData {
     fn check_key(self, context: PrivateIndexContextData, key: [u8; 32]) -> Result<()> {
@@ -117,6 +134,10 @@ impl PrivateIndexValueData {
                     .map_err(|_| PrivateIndexError::Context)?;
                 Ok(())
             }
+            (
+                PrivateIndexKindData::ReviewIntent | PrivateIndexKindData::ReviewCase,
+                Self::Review(value),
+            ) => value.require_key(context, key),
             _ => Err(PrivateIndexError::Context),
         }
     }
@@ -128,6 +149,9 @@ impl PrivateIndexValueData {
             PrivateIndexKindData::Publication => Self::Publication(
                 PublicationValueData::decode_data(raw).map_err(|_| PrivateIndexError::Malformed)?,
             ),
+            PrivateIndexKindData::ReviewIntent | PrivateIndexKindData::ReviewCase => {
+                Self::Review(ReviewIndexValueData::decode(raw)?)
+            }
         };
         value.check_key(context, key)?;
         Ok(value)
@@ -137,6 +161,7 @@ impl PrivateIndexValueData {
         let raw = match self {
             Self::Token(value) => value.encode_data(),
             Self::Publication(value) => value.encode_data(),
+            Self::Review(value) => return value.encode(),
         }
         .map_err(|_| PrivateIndexError::Malformed)?;
         if raw.is_empty() || raw.len() > MAX_VALUE_BYTES {

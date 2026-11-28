@@ -6,7 +6,7 @@ use crate::store::critical_namespaces::{
     native_registry::VerifiedFounderReviewParent,
     review_hold_namespace::declaration::{FounderLeaves, ReviewDeclarationKind},
 };
-use crate::store::persistence::v2_member_outbox::fs::observe;
+use crate::store::persistence::v2_member_outbox::fs::{observe, WriteMode};
 
 struct DeclarationParent {
     founder: VerifiedFounderReviewParent,
@@ -201,6 +201,7 @@ pub(in crate::store) struct ReviewHoldDeclaration {
     stage: Option<CreatedStage>,
     marker: Option<CreatedStage>,
     directory: Option<HeldDirectory>,
+    initial_head: Option<review_decision::InitialReviewHead>,
     _fee: CatalogReadReservation,
 }
 
@@ -256,6 +257,7 @@ impl ServerStore {
             stage: None,
             marker: None,
             directory: None,
+            initial_head: None,
             _fee: fee,
         })
     }
@@ -325,9 +327,18 @@ impl ReviewHoldDeclaration {
     fn require_outputs(&self, store: &ServerStore, selected: &Path) -> Result<(), AppError> {
         let directory = self.directory.as_ref().ok_or_else(denied)?;
         directory.require()?;
-        // No holder may write into the namespace before the claim retires.
-        if !bounded_entries(directory, 0)?.is_empty() {
-            return Err(denied());
+        // No decision controls may enter the namespace before the claim
+        // retires. ID11 has exactly one authenticated empty head.
+        match self.kind {
+            ReviewDeclarationKind::Hold if !bounded_entries(directory, 0)?.is_empty() => {
+                return Err(denied());
+            }
+            ReviewDeclarationKind::Hold => (),
+            ReviewDeclarationKind::Decision => self
+                .initial_head
+                .as_ref()
+                .ok_or_else(denied)?
+                .require(directory)?,
         }
         exact_retained(
             &fixed(store, false, self.kind.marker_name())?,
@@ -373,6 +384,24 @@ impl ReviewHoldDeclaration {
             &self.prepared.marker,
         )?;
         sync_directory(&store.dir).map_err(io)?;
+        self.require_parent(store)?;
+        self.require_claim(claim)?;
+        if self.kind == ReviewDeclarationKind::Decision {
+            let directory = self.directory.as_ref().ok_or_else(denied)?;
+            if self.initial_head.is_none() {
+                let key = Zeroizing::new(store.keys.db_key()?);
+                self.initial_head = Some(review_decision::InitialReviewHead::capture(
+                    directory,
+                    &key,
+                    &self.prepared.marker,
+                    WriteMode::Create,
+                )?);
+            }
+            self.initial_head
+                .as_mut()
+                .ok_or_else(denied)?
+                .cover(directory, self.stage.is_some())?;
+        }
         self.require_parent(store)?;
         self.require_claim(claim)?;
         stage_output(store, stage, &mut self.stage, &self.prepared.candidate)?;
@@ -451,6 +480,7 @@ pub(in crate::store::persistence::governance_layout::joined) struct RecoveredRev
     pins_digest: [u8; 32],
     history: shared_history::SelectedSharedHistory,
     prior_hold: Option<SelectedReviewHold>,
+    initial_head: Option<review_decision::InitialReviewHead>,
     digest: [u8; 32],
     _fee: CatalogReadReservation,
 }
@@ -502,7 +532,11 @@ impl RecoveredReviewSelection {
         self.history.require(store)?;
         held.require(store)?;
         if let Some(journal) = &selected.review_decision {
-            journal.require_empty_declaration(store)?;
+            journal.require(store)?;
+            self.initial_head
+                .as_ref()
+                .ok_or_else(denied)?
+                .require(&journal.directory)?;
         }
         Ok(())
     }
@@ -642,11 +676,32 @@ pub(in crate::store::persistence::governance_layout::joined) fn recover(
     if staged && (marker.is_some() || directory.is_some() || inventory.stage.is_some()) {
         return Err(denied());
     }
-    if let Some(directory) = &directory {
-        if !bounded_entries(directory, 0)?.is_empty() {
-            return Err(denied());
+    let initial_head = match (&directory, kind) {
+        (Some(directory), Decision) => {
+            let complete = selected || inventory.stage.is_some();
+            review_decision::InitialReviewHead::require_names(directory, !complete)?;
+            match observe(&directory.child(review_decision::HEAD_NAME))? {
+                Presence::Present => {
+                    let mut head = review_decision::InitialReviewHead::capture(
+                        directory,
+                        &key,
+                        &opened.marker,
+                        WriteMode::Existing,
+                    )?;
+                    if complete {
+                        head.cover(directory, true)?;
+                    }
+                    Some(head)
+                }
+                Presence::Absent if !complete => None,
+                Presence::Absent => return Err(denied()),
+            }
         }
-    }
+        (Some(directory), Hold) if !bounded_entries(directory, 0)?.is_empty() => {
+            return Err(denied())
+        }
+        _ => None,
+    };
     let marker = reopen_output(&marker_path, marker, &opened.marker, selected)?;
     let stage = if selected {
         let current = fixed(store, false, critical_namespaces::Slot::Current.name())?;
@@ -679,6 +734,7 @@ pub(in crate::store::persistence::governance_layout::joined) fn recover(
         stage,
         marker,
         directory,
+        initial_head,
         _fee: fee,
     };
     let retained = policy.current.archive.pending.pool.try_reserve(16 * 1024)?;
@@ -692,6 +748,7 @@ pub(in crate::store::persistence::governance_layout::joined) fn recover(
         pins_digest: *blake3::hash(&declaration.parent.pins.1).as_bytes(),
         history: declaration.parent.history,
         prior_hold: declaration.parent.prior_hold,
+        initial_head: declaration.initial_head.take(),
         digest: *blake3::hash(&declaration.prepared.candidate).as_bytes(),
         _fee: retained,
     }))

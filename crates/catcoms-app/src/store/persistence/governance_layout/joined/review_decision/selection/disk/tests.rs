@@ -9,6 +9,7 @@ fn review_selection_refuses_scratch_changed_during_source_recheck() {
     let mut calls = 0;
     let result = cover_selection_wal(
         &root,
+        None,
         |frame| {
             assert_eq!(frame.unwrap(), b"authentic selection scratch");
             calls += 1;
@@ -42,15 +43,17 @@ fn review_selection_refuses_head_stage_changed_during_source_recheck() {
         previous_head: None,
         record: b"expected record",
         head: b"expected head",
+        pages: None,
     };
     let head = DecisionHead {
         sequence: 1,
         entry: [1; 32],
         record: [2; 32],
         previous_head: [0; 32],
+        roots: None,
     };
     let stage = root.child(HEAD_STAGE);
-    let result = select_covered_wal(&root, &mut wal, &transaction, head, || {
+    let result = select_covered_wal(&root, &mut wal, &transaction, head, None, || {
         if stage.is_file() {
             std::fs::write(&stage, b"replaced head").unwrap();
         }
@@ -75,6 +78,7 @@ fn review_selection_refuses_to_start_again_without_the_covering_wal() {
     std::fs::write(&first, b"existing first record").unwrap();
     let result = cover_selection_wal(
         &root,
+        None,
         |frame| {
             assert!(frame.is_none());
             Ok(())

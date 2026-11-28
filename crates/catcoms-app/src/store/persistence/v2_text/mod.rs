@@ -16,7 +16,7 @@ mod index;
 mod invite_context;
 mod io;
 mod ordinary_data;
-mod private_index;
+pub(in crate::store::persistence) mod private_index;
 mod promotion;
 mod query;
 mod records;
@@ -40,6 +40,7 @@ pub(in crate::store) use archive::TextArchiveData;
 pub(in crate::store) use artifacts::TextArtifactRoleData;
 pub(in crate::store) use capture::{PreparedV2TextParentCapture, SelectedV2TextHead};
 pub(in crate::store) use capture::{V2TextFounderAnchorData, V2_TEXT_FOUNDER_ANCHOR_LAYOUT_BYTES};
+pub(in crate::store::persistence) use common::TextContextIdData;
 pub(in crate::store) use common::{
     TextHeadIdData, TextRetirementPlanIdData, TextTransactionIdData,
 };
