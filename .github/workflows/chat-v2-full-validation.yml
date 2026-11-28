@@ -16,7 +16,7 @@ on:
       scope:
         description: Select a focused lane or request the complete workspace tests.
         type: choice
-        options: [all, root, native, native-focused, native-lock, native-join, native-mutations, native-founder-restart, native-membership, native-review]
+        options: [all, root, native, native-focused, native-lock, native-join, native-mutations, native-founder-restart, native-membership, native-review, indexed-archive-predecessor]
         default: native-membership
       run_deferred_catchup:
         description: Include the slow case at final Chat V2 acceptance (scope all or root).
@@ -38,6 +38,29 @@ env:
   RUST_TEST_THREADS: 2
 
 jobs:
+  indexed-archive-predecessor:
+    name: Indexed archive predecessor (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch' && inputs.scope == 'indexed-archive-predecessor'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify the existing ID8 reader against exact ID13 cuts
+        run: python .github/scripts/check-chat-v2-indexed-archive-predecessor.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: indexed-archive-predecessor-${{ matrix.os }}
+          path: logs/chat-v2-indexed-archive-predecessor
+
   root:
     name: Root tests, slow case deferred (${{ matrix.os }})
     if: github.event_name == 'workflow_dispatch' && (inputs.scope == 'all' || inputs.scope == 'root')
@@ -130,7 +153,7 @@ jobs:
 
   native:
     name: Native tests (${{ matrix.os }}, ${{ inputs.scope || 'native-membership' }})
-    if: github.event_name != 'workflow_dispatch' || inputs.scope != 'root'
+    if: github.event_name != 'workflow_dispatch' || (inputs.scope != 'root' && inputs.scope != 'indexed-archive-predecessor')
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:

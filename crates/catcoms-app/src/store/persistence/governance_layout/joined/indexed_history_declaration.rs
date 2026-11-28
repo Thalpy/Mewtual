@@ -25,6 +25,16 @@ use shared_history::{SelectedSharedHistory, INDEXED_MARKER_NAME};
 pub(in crate::store) const CLAIM_STAGE_NAME: &str =
     "chat-critical-namespaces.indexed-shared-history.claim";
 
+#[cfg(test)]
+thread_local! {
+    static INTERRUPT_AFTER_CLAIM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(in crate::store) fn interrupt_after_indexed_claim_for_test() {
+    INTERRUPT_AFTER_CLAIM.with(|interrupt| interrupt.set(true));
+}
+
 const _: () = assert!(
     critical_namespaces::indexed_shared_history_namespace::bootstrap::MAX_SEED
         <= governance::codec::MAX_SEED_FRAME
@@ -263,6 +273,10 @@ impl IndexedHistoryDeclaration {
                 absent(&stage)?;
             }
             self.cover_claim(store, &claim)?;
+            #[cfg(test)]
+            if INTERRUPT_AFTER_CLAIM.with(|interrupt| interrupt.replace(false)) {
+                return Err(denied());
+            }
             self.require_preselection(store, &claim)?;
             let marker = fixed(store, false, INDEXED_MARKER_NAME)?;
             self.cover_marker(store, &marker, &selected.marker)?;

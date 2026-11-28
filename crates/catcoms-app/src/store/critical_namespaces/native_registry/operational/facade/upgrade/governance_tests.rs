@@ -676,6 +676,104 @@ fn indexed_history_physical_refuses_the_replaced_mounted_id8_parent_before_any_w
 }
 
 #[test]
+#[ignore = "writes the owned fixture set for the pinned predecessor executable"]
+fn generate_indexed_history_predecessor_fixtures() {
+    use crate::store::persistence::{
+        governance_layout::joined::{
+            indexed_history_declaration::{
+                interrupt_after_indexed_claim_for_test, CLAIM_STAGE_NAME,
+            },
+            shared_history::{DIRECTORY_NAME, INDEXED_MARKER_NAME},
+        },
+        v2_shared_history::INDEXED_HEAD_NAME,
+    };
+    let root = std::path::PathBuf::from(
+        std::env::var_os("MEWTUAL_INDEXED_HISTORY_FIXTURES").expect("owned fixture root"),
+    );
+    assert!(root.is_absolute());
+    fs::create_dir(&root).unwrap();
+    for (name, seed) in [
+        ("id8", 0xe500),
+        ("claim", 0xe501),
+        ("stage", 0xe502),
+        ("id13", 0xe503),
+    ] {
+        let path = root.join(name);
+        fs::create_dir(&path).unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+        let mut plan = original(&path, &mut rng).prepare_governance().unwrap();
+        plan.retry(&mut rng).unwrap();
+        let mut upgrade = plan.prepare_joined_vault().unwrap();
+        upgrade.retry_with_shared_history(&mut rng).unwrap();
+        let current = path.join(Slot::Current.name());
+        let original_current = fs::read(&current).unwrap();
+        if name == "claim" || name == "stage" {
+            let interrupted = path.join("chat-critical-namespaces.rejoin.stage");
+            if name == "claim" {
+                // Stop after the predecessor-visible claim is durable, before
+                // any marker, new Head or catalog Stage can cause a refusal.
+                interrupt_after_indexed_claim_for_test();
+            } else {
+                // Halt after the exact admitted catalog Stage with the real
+                // successor exclusion, then leave its recoverable names alone.
+                let named = interrupted.clone();
+                governance::set_stage_selection_hook_for_test(Box::new(move || {
+                    fs::write(named, b"predecessor fixture pause").unwrap();
+                }));
+            }
+            assert!(upgrade.retry_with_indexed_history(&mut rng).is_err());
+            assert!(path.join(governance::GOVERNANCE_SEED).is_file());
+            assert_eq!(fs::read(&current).unwrap(), original_current);
+            assert!(!path.join(CLAIM_STAGE_NAME).exists());
+            let has_stage = name == "stage";
+            assert_eq!(path.join(Slot::Stage.name()).is_file(), has_stage);
+            assert_eq!(path.join(INDEXED_MARKER_NAME).is_file(), has_stage);
+            assert_eq!(
+                path.join(DIRECTORY_NAME).join(INDEXED_HEAD_NAME).is_file(),
+                has_stage
+            );
+            if has_stage {
+                fs::remove_file(interrupted).unwrap();
+            }
+        } else {
+            if name == "id13" {
+                upgrade.retry_with_indexed_history(&mut rng).unwrap();
+            }
+            let vault = upgrade.into_vault().unwrap();
+            assert_eq!(vault.row_count_data().unwrap(), 0);
+            drop(vault);
+        }
+    }
+    println!("indexed history predecessor fixtures: 4 written");
+}
+
+#[test]
+#[ignore = "reopens the exact fixture set after the pinned predecessor executable"]
+fn recover_indexed_history_predecessor_fixtures() {
+    use crate::store::persistence::governance_layout::joined::shared_history::INDEXED_MARKER_NAME;
+
+    let root = std::path::PathBuf::from(
+        std::env::var_os("MEWTUAL_INDEXED_HISTORY_FIXTURES").expect("owned fixture root"),
+    );
+    assert!(root.is_absolute());
+    for name in ["claim", "stage", "id13"] {
+        let path = root.join(name);
+        let mounted = NativeTextJoinedStorage::open_for_indexed_native_startup(
+            &path,
+            SECRET,
+            &mut NeverRng,
+            current_policy(),
+        )
+        .unwrap();
+        assert_eq!(mounted.row_count_data().unwrap(), 0);
+        assert!(path.join(INDEXED_MARKER_NAME).is_file());
+        assert!(!path.join(governance::GOVERNANCE_SEED).exists());
+        assert!(!path.join(Slot::Stage.name()).exists());
+    }
+    println!("indexed history predecessor fixtures: 3 recovered");
+}
+
+#[test]
 fn governed_joined_pin_warm_selection_keeps_the_original_mount_and_stage() {
     let dir = tempfile::tempdir().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(0xc464);
