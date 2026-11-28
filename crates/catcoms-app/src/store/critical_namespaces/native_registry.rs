@@ -57,7 +57,8 @@ pub use operational::{
     NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests,
     NativeTextColdFounderMemberIngress, NativeTextColdFounderMemberReceiver,
     NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt,
-    NativeTextColdFounderSource,
+    NativeTextColdFounderSource, NativeTextFounderReviewExchange, NativeTextFounderReviewPage,
+    NativeTextFounderReviewReply, NativeTextFounderReviewResult, NativeTextFounderReviewSweep,
 };
 pub use operational::{
     NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,

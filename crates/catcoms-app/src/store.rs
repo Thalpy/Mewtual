@@ -102,7 +102,8 @@ pub use critical_namespaces::{
     NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests,
     NativeTextColdFounderMemberIngress, NativeTextColdFounderMemberReceiver,
     NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt,
-    NativeTextColdFounderSource,
+    NativeTextColdFounderSource, NativeTextFounderReviewExchange, NativeTextFounderReviewPage,
+    NativeTextFounderReviewReply, NativeTextFounderReviewResult, NativeTextFounderReviewSweep,
 };
 pub use critical_namespaces::{
     NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,

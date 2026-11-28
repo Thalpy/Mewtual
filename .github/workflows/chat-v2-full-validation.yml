@@ -228,6 +228,11 @@ jobs:
               ('native-membership-parser', 'native_text::membership::tests::native_membership_requires_the_exact_admission', 1),
               ('native-membership-dispatch', 'native_text::tests::native_text_membership_dispatch_uses_the_original_founder_row', 1),
           ]
+          held_review = [
+              ('native-held-review-lock', 'native_text::tests::held_review_does_not_adopt_an_unlock_after_router_admission', 1),
+              ('native-held-review-deadline', 'native_text::membership::review::tests::review_deadline_starts_before_task_poll_and_preserves_the_original_cancellation', 1),
+              ('native-held-review-authority', 'native_text::membership::review::tests::a_new_limit_preserves_an_earlier_request_authority', 1),
+          ]
           two_row_founders = [
               ('native-found-two-rows', 'native_text::tests::native_text_found_router_installs_two_original_rows_retries_and_releases_real_files', 1),
               ('native-listing-two-rows', 'native_text::tests::native_listing_empty_unlock_and_two_real_rows_resume_with_exact_contexts', 1),
@@ -239,7 +244,7 @@ jobs:
           ] + membership
           scope = os.environ['CHAT_V2_NATIVE_SCOPE']
           if scope == 'native-membership':
-              cases = membership + two_row_founders + [
+              cases = membership + held_review + two_row_founders + [
                   ('native-archive-debt', 'server_table::tests::joined_archive_debt_stays_targeted_and_recovers_exactly', 1),
                   ('native-join-history-startup', 'native_text::tests::native_text_connected_join_gated_route_publishes_one_original_joined_row', 1),
                   ('native-dependency-after-add', 'native_text::tests::native_text_joined_dependency_provider_reopens_after_selected_add', 1),
@@ -267,7 +272,7 @@ jobs:
                   1,
               )] + membership
           elif scope == 'native-review':
-              cases = two_row_founders + [
+              cases = held_review + two_row_founders + [
                   ('native-join-history-startup', 'native_text::tests::native_text_connected_join_gated_route_publishes_one_original_joined_row', 1),
                   ('native-dependency-after-add', 'native_text::tests::native_text_joined_dependency_provider_reopens_after_selected_add', 1),
                   ('native-snapshot-ack', 'native_text::tests::native_snapshot_foreign_origin_loss_can_be_acknowledged_without_writing_either_vault', 1),

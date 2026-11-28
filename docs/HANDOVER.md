@@ -1,5 +1,22 @@
 # Mewtual; Handover
 
+## Recover removed-member posts for founder review
+
+The reopened founder can check one explicitly chosen current member over
+its existing authenticated connection. The request names the original
+removed Admission. The holder offers only that Admission's archived
+Creates. The founder verifies each exact original against the selected
+Remove and checks its own history before holding the post. A duplicate
+keeps the first held original and an independently retained message
+stays in ordinary history.
+
+The three-vault TCP test closes the original founder connection, reopens
+the vault, and retrieves the same removed member's original twice through
+the surviving peer. It checks that the normal message view cannot read
+that post. The main-window command is wired behind the disabled Chat V2
+switch. The review screen, durable decisions and first-session founder
+provisioning remain open.
+
 ## Encrypted storage for removed-member hold cases
 
 A verified founder vault can open a selected review namespace with the
@@ -19,8 +36,7 @@ leaves still agree, with no declaration outputs present.
 The storage entry keeps the ordinary archive locked across the clean
 absence check and hold selection. An independently selected original
 keeps its place in history. First-session founder provisioning,
-approved-holder delivery, signed decisions and the admin view remain
-open. Chat V2 remains disabled.
+signed decisions and the admin view remain open. Chat V2 remains disabled.
 
 ## Rejoin from the retired native session
 
