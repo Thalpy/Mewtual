@@ -2,9 +2,10 @@
 //! writer checks prior membership and authenticates a separate admission tag
 //! after covering the prepared bytes.
 use super::{
+    approval::MAX_APPROVAL_FRAME,
     header::{MAX_FORK_BYTES, MAX_HEADER_BYTES},
     index::{Update, MAX_PAGES},
-    lane_head::HEAD_BYTES,
+    lane_head::{LaneHead, MAX_HEAD_BYTES},
     manifest::MAX_MANIFEST_BYTES,
     *,
 };
@@ -33,10 +34,11 @@ const MAX_CANDIDATE_BYTES: usize = FRAME_HEADER
     + MAX_PIN
     + 2 * (4 + MAX_MANIFEST_BYTES)
     + 4
-    + HEAD_BYTES
+    + MAX_HEAD_BYTES
     + 1
     + 4
     + MAX_FORK_BYTES
+    + MAX_APPROVAL_FRAME
     + 2 * MAX_DELTA;
 pub(super) const MAX_WAL_BYTES: usize = MAX_CANDIDATE_BYTES + ADMISSION_BYTES;
 const _: () = assert!(MAX_WAL_BYTES <= MAX_FILE);
@@ -106,6 +108,11 @@ impl JournalKey {
             PreparedEffect::Fork(frame) => {
                 input.put_u8(1);
                 input.put_bytes(frame).map_err(|_| denied())?;
+            }
+            PreparedEffect::Approval { frame, path } => {
+                input.put_u8(2);
+                input.put_bytes(frame).map_err(|_| denied())?;
+                encode_path(&mut input, path)?;
             }
         }
         let plain = Zeroizing::new(input.finish());
@@ -188,6 +195,10 @@ pub(super) enum PreparedEffect<'a> {
         paths: &'a [Update; 2],
     },
     Fork(&'a [u8]),
+    Approval {
+        frame: &'a [u8],
+        path: &'a Update,
+    },
 }
 
 impl PreparedEffect<'_> {
@@ -195,19 +206,15 @@ impl PreparedEffect<'_> {
         match self {
             Self::Header { frame, paths } => {
                 require_frame(frame, MAX_HEADER_BYTES)?;
-                paths.iter().try_fold(1 + frame.len(), |total, path| {
-                    require_path_count(path.old.len(), path.new.len())?;
-                    let cost = total + 2 + path.old.len() * REF_BYTES;
-                    path.new.iter().try_fold(cost, |done, page| {
-                        let raw = page.frame.as_bytes();
-                        require_frame(raw, MAX_INDEX_FRAME_BYTES)?;
-                        Ok(done + REF_BYTES + 4 + raw.len())
-                    })
-                })
+                Ok(1 + frame.len() + path_bytes(&paths[0])? + path_bytes(&paths[1])?)
             }
             Self::Fork(frame) => {
                 require_frame(frame, MAX_FORK_BYTES)?;
                 Ok(1 + frame.len())
+            }
+            Self::Approval { frame, path } => {
+                require_frame(frame, MAX_APPROVAL_FRAME)?;
+                Ok(1 + frame.len() + path_bytes(path)?)
             }
         }
     }
@@ -227,6 +234,10 @@ pub(super) enum Effect<'a> {
         paths: [PathDelta<'a>; 2],
     },
     Fork(&'a [u8]),
+    Approval {
+        frame: &'a [u8],
+        path: PathDelta<'a>,
+    },
 }
 
 pub(super) struct PathDelta<'a> {
@@ -266,6 +277,13 @@ impl<'a> WriteAhead<'a> {
                 require_frame(output, MAX_FORK_BYTES)?;
                 Effect::Fork(output)
             }
+            2 => {
+                require_frame(output, MAX_APPROVAL_FRAME)?;
+                Effect::Approval {
+                    frame: output,
+                    path: read_path(&mut input)?,
+                }
+            }
             _ => return Err(denied()),
         };
         input.finish().map_err(|_| denied())?;
@@ -292,6 +310,16 @@ fn encode_path(output: &mut Encoder, path: &Update) -> Result<(), AppError> {
             .map_err(|_| denied())?;
     }
     Ok(())
+}
+
+fn path_bytes(path: &Update) -> Result<usize, AppError> {
+    require_path_count(path.old.len(), path.new.len())?;
+    let base = 2 + path.old.len() * REF_BYTES;
+    path.new.iter().try_fold(base, |total, page| {
+        let frame = page.frame.as_bytes();
+        require_frame(frame, MAX_INDEX_FRAME_BYTES)?;
+        Ok(total + REF_BYTES + 4 + frame.len())
+    })
 }
 
 fn read_path<'a>(input: &mut Decoder<'a>) -> Result<PathDelta<'a>, AppError> {
@@ -337,7 +365,7 @@ fn require_path_count(old: usize, new: usize) -> Result<(), AppError> {
 }
 
 fn check_source(scope: &[u8; 32], manifests: &[&[u8]; 2], head: &[u8]) -> Result<(), AppError> {
-    if scope == &[0; 32] || manifests[0] == manifests[1] || head.len() != HEAD_BYTES {
+    if scope == &[0; 32] || manifests[0] == manifests[1] || !LaneHead::valid_width(head.len()) {
         return Err(denied());
     }
     for bytes in manifests {
@@ -367,6 +395,7 @@ fn read_ref(input: &mut Decoder<'_>) -> Result<NodeRefData, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::persistence::governance_layout::joined::review_receive::lane_head::HEAD_BYTES;
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
 

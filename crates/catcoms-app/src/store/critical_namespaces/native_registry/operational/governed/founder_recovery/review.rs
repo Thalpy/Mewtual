@@ -3,7 +3,6 @@
 use super::*;
 use crate::store::critical_namespaces::CatalogReadReservation;
 use crate::store::persistence::native_registry::network::NetworkDependency;
-use crate::store::persistence::v2_member_outbox::{member_outbox_key, MemberOutboxContextId};
 use crate::store::persistence::v2_member_transport::{
     replay_local_member_dependencies, HISTORY_DEPENDENCY_READS,
 };
@@ -407,7 +406,6 @@ impl NativeTextColdFounderSource {
         rng: &mut impl CryptoRngCore,
     ) -> Result<Option<()>, AppError> {
         let scope = self.history_scope(sweep.channel)?;
-        let outbox_context = self.outbox_context()?.id();
         let (work, selection, source) = (&self.work, &self.selection, &self.source);
         let governed = self.governed.as_mut().ok_or_else(refused)?;
         let current = || {
@@ -437,10 +435,11 @@ impl NativeTextColdFounderSource {
                     require()
                 };
                 let ancestry = review_ancestry(
-                    (store, scope, outbox_context),
+                    (store, scope, selection, source),
                     (verifier, group, frozen),
                     (author, exact),
                     &mut require_current,
+                    rng,
                 )?;
                 let derive = |bytes: &[u8]| ancestry.evidence(verifier, author, bytes);
                 let evidence = derive(exact)?;
@@ -496,7 +495,12 @@ impl ReviewAncestry<'_> {
 /// absence guard. This path can retain a reply with missing ancestry for
 /// review. The actual Approve body refuses until the parent is verified.
 pub(super) fn review_ancestry<'a>(
-    (store, scope, outbox_context): (&ServerStore, SharedHistoryScope, MemberOutboxContextId),
+    (store, scope, selection, source): (
+        &ServerStore,
+        SharedHistoryScope,
+        &ColdFounderSelection,
+        &RetainedBootstrapSourceData,
+    ),
     (verifier, group, frozen): (
         &V2GeneralPrefixVerifier,
         &ProjectionGroupView,
@@ -504,6 +508,7 @@ pub(super) fn review_ancestry<'a>(
     ),
     (author, exact): (&V2FrozenAdmission, &[u8]),
     require_current: &mut dyn FnMut() -> Result<(), AppError>,
+    rng: &mut dyn CryptoRngCore,
 ) -> Result<ReviewAncestry<'a>, AppError> {
     let realm = Realm::new(&scope.group, scope.channel).map_err(|_| refused())?;
     let mut ledger = ChatLedger::new(
@@ -539,17 +544,17 @@ pub(super) fn review_ancestry<'a>(
             ANCESTRY_WORK,
             (store, scope),
             |id| {
-                use crate::store::V2MemberSaveRefusal as Refusal;
-                let Some(outbox) = store
-                    .installed_member_outbox_mount()
-                    .map_err(|_| Refusal::Busy)?
-                else {
-                    return Ok(None);
-                };
-                let key = member_outbox_key(store).map_err(|_| Refusal::Unavailable)?;
-                outbox
-                    .read_selected_history_action(store, outbox_context, &key, id)
-                    .map_err(|_| Refusal::Busy)
+                // A cold founder may have the ordinary parent in its original outbox
+                // before any feature has opened that lane. Use the same checked lookup
+                // and recovery as ordinary founder history, without creating an outbox.
+                history::saved_dependency(
+                    store,
+                    history::outbox_context(selection, source),
+                    source,
+                    scope,
+                    id,
+                    rng,
+                )
             },
             || require_current().map_err(|_| crate::store::V2MemberSaveRefusal::Stale),
         )

@@ -858,6 +858,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
     let mut saved = None;
     let mut founder_archived = None;
     let mut founder_archive_digest = None;
+    let mut review_reply_parent = None;
     let mut founder_archive_edit = None;
     let mut founder_reply = None;
     let mut founder_debt = None;
@@ -989,6 +990,10 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             .is_some());
         founder_archived = Some(original.action_id_data());
         founder_archive_digest = Some(original.original_digest_for_test());
+        if successor == Some(MountedSuccessor::RemovedReview) {
+            let parent = original.signing_dependency_for_test();
+            review_reply_parent = Some(((*parent.action).clone(), parent.admission));
+        }
         if successor == Some(MountedSuccessor::JoinedLedgerReplay) {
             let mut send = async |draft: V2MemberSignRequest<'_>| {
                 assert_eq!(
@@ -2335,17 +2340,29 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     let mut ledger = recovered_row()
                         .prepare_member_ledger(&selection, channel, fresh.clone())
                         .unwrap();
+                    let (parent, parent_admission) = review_reply_parent
+                        .as_ref().expect("the survivor already selected the founder's ordinary post");
+                    assert_eq!(
+                        recovered_row().replay_saved_member_dependency(
+                            &mut ledger, parent.id(), &fresh, &mut history_rng,
+                        ).unwrap(),
+                        Some(V2OrdinaryReceiveStatus::Retained(ActionState::Valid))
+                    );
+                    let dependency = [crate::store::V2MemberDependency {
+                        action: parent, admission: *parent_admission,
+                    }];
                     let mut selected = Vec::with_capacity(2);
                     for (token, text) in [
                         (0xc0, "Only the surviving member saw this post"),
                         (0xc1, "A separate post from the same removed member"),
                     ] {
-                    let message = catcoms_replication::chat::Body::Create {
-                        text: text.into(), reply_to: None,
-                    };
+                    let reply_to = (token == 0xc0).then_some(parent.id());
+                    let message = catcoms_replication::chat::Body::Create { text: text.into(), reply_to };
                     let late_token = [token; 32];
                     let draft = || V2MemberSignRequest {
-                        token: late_token, channel, body: &message, parents: &[], dependencies: &[],
+                        token: late_token, channel, body: &message,
+                        parents: reply_to.as_slice(),
+                        dependencies: if reply_to.is_some() { &dependency } else { &[] },
                     };
                     assert_eq!(
                         third_row().prepare_member_save(&third_selection, draft(), &fresh, &mut third_rng),
@@ -2767,10 +2784,12 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         assert_eq!(record.signed.id(), action);
                         assert_eq!(record.admission, third_own);
                         assert_eq!(record.removal, (removed_head, removed_epoch));
+                        let original_parent = review_reply_parent.as_ref().unwrap().0.id();
                         assert!(matches!(
                             &record.signed.spec().body,
-                            Body::Create { text, reply_to: None }
+                            Body::Create { text, reply_to: Some(parent) }
                                 if text == "Only the surviving member saw this post"
+                                && *parent == original_parent
                         ));
                         let coordinates = |record: &crate::store::NativeTextHeldCase| crate::store::persistence::v2_review_hold::HeldCase {
                             id: record.case,
@@ -3075,6 +3094,12 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     let settled = crate::store::NativeTextJoinedStorage::open_for_native_startup(
                         founder_dir.path(), SECRET, &mut history_rng, current_policy(),
                     ).unwrap().prepare_recovered_founder().map_err(|(_, error)| error).unwrap();
+                    let original_parent = review_reply_parent.as_ref().unwrap().0.id();
+                    assert_eq!(
+                        settled.review_parent_storage_for_test(channel, original_parent).unwrap(),
+                        (false, false),
+                        "approval must find the founder's original parent in its cold outbox"
+                    );
                     let (vault, sources, recovered_row) = mount(settled);
                     let advance = |request| sources.capture_member(
                         &recovered_row, command(&vault, &founder_budget),
@@ -3196,10 +3221,21 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                             Ok(())
                         }).unwrap();
                     }
+                    use crate::store::NativeTextReviewApprovalStatus as ApprovalStatus;
+                    let approval_query = ReviewStreamQuery::Approval {
+                        sequence: approved.position_data().sequence,
+                        entry: approved.id(),
+                        channel,
+                    };
+                    let early = read(approval_query, &mut provider, &mut history_rng, &fresh).await;
+                    assert_eq!(
+                        survivor().select_review_delivery_approval(&selection, early, &fresh, &mut history_rng).unwrap(),
+                        Some(ApprovalStatus::WaitingForHeader(1))
+                    );
                     {
                         use crate::store::NativeTextReviewHeaderStatus as Received;
                         use crate::store::persistence::governance_layout::joined::review_receive::{
-                            with_receiver_fault, ReceiverFault,
+                            with_receiver_fault, with_receiver_hook, ReceiverFault,
                         };
                         let received = dir.path().join("chat-v2-review-received");
                         let manifest = received.join("manifest.current");
@@ -3231,9 +3267,19 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                                 moved_partial = Some(partial);
                             }
                         }
+                        let (cancel, cancelled) = tokio::sync::watch::channel(false);
+                        let original_scope = RequestCancellation::new(cancelled, None);
+                        let stale = read(ReviewStreamQuery::Header(3), &mut provider, &mut history_rng, &original_scope).await;
+                        let (refused, reached) = with_receiver_hook(
+                            ReceiverFault::ManifestSelected,
+                            move || { cancel.send(true).unwrap(); },
+                            || survivor().select_review_delivery_header(&selection, stale, &fresh, &mut history_rng),
+                        );
+                        assert!(refused.is_err() && reached);
+                        assert!(!pending.exists());
                         let wire = read(ReviewStreamQuery::Header(3), &mut provider, &mut history_rng, &fresh).await;
                         assert_eq!(survivor().select_review_delivery_header(&selection, wire, &fresh, &mut history_rng).unwrap(),
-                            Some(Received::Covered));
+                            Some(Received::Duplicate));
                         assert_eq!(std::fs::read(foreign).unwrap(), b"CTV2");
                         assert_eq!(std::fs::read(moved_partial.unwrap()).unwrap(), b"CTV2");
                     }
@@ -3259,6 +3305,47 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         assert_eq!(record.decision_data().original_data().remove_header, removed_head);
                         Ok(())
                     }).unwrap();
+                    let approval_receipt = {
+                        use crate::store::persistence::governance_layout::joined::review_receive::{
+                            with_receiver_fault, with_receiver_hook, ReceiverFault,
+                        };
+                        let ordinary_before = survivor().archived_message_projection(
+                            &selection, channel, action, fresh.clone(), &mut history_rng,
+                        ).unwrap().is_some();
+                        let original = read(approval_query, &mut provider, &mut history_rng, &fresh).await;
+                        let (interrupted, reached) = with_receiver_fault(ReceiverFault::AdmittedHeader, || {
+                            survivor().select_review_delivery_approval(&selection, original, &fresh, &mut history_rng)
+                        });
+                        assert!(interrupted.is_err() && reached);
+                        let recipient = dir.path().join("chat-v2-review-received");
+                        let pending = recipient.join("selection.pending");
+                        assert!(pending.is_file());
+                        let (cancel, cancelled) = tokio::sync::watch::channel(false);
+                        let original_scope = RequestCancellation::new(cancelled, None);
+                        let stale = read(approval_query, &mut provider, &mut history_rng, &original_scope).await;
+                        let (refused, reached) = with_receiver_hook(
+                            ReceiverFault::ManifestSelected,
+                            move || { cancel.send(true).unwrap(); },
+                            || survivor().select_review_delivery_approval(&selection, stale, &fresh, &mut history_rng),
+                        );
+                        assert!(refused.is_err() && reached);
+                        assert!(!pending.exists(), "only the old reply lost authority");
+                        let retry = read(approval_query, &mut provider, &mut history_rng, &fresh).await;
+                        assert_eq!(
+                            survivor().select_review_delivery_approval(&selection, retry, &fresh, &mut history_rng).unwrap(),
+                            Some(ApprovalStatus::Duplicate(action))
+                        );
+                        assert!(!pending.exists());
+                        assert_eq!(survivor().archived_message_projection(
+                            &selection, channel, action, fresh.clone(), &mut history_rng,
+                        ).unwrap().is_some(), ordinary_before);
+                        let lane = std::fs::read_dir(&recipient).unwrap().map(|entry| entry.unwrap().path())
+                            .find(|path| path.is_dir()).unwrap();
+                        let receipt = std::fs::read_dir(lane).unwrap().map(|entry| entry.unwrap().path())
+                            .find(|path| path.extension().is_some_and(|extension| extension == "receipt")).unwrap();
+                        let exact = std::fs::read(&receipt).unwrap();
+                        (receipt, exact)
+                    };
                     let (cancel, revoked) = tokio::sync::watch::channel(false);
                     let review_scope = RequestCancellation::new(revoked, None);
                     let delivered = read(ReviewStreamQuery::Header(1), &mut provider, &mut history_rng, &review_scope).await;
@@ -3299,6 +3386,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     assert!(!recovered_receiver.select_review_storage_before_joined_startup(&mut history_rng).unwrap());
                     assert!(!pending.exists());
                     assert_ne!(std::fs::read(&manifest).unwrap(), before);
+                    assert_eq!(std::fs::read(approval_receipt.0).unwrap(), approval_receipt.1);
                     drop(recovered_receiver);
                     retire(vault, sources, recovered_row).await;
                     // Lose every child of the original mounted journal,

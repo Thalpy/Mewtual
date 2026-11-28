@@ -34,6 +34,23 @@ pub(super) fn original_review_anchor(
 
 impl NativeTextColdFounderSource {
     #[cfg(test)]
+    pub(in crate::store) fn review_parent_storage_for_test(
+        &self,
+        channel: u128,
+        parent: catcoms_replication::chat::ActionId,
+    ) -> Result<(bool, bool), AppError> {
+        let scope = self.history_scope(channel)?;
+        self.work
+            .with_recovered_founder_store(&self.selection, &self.source, |store| {
+                let outbox_is_installed = store.installed_member_outbox_mount()?.is_some();
+                let parent_is_archived = store
+                    .read_selected_shared_history_ancestor(scope, parent)?
+                    .is_some();
+                Ok((outbox_is_installed, parent_is_archived))
+            })
+    }
+
+    #[cfg(test)]
     pub(in crate::store) fn require_review_anchor_for_test(
         &mut self,
         anchor: (OwnerHeaderId, u64),
@@ -65,7 +82,6 @@ impl NativeTextColdFounderSource {
         }
         self.restore_first_add(caller)?;
         let scope = self.history_scope(request.channel)?;
-        let outbox = self.outbox_context()?.id();
         let (_, _ancestry_fee) = self.work.recovered_founder_resources(review::VERIFY_FEE)?;
         let (work, selection, source) = (&self.work, &self.selection, &self.source);
         let governed = self.governed.as_mut().ok_or_else(refused)?;
@@ -121,10 +137,11 @@ impl NativeTextColdFounderSource {
                     let author = review::frozen_author(frozen, author_data.context.admission)?;
                     let raw_original = held.original_bytes_data();
                     let ancestry = review::review_ancestry(
-                        (store, scope, outbox),
+                        (store, scope, selection, source),
                         (verifier, group, frozen),
                         (author, raw_original),
                         &mut || check(None),
+                        rng,
                     )?;
                     let evidence = ancestry.evidence(verifier, author, raw_original)?;
                     let decision = ExactReviewDecisionBody::new(

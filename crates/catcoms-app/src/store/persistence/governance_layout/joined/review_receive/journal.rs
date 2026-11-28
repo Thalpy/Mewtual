@@ -1,12 +1,13 @@
 //! Select one checked signed header or freeze on a retained contradiction.
 //! Durable review custody is independent of ordinary archive selection.
 use super::{
+    approval,
     header::ReceiverKey,
     index::{Indexes, Query},
     lane_head::LaneHead,
     manifest::{ManifestKey, ReviewScope, SelectedLane},
     objects::{lane_directory_name, HeldLane, HeldObject, MAX_VIEW_FILES},
-    plan::{ReviewLaneRead, ReviewPlan},
+    plan::{ApprovalSelection, ReviewLaneRead, ReviewPlan},
     transaction_check::TransactionScope,
     wal::{JournalKey, PreparedEffect, WriteAhead, MAX_WAL_BYTES},
     write::{finish_covered_effect, MANIFEST_STAGE, WAL_NAME},
@@ -19,10 +20,10 @@ use crate::store::persistence::v2_member_outbox::fs::{
 use catcoms_replication::chat::{
     cold_index::MAX_INDEX_FRAME_BYTES,
     join_bindings::GenesisAnchorBindingData,
-    owner_bodies::{ReviewStreamEntry, ReviewStreamPosition},
+    owner_bodies::{ReviewStreamEntry, ReviewStreamPosition, ReviewStreamRecord},
     owner_facts::OwnerFactId,
     owner_header::{OwnerHeaderId, OwnerStateCommitment, OwnerTenureId},
-    FounderGenesisAnchorData,
+    ActionId, FounderGenesisAnchorData,
 };
 use catcoms_rt::CryptoRngCore;
 
@@ -34,6 +35,15 @@ pub enum NativeTextReviewHeaderStatus {
     Covered,
     Duplicate,
     WaitingFor(u64),
+    Frozen,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeTextReviewApprovalStatus {
+    Covered(ActionId),
+    Duplicate(ActionId),
+    WaitingForHeader(u64),
+    WaitingForReplyParent(ActionId),
     Frozen,
 }
 
@@ -50,6 +60,52 @@ fn pinned_founder(anchor: &GenesisAnchorBindingData) -> FounderGenesisAnchorData
 }
 
 impl SelectedReviewReceiver {
+    pub(super) fn check_approval_header(
+        &self,
+        store: &ServerStore,
+        binding: &GenesisAnchorBindingData,
+        header: &ReviewStreamEntry,
+    ) -> Result<ApprovalSelection, AppError> {
+        self.recover_admitted(store)?;
+        let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        let _fee = policy
+            .current
+            .archive
+            .pending
+            .pool
+            .try_reserve(SELECT_WORK)?;
+        let _lease = store._session.retain_for_physical_work();
+        let scope = ReviewScope::derive_data(&store.chat_vault_domain()?, binding)?;
+        let key = Zeroizing::new(store.keys.db_key()?);
+        let marker = self.marker.1.as_slice().try_into().map_err(|_| denied())?;
+        let manifest_key = ManifestKey::new(&key, marker);
+        let lane_key = ReceiverKey::new(&key, marker, scope.as_bytes());
+        let indexes = Indexes::new(&key, scope);
+        let mut manifest = self.read_manifest(store, &manifest_key)?;
+        let mut lane = manifest
+            .data
+            .selected(scope)
+            .map(|row| HeldLane::read(&self.directory, (scope, row), &lane_key))
+            .transpose()?;
+        let read = ReviewLaneRead {
+            head: lane.as_ref().map(|lane| lane.head),
+            key: &lane_key,
+            indexes: &indexes,
+        };
+        let selected = read.select_approval(
+            &pinned_founder(binding),
+            header,
+            |id| lane.as_ref().ok_or_else(denied)?.page(id),
+            |id| lane.as_ref().ok_or_else(denied)?.header(id),
+        )?;
+        if let Some(lane) = lane.as_mut() {
+            lane.require(&self.directory)?;
+        }
+        manifest.require_current(&self.directory)?;
+        self.require(store)?;
+        Ok(selected)
+    }
+
     pub(super) fn recover_admitted(&self, store: &ServerStore) -> Result<(), AppError> {
         self.require(store)?;
         let pending = self.directory.child(WAL_NAME);
@@ -239,6 +295,127 @@ impl SelectedReviewReceiver {
         } else {
             Status::Covered
         })
+    }
+
+    /// Cover the exact original only behind its selected public Approve
+    /// and an independently checked current source and reply ancestry.
+    pub(super) fn select_approval(
+        &self,
+        store: &ServerStore,
+        binding: &GenesisAnchorBindingData,
+        raw: &[u8],
+        mut require: impl FnMut() -> Result<(), AppError>,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<NativeTextReviewApprovalStatus, AppError> {
+        use NativeTextReviewApprovalStatus as Status;
+        require()?;
+        self.recover_admitted(store)?;
+        let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        let _fee = policy
+            .current
+            .archive
+            .pending
+            .pool
+            .try_reserve(SELECT_WORK)?;
+        let _lease = store._session.retain_for_physical_work();
+        let scope = ReviewScope::derive_data(&store.chat_vault_domain()?, binding)?;
+        let pin = pinned_founder(binding);
+        let vault_key = Zeroizing::new(store.keys.db_key()?);
+        let marker = self.marker.1.as_slice().try_into().map_err(|_| denied())?;
+        let manifest_key = ManifestKey::new(&vault_key, marker);
+        let lane_key = ReceiverKey::new(&vault_key, marker, scope.as_bytes());
+        let indexes = Indexes::new(&vault_key, scope);
+        let journal_key = JournalKey::new(&vault_key, marker);
+        let transaction = TransactionScope {
+            scope,
+            pin: &pin,
+            manifest_key: &manifest_key,
+            lane_key: &lane_key,
+            indexes: &indexes,
+        };
+        let record = ReviewStreamRecord::decode(&pin, raw).map_err(|_| denied())?;
+        let action = record.held_data().target_data().spec().action;
+        let mut manifest = self.read_manifest(store, &manifest_key)?;
+        let previous = manifest.data.selected(scope);
+        let mut lane = previous
+            .map(|row| HeldLane::read(&self.directory, (scope, row), &lane_key))
+            .transpose()?;
+        let read = ReviewLaneRead {
+            head: lane.as_ref().map(|lane| lane.head),
+            key: &lane_key,
+            indexes: &indexes,
+        };
+        let read_page = |id| lane.as_ref().ok_or_else(denied)?.page(id);
+        let read_header = |id| lane.as_ref().ok_or_else(denied)?.header(id);
+        let header =
+            match read.select_approval(&pin, record.entry_data(), read_page, read_header)? {
+                ApprovalSelection::WaitingFor(sequence) => {
+                    if let Some(lane) = lane.as_mut() {
+                        lane.require(&self.directory)?;
+                    }
+                    manifest.require_current(&self.directory)?;
+                    require()?;
+                    return Ok(Status::WaitingForHeader(sequence));
+                }
+                ApprovalSelection::Frozen => {
+                    lane.as_mut().ok_or_else(denied)?.require(&self.directory)?;
+                    manifest.require_current(&self.directory)?;
+                    require()?;
+                    return Ok(Status::Frozen);
+                }
+                ApprovalSelection::Selected { row, .. } => row,
+            };
+        let mut lane = lane.ok_or_else(denied)?;
+        if let Some(root) = lane.head.approvals {
+            if let Some(existing) = indexes.lookup_approved(root, action, |id| lane.page(id))? {
+                let sealed = lane.approval(&existing.receipt)?;
+                let stored = approval::open(&lane_key, &pin, &sealed)?;
+                if stored.as_slice() != raw || approval::row(header, &record, &sealed)? != existing
+                {
+                    return Err(denied());
+                }
+                lane.require(&self.directory)?;
+                manifest.require_current(&self.directory)?;
+                require()?;
+                return Ok(Status::Duplicate(action));
+            }
+        }
+        let frame = approval::cover(&lane_key, &pin, record.entry_data(), raw, rng)?;
+        let row = approval::row(header, &record, &frame)?;
+        let path = indexes.prepare_approved(lane.head.approvals, row, |id| lane.page(id), rng)?;
+        let next = lane
+            .head
+            .cover_approval(&lane.sealed_head.bytes, path.root)?;
+        let head_frame = next.seal(&lane_key, rng)?;
+        let sizes = std::iter::once(frame.len())
+            .chain(path.new.iter().map(|page| page.frame.as_bytes().len()));
+        let proposed = SelectedLane::successor(previous, &head_frame, sizes, false)?;
+        manifest.data.replace(scope, previous, proposed)?;
+        let next_manifest = manifest_key.seal(&manifest.data, rng)?;
+        let covered = journal_key.prepare(
+            (scope.as_bytes(), binding),
+            [&manifest.bytes, &next_manifest],
+            &head_frame,
+            PreparedEffect::Approval {
+                frame: &frame,
+                path: &path,
+            },
+            rng,
+        )?;
+        let plain = journal_key.open_candidate(&covered)?;
+        transaction.verify(Some(&lane), &WriteAhead::decode(&plain)?)?;
+        let pending = self.cover_pending(scope, &journal_key, covered, || {
+            self.require(store)?;
+            lane.require(&self.directory)?;
+            manifest.require_current(&self.directory)?;
+            absent(&self.directory.child(MANIFEST_STAGE))?;
+            require()
+        })?;
+        #[cfg(test)]
+        super::fault::cut(ReceiverFault::AdmittedHeader)?;
+        drop((manifest, lane));
+        self.finish_header_transaction(store, &journal_key, pending)?;
+        Ok(Status::Covered(action))
     }
 
     fn cover_pending(

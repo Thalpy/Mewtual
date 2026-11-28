@@ -203,10 +203,25 @@ matching old files survive.
 
 The selector charges retained files against 128 MiB per group and 512 MiB
 per vault, with room reserved to record one contradiction in each lane.
-The original header, fork evidence and index/head frames remain encrypted
-locally. This implementation retains older index frames and charges for
-them. Recipient approval receipts, integration with ordinary projection and
-automatic review polling remain open.
+The original header, fork evidence, receipt and index/head frames remain
+encrypted locally. This implementation retains older index frames and
+charges for them.
+
+An approved original can be selected after its exact public header
+appears in the ordinal and case indexes and the original joined source
+rechecks the decision anchor, frozen Admission, Remove and local reply
+ancestry. A missing parent returns the exact ActionId required for retry.
+On the founder, the same ordinary history lookup can open the existing
+outbox after restart to verify an original parent that the founder signed.
+The lookup does not create an outbox. It applies the ordinary founder,
+channel and group checks and replays the exact signed parent in the
+selected membership prefix.
+The receipt covers the complete signed record in a separate encrypted
+file. Its action index is selected by a versioned lane Head that preserves
+the original public stream position and both header roots. Recovery can
+finish a previously admitted write. The receipt does not select or replace
+an ordinary message. Integration with projection and automatic review
+polling remain open.
 
 ## Exact case transitions
 

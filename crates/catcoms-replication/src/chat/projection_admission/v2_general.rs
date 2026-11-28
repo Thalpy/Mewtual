@@ -29,7 +29,8 @@ mod ordinary;
 mod selected_history;
 mod signing;
 pub use late_review::{
-    V2RemovedCreateEvidence, V2RemovedCreateRecord, MAX_REMOVED_CREATE_RECORD_BYTES,
+    V2CheckedReviewedCreate, V2RemovedCreateEvidence, V2RemovedCreateRecord, V2ReviewedCreateCheck,
+    MAX_REMOVED_CREATE_RECORD_BYTES,
 };
 pub use ordinary::{
     V2GeneralAcceptanceSource, V2LocalArchiveOriginal, V2OrdinaryDependency,

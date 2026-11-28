@@ -2,15 +2,18 @@
 //! response is verified data for a later durable recipient selection.
 use super::dependencies::REPLY_FEE;
 use super::*;
-use crate::store::{NativeTextInvitePacketData, NativeTextReviewHeaderStatus};
+use crate::store::{
+    persistence::governance_layout::joined::review_receive::ApprovalSelection,
+    NativeTextInvitePacketData, NativeTextReviewApprovalStatus, NativeTextReviewHeaderStatus,
+};
 use catcoms_net::{
     NativeChatMemberDependencyExchange, NativeChatMemberDependencyObservation,
     NativeChatMemberInventoryExchange,
 };
 use catcoms_replication::chat::{
-    owner_bodies::ReviewStreamQuery,
+    owner_bodies::{ReviewStreamQuery, ReviewStreamRecord},
     owner_header::{OwnerStateCommitment, OwnerTenureId},
-    FounderGenesisAnchorData,
+    FounderGenesisAnchorData, V2ReviewedCreateCheck,
 };
 use catcoms_rt::TransportError;
 use catcoms_sync::{
@@ -19,6 +22,14 @@ use catcoms_sync::{
 };
 
 type Refusal = V2MemberSaveRefusal;
+
+fn review_storage_refusal(error: AppError) -> Refusal {
+    match error {
+        AppError::ChatV2ArchiveBusy => Refusal::Busy,
+        AppError::ChatV2ReceiveCapacity => Refusal::ReceiveCapacity,
+        _ => Refusal::Failed,
+    }
+}
 
 enum Carrier {
     Header(NativeChatMemberInventoryExchange),
@@ -203,11 +214,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         })?;
         context.require_original(selection)?;
         let result = read(data.as_ref())?;
-        context.require_original(selection)?;
-        self.original
-            .require_current(caller)
-            .map_err(|_| Refusal::Cancelled)?;
-        Ok(result)
+        self.finish_review_result(context, selection, caller, result)
     }
 
     /// Cover public signed review metadata from the original connected
@@ -224,7 +231,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             return Err(Refusal::Failed);
         }
         context.require_original(selection)?;
-        self.with_member_receiver(selection, caller, |source| {
+        let result = self.with_member_receiver(selection, caller, |source| {
             if source.registration.invite != context.invite
                 || source.founder != Some(context.route.provider)
             {
@@ -278,11 +285,179 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                     rng,
                 )
                 .map(Some)
-                .map_err(|error| match error {
-                    AppError::ChatV2ArchiveBusy => Refusal::Busy,
-                    AppError::ChatV2ReceiveCapacity => Refusal::ReceiveCapacity,
-                    _ => Refusal::Failed,
-                })
-        })
+                .map_err(review_storage_refusal)
+        })?;
+        self.finish_review_result(context, selection, caller, result)
+    }
+
+    /// Select the exact approval and original after rechecking the public
+    /// case, removed Admission and verified local reply ancestry. The
+    /// receipt has its own selector and does not populate the chat ledger.
+    pub fn select_review_delivery_approval(
+        &self,
+        selection: &NativeTextJoinedRowSelection,
+        response: NativeTextJoinedReviewResponse,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Option<NativeTextReviewApprovalStatus>, Refusal> {
+        use NativeTextReviewApprovalStatus as Status;
+        let context = &response.context;
+        let ReviewStreamQuery::Approval {
+            sequence,
+            entry,
+            channel,
+        } = context.request.query_data()
+        else {
+            return Err(Refusal::Failed);
+        };
+        let require_live = || {
+            context.require_original(selection)?;
+            self.original
+                .require_current(caller)
+                .map_err(|_| Refusal::Cancelled)
+        };
+        require_live()?;
+        let result = self.with_member_receiver(selection, caller, |source| {
+            if source.registration.invite != context.invite
+                || source.founder != Some(context.route.provider)
+            {
+                return Err(Refusal::Stale);
+            }
+            let response = source
+                .node
+                .open_review_delivery(
+                    source.prefix,
+                    &context.pin,
+                    context.route,
+                    &context.request,
+                    &response.wire,
+                )
+                .map_err(|_| Refusal::Failed)?;
+            let raw = match response {
+                None => return Ok(None),
+                Some(V2ReviewDeliveryData::Approval(raw)) => raw,
+                Some(V2ReviewDeliveryData::Header(_)) => return Err(Refusal::Failed),
+            };
+            let record = ReviewStreamRecord::decode_public_approval(&context.pin, entry, &raw)
+                .map_err(|_| Refusal::Failed)?;
+            let coordinates = record.entry_data().position_data();
+            let membership = (coordinates.membership_header, coordinates.membership_epoch);
+            let target = record.held_data().target_data().spec();
+            if coordinates.sequence != sequence || target.channel != channel {
+                return Err(Refusal::Failed);
+            }
+            let binding = source
+                .node
+                .require_review_membership_anchor(source.prefix, membership)
+                .map_err(|_| Refusal::Stale)?;
+            let remove = record.held_data().removal_data();
+            if source
+                .node
+                .require_review_membership_anchor(source.prefix, remove)
+                .map_err(|_| Refusal::Stale)?
+                != binding
+            {
+                return Err(Refusal::Stale);
+            }
+            let selected = match source
+                .store
+                .check_received_review_approval(binding, record.entry_data())
+                .map_err(review_storage_refusal)?
+            {
+                ApprovalSelection::WaitingFor(sequence) => {
+                    return Ok(Some(Status::WaitingForHeader(sequence)))
+                }
+                ApprovalSelection::Frozen => return Ok(Some(Status::Frozen)),
+                ApprovalSelection::Selected { header, .. } => header,
+            };
+            let verifier = source
+                .prefix
+                .selected_member_verifier()
+                .map_err(|_| Refusal::Unavailable)?;
+            let retired = source
+                .prefix
+                .retired_history_data()
+                .iter()
+                .collect::<Vec<_>>();
+            let author = retired
+                .iter()
+                .copied()
+                .find(|author| author.admission_id_data() == target.context.admission)
+                .ok_or(Refusal::Unavailable)?;
+            // The local dependency walker checks selected ancestry in a
+            // live-mode view. The scratch ledger never issues projection
+            // tokens or contributes to the ordinary message archive.
+            let mut paid = source.fresh_ledger(channel, ReceiverView::Live)?;
+            let arguments = (&*selected, &record);
+            let scope = (&context.pin, membership);
+            let initial = verifier
+                .check_selected_reviewed_create(
+                    scope,
+                    arguments,
+                    author,
+                    (&paid.ledger, &paid.view),
+                    &retired,
+                )
+                .map_err(|_| Refusal::Failed)?;
+            let missing = match initial {
+                V2ReviewedCreateCheck::WaitingForReplyParent(parent) => Some(parent),
+                V2ReviewedCreateCheck::Ready(_) => None,
+            };
+            if let Some(parent) = missing {
+                replay_local_member_dependencies(
+                    std::slice::from_ref(&parent),
+                    (verifier, &retired, &mut paid.ledger, &paid.view),
+                    RECEIVE_WORK,
+                    (source.store, source.history_scope(channel)),
+                    |action| source.read_dependency(channel, action, rng),
+                    require_live,
+                )?;
+            }
+            let checked = match verifier
+                .check_selected_reviewed_create(
+                    scope,
+                    arguments,
+                    author,
+                    (&paid.ledger, &paid.view),
+                    &retired,
+                )
+                .map_err(|_| Refusal::Failed)?
+            {
+                V2ReviewedCreateCheck::WaitingForReplyParent(parent) => {
+                    return Ok(Some(Status::WaitingForReplyParent(parent)))
+                }
+                V2ReviewedCreateCheck::Ready(checked) => checked,
+            };
+            source
+                .store
+                .select_received_review_approval(
+                    binding,
+                    &raw,
+                    || {
+                        require_live().map_err(|_| refused())?;
+                        verifier
+                            .require_current_reviewed_create(&checked, &selected)
+                            .map_err(|_| refused())
+                    },
+                    rng,
+                )
+                .map(Some)
+                .map_err(review_storage_refusal)
+        })?;
+        self.finish_review_result(context, selection, caller, result)
+    }
+
+    fn finish_review_result<T>(
+        &self,
+        context: &Context,
+        selection: &NativeTextJoinedRowSelection,
+        caller: &RequestCancellation,
+        result: T,
+    ) -> Result<T, Refusal> {
+        context.require_original(selection)?;
+        self.original
+            .require_current(caller)
+            .map_err(|_| Refusal::Cancelled)?;
+        Ok(result)
     }
 }

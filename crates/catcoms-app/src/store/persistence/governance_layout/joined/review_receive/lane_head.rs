@@ -7,10 +7,12 @@ use catcoms_rt::CryptoRngCore;
 use catcoms_wire::{Decoder, Encoder};
 
 const TAG: &[u8] = b"catcoms/private-chat-review-receiver-head/v1\0";
+const APPROVAL_TAG: &[u8] = b"catcoms/private-chat-review-receiver-head/v2\0";
 const SEAL_BYTES: usize = 40;
 const ROOT_BYTES: usize = 1 + 1 + 8 + 3 * 36;
 const PLAIN_BYTES: usize = 4 + TAG.len() + 8 + 3 * 36 + 2 * ROOT_BYTES;
 pub(super) const HEAD_BYTES: usize = SEAL_BYTES + PLAIN_BYTES;
+pub(super) const MAX_HEAD_BYTES: usize = HEAD_BYTES + ROOT_BYTES;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct LaneHead {
@@ -18,6 +20,7 @@ pub(super) struct LaneHead {
     pub(super) entry: [u8; 32],
     pub(super) ordinal: NodeRefData,
     pub(super) cases: NodeRefData,
+    pub(super) approvals: Option<NodeRefData>,
     pub(super) predecessor: [u8; 32],
     pub(super) fork: [u8; 32],
 }
@@ -47,6 +50,7 @@ impl LaneHead {
             entry: *signed.id().as_bytes(),
             ordinal,
             cases,
+            approvals: selected.and_then(|(old, _)| old.approvals),
             predecessor,
             fork: [0; 32],
         };
@@ -55,7 +59,7 @@ impl LaneHead {
     }
 
     pub(super) fn freeze(self, original: &[u8], pair: &[u8]) -> Result<Self, AppError> {
-        if self.is_frozen() || original.len() != HEAD_BYTES || pair.is_empty() {
+        if self.is_frozen() || !Self::valid_width(original.len()) || pair.is_empty() {
             return Err(denied());
         }
         let head = Self {
@@ -74,15 +78,53 @@ impl LaneHead {
         self.fork != [0; 32]
     }
 
+    /// Add one exact approved original while keeping both selected public
+    /// indexes and the global stream sequence intact.
+    pub(super) fn cover_approval(
+        self,
+        original: &[u8],
+        approvals: NodeRefData,
+    ) -> Result<Self, AppError> {
+        let next_count = self
+            .approvals
+            .map_or(0, |root| root.summary.keys)
+            .checked_add(1)
+            .ok_or_else(denied)?;
+        if self.is_frozen()
+            || !Self::valid_width(original.len())
+            || approvals.summary.keys != next_count
+        {
+            return Err(denied());
+        }
+        let head = Self {
+            predecessor: manifest::head_digest(original),
+            approvals: Some(approvals),
+            ..self
+        };
+        head.require_shape()?;
+        Ok(head)
+    }
+
+    pub(super) fn valid_width(width: usize) -> bool {
+        width == HEAD_BYTES || width == MAX_HEAD_BYTES
+    }
+
     pub(super) fn seal(
         &self,
         key: &ReceiverKey,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<Zeroizing<Vec<u8>>, AppError> {
         self.require_shape()?;
-        let mut output = Encoder::with_capacity(PLAIN_BYTES);
+        let tag = if self.approvals.is_some() {
+            APPROVAL_TAG
+        } else {
+            TAG
+        };
+        let mut output = Encoder::with_capacity(
+            PLAIN_BYTES + ROOT_BYTES * usize::from(self.approvals.is_some()),
+        );
         output
-            .put_bytes(TAG)
+            .put_bytes(tag)
             .map_err(|_| denied())?
             .put_u64(self.sequence);
         for field in [&self.entry, &self.predecessor, &self.fork] {
@@ -90,16 +132,21 @@ impl LaneHead {
         }
         TextRootData::Present(self.ordinal).encode(&mut output)?;
         TextRootData::Present(self.cases).encode(&mut output)?;
+        if let Some(approvals) = self.approvals {
+            TextRootData::Present(approvals).encode(&mut output)?;
+        }
         key.seal(output, rng)
     }
 
     pub(super) fn open(key: &ReceiverKey, raw: &[u8]) -> Result<Self, AppError> {
-        if raw.len() != HEAD_BYTES {
+        if !Self::valid_width(raw.len()) {
             return Err(denied());
         }
-        let plain = key.open(raw, HEAD_BYTES)?;
+        let plain = key.open(raw, MAX_HEAD_BYTES)?;
         let mut input = Decoder::new(&plain);
-        if input.get_bytes().map_err(|_| denied())? != TAG {
+        let with_approvals = raw.len() == MAX_HEAD_BYTES;
+        let tag = if with_approvals { APPROVAL_TAG } else { TAG };
+        if input.get_bytes().map_err(|_| denied())? != tag {
             return Err(denied());
         }
         let sequence = input.get_u64().map_err(|_| denied())?;
@@ -124,6 +171,7 @@ impl LaneHead {
             fork,
             ordinal: root()?,
             cases: root()?,
+            approvals: if with_approvals { Some(root()?) } else { None },
         };
         input.finish().map_err(|_| denied())?;
         head.require_shape()?;
@@ -133,10 +181,16 @@ impl LaneHead {
     fn require_shape(&self) -> Result<(), AppError> {
         if self.sequence == 0
             || self.entry == [0; 32]
-            || (self.predecessor == [0; 32]) != (self.sequence == 1 && !self.is_frozen())
+            || (self.predecessor == [0; 32])
+                != (self.sequence == 1 && !self.is_frozen() && self.approvals.is_none())
             || self.ordinal.page == self.cases.page
             || self.ordinal.summary.keys != self.sequence
             || !(1..=self.sequence).contains(&self.cases.summary.keys)
+            || self.approvals.is_some_and(|root| {
+                root.page == self.cases.page
+                    || root.page == self.ordinal.page
+                    || !(1..=self.cases.summary.keys).contains(&root.summary.keys)
+            })
         {
             return Err(denied());
         }

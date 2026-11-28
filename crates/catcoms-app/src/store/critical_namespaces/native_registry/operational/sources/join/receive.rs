@@ -198,6 +198,14 @@ struct ReceiverSource<'a, R: CryptoRngCore> {
     founder: Option<PeerId>,
 }
 
+struct PaidReceiverLedger {
+    view: ProjectionView,
+    ledger: ChatLedger,
+    // Receipt checks can fail after replay. Drop all paid state before
+    // making its memory available to another caller on either path.
+    fee: CatalogReadReservation,
+}
+
 pub(in crate::store::critical_namespaces::native_registry) struct NativeTextJoinedSharedHistoryRecord
 {
     pub(in crate::store::critical_namespaces::native_registry) action: ActionId,
@@ -606,46 +614,17 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 let Some(original) = prepare(&source)? else {
                     return Ok(None);
                 };
-                let ReceiverSource {
-                    metadata,
-                    node,
-                    prefix,
-                    view: group,
-                    ..
-                } = source;
-                let fee = metadata
-                    .reserve_join_node(LEDGER_FEE)
-                    .map_err(|_| Refusal::Busy)?;
-                let verifier = prefix
-                    .selected_member_verifier()
+                let mut paid = source.fresh_ledger(channel, mode)?;
+                let observed = source
+                    .node
+                    .observe_member_publication(source.prefix)
                     .map_err(|_| Refusal::Unavailable)?;
-                let group_data = &verifier.replay_data().profile().spec().group;
-                let realm = Realm::new(group_data, channel).map_err(|_| Refusal::Failed)?;
-                let limits = match mode {
-                    ReceiverView::Live => LedgerLimits {
-                        max_actions: MAX_RECEIVED_ACTIONS,
-                        max_action_bytes: MAX_RECEIVED_BYTES,
-                    },
-                    ReceiverView::LocalArchive => ARCHIVED_LEDGER_LIMITS,
-                };
-                let mut ledger = ChatLedger::new(realm, limits).map_err(|_| Refusal::Failed)?;
-                let mut view = match mode {
-                    ReceiverView::Live => ledger.begin_projection_view_in(group),
-                    ReceiverView::LocalArchive => {
-                        ledger.begin_local_archive_projection_view_in(group)
-                    }
-                }
-                .map_err(|_| Refusal::Unavailable)?;
-                if !view.try_ready() {
-                    return Err(Refusal::Busy);
-                }
-                let observed = node
-                    .observe_member_publication(prefix)
-                    .map_err(|_| Refusal::Unavailable)?;
-                let authentication = metadata
+                let authentication = source
+                    .metadata
                     .authentication_negative()
                     .map_err(|_| Refusal::Unavailable)?;
-                let result = populate(&source, &mut ledger, &view, original)?;
+                let result = populate(&source, &mut paid.ledger, &paid.view, original)?;
+                let PaidReceiverLedger { view, ledger, fee } = paid;
                 Ok(Some((view, ledger, observed, authentication, result, fee)))
             })?
         else {
@@ -1051,6 +1030,41 @@ enum ReceiverView {
 }
 
 impl<R: CryptoRngCore> ReceiverSource<'_, R> {
+    fn fresh_ledger(
+        &self,
+        channel: u128,
+        mode: ReceiverView,
+    ) -> Result<PaidReceiverLedger, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let fee = self
+            .metadata
+            .reserve_join_node(LEDGER_FEE)
+            .map_err(|_| Refusal::Busy)?;
+        let verifier = self
+            .prefix
+            .selected_member_verifier()
+            .map_err(|_| Refusal::Unavailable)?;
+        let group_data = &verifier.replay_data().profile().spec().group;
+        let realm = Realm::new(group_data, channel).map_err(|_| Refusal::Failed)?;
+        let limits = match mode {
+            ReceiverView::Live => LedgerLimits {
+                max_actions: MAX_RECEIVED_ACTIONS,
+                max_action_bytes: MAX_RECEIVED_BYTES,
+            },
+            ReceiverView::LocalArchive => ARCHIVED_LEDGER_LIMITS,
+        };
+        let mut ledger = ChatLedger::new(realm, limits).map_err(|_| Refusal::Failed)?;
+        let mut view = match mode {
+            ReceiverView::Live => ledger.begin_projection_view_in(self.view),
+            ReceiverView::LocalArchive => ledger.begin_local_archive_projection_view_in(self.view),
+        }
+        .map_err(|_| Refusal::Unavailable)?;
+        if !view.try_ready() {
+            return Err(Refusal::Busy);
+        }
+        Ok(PaidReceiverLedger { view, ledger, fee })
+    }
+
     fn archived_actions(
         &self,
         channel: u128,

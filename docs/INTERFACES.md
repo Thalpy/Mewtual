@@ -1000,8 +1000,11 @@ intent before consulting the latest case. Joined callers can select a
 checked public header from the original connected response. The recipient
 journal reports a covered header, duplicate, missing predecessor or frozen
 review lane. An exact approved body is available over the founder route.
-Its recipient receipt, message projection and native admin commands remain
-open.
+The joined recipient can save the original as an encrypted review receipt
+after the selected header, historical Remove and reply parent agree. Its
+result distinguishes saved, duplicate, waiting for a header, waiting for a
+reply parent and frozen. Message projection and native admin commands
+remain open.
 [Exact contract](communication-recovery/CHAT-OWNER-V2-REVIEW-DECISION.md).
 
 ## Guarded current chat projection core (5 November; authored, unexecuted)

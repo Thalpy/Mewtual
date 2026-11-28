@@ -21,8 +21,10 @@ use a group-wide exporter and proceed across the founder's open channels.
 An approval additionally names the post's channel and exact entry. The
 original founder retains Reject and Reopen bodies. The joined source
 checks the decision's exact membership anchor and the approval's Remove
-against its own selected prefix. Durable case selection and the receiver's
-own reply ancestry are still required for a chat effect.
+against its own selected prefix. A founder can reopen its own selected
+outbox to verify a reply parent after restart. A joined receiver covers the
+exact approved original after its public case and ordinary reply ancestry
+are verified. This receipt leaves ordinary history unchanged.
 [Review flow](communication-recovery/CHAT-OWNER-V2-REVIEW-DECISION.md#founder-review-stream).
 
 Security prerequisite: an incoming subscription retries retained publication

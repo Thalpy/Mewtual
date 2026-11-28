@@ -425,7 +425,7 @@ pub(super) fn saved_dependency(
     original: &RetainedBootstrapSourceData,
     scope: SharedHistoryScope,
     id: ActionId,
-    rng: &mut impl CryptoRngCore,
+    rng: &mut dyn CryptoRngCore,
 ) -> Result<Option<MemberSavedOriginal>, V2MemberSaveRefusal> {
     use V2MemberSaveRefusal as Refusal;
     let founder = original

@@ -3,8 +3,8 @@
 use super::{manifest::ReviewScope, *};
 use crate::store::persistence::v2_text::{
     private_index::{
-        encode_private_leaf_data, PrivateIndexContextData, PrivateIndexKindData,
-        PrivateIndexLeafRowData, PrivateIndexPathData, PrivateIndexValueData,
+        encode_private_leaf_data, ApprovedReviewIndexValueData, PrivateIndexContextData,
+        PrivateIndexKindData, PrivateIndexLeafRowData, PrivateIndexPathData, PrivateIndexValueData,
         ReceivedReviewIndexValueData,
     },
     TextContextIdData,
@@ -14,6 +14,7 @@ use catcoms_replication::chat::{
         NodePlacementData, NodeRefData, NodeSummaryData, MAX_INDEX_FRAME_BYTES, MAX_INDEX_HEIGHT,
     },
     owner_bodies::{ReviewCaseId, ReviewStreamEntry},
+    ActionId,
 };
 use catcoms_rt::CryptoRngCore;
 use catcoms_storage::private_chat_page::{
@@ -43,6 +44,8 @@ pub(super) struct Update {
     pub(super) new: Vec<Page>,
     pub(super) old: Vec<NodeRefData>,
 }
+
+type PageWriter<'a> = dyn FnMut(&[u8], NodeSummaryData) -> Result<NodeRefData, AppError> + 'a;
 
 impl Indexes {
     pub(super) fn new(base: &[u8; 32], scope: ReviewScope) -> Self {
@@ -97,8 +100,35 @@ impl Indexes {
         read: impl FnMut(PrivateChatPageId) -> Result<Zeroizing<Vec<u8>>, AppError>,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<Update, AppError> {
+        self.prepare_update(rng, |output| {
+            self.rewrite(query, source, rows, read, output)
+        })
+    }
+
+    pub(super) fn prepare_approved(
+        &self,
+        source: Option<NodeRefData>,
+        row: ApprovedReviewIndexValueData,
+        read: impl FnMut(PrivateChatPageId) -> Result<Zeroizing<Vec<u8>>, AppError>,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<Update, AppError> {
+        let (context, key) = self.approval_coordinates(row.action);
+        let data = PrivateIndexLeafRowData {
+            key,
+            value: PrivateIndexValueData::ApprovedReview(row),
+        };
+        self.prepare_update(rng, |output| {
+            self.rewrite_row(context, source, (None, data), read, output)
+        })
+    }
+
+    fn prepare_update(
+        &self,
+        rng: &mut dyn CryptoRngCore,
+        rewrite: impl FnOnce(&mut PageWriter<'_>) -> Result<(NodeRefData, Vec<NodeRefData>), AppError>,
+    ) -> Result<Update, AppError> {
         let mut new = Vec::with_capacity(MAX_PAGES);
-        let (root, old) = self.rewrite(query, source, rows, read, |plain, summary| {
+        let (root, old) = rewrite(&mut |plain, summary| {
             if new.len() == MAX_PAGES {
                 return Err(denied());
             }
@@ -124,11 +154,39 @@ impl Indexes {
         (root, exact): (NodeRefData, &[(NodeRefData, &[u8])]),
         read: impl FnMut(PrivateChatPageId) -> Result<Zeroizing<Vec<u8>>, AppError>,
     ) -> Result<Vec<NodeRefData>, AppError> {
+        self.verify_update(root, exact, |output| {
+            self.rewrite(query, source, rows, read, output)
+        })
+    }
+
+    pub(super) fn require_approved_delta(
+        &self,
+        source: Option<NodeRefData>,
+        row: ApprovedReviewIndexValueData,
+        (root, exact): (NodeRefData, &[(NodeRefData, &[u8])]),
+        read: impl FnMut(PrivateChatPageId) -> Result<Zeroizing<Vec<u8>>, AppError>,
+    ) -> Result<Vec<NodeRefData>, AppError> {
+        let (context, key) = self.approval_coordinates(row.action);
+        let data = PrivateIndexLeafRowData {
+            key,
+            value: PrivateIndexValueData::ApprovedReview(row),
+        };
+        self.verify_update(root, exact, |output| {
+            self.rewrite_row(context, source, (None, data), read, output)
+        })
+    }
+
+    fn verify_update(
+        &self,
+        root: NodeRefData,
+        exact: &[(NodeRefData, &[u8])],
+        rewrite: impl FnOnce(&mut PageWriter<'_>) -> Result<(NodeRefData, Vec<NodeRefData>), AppError>,
+    ) -> Result<Vec<NodeRefData>, AppError> {
         if !(1..=MAX_PAGES).contains(&exact.len()) {
             return Err(denied());
         }
         let mut outputs = exact.iter();
-        let (reconstructed, old) = self.rewrite(query, source, rows, read, |plain, summary| {
+        let (reconstructed, old) = rewrite(&mut |plain, summary| {
             let (reference, bytes) = outputs.next().ok_or_else(denied)?;
             if reference.summary != summary
                 || bytes.len() > MAX_INDEX_FRAME_BYTES
@@ -147,6 +205,24 @@ impl Indexes {
         Ok(old)
     }
 
+    pub(super) fn lookup_approved(
+        &self,
+        root: NodeRefData,
+        action: ActionId,
+        read: impl FnMut(PrivateChatPageId) -> Result<Zeroizing<Vec<u8>>, AppError>,
+    ) -> Result<Option<ApprovedReviewIndexValueData>, AppError> {
+        let (context, point) = self.approval_coordinates(action);
+        let path = self.open_path(root, context, point, read)?;
+        match path.row_data().map_err(|_| denied())? {
+            Some(PrivateIndexLeafRowData {
+                value: PrivateIndexValueData::ApprovedReview(row),
+                ..
+            }) => Ok(Some(row)),
+            Some(_) => Err(denied()),
+            None => Ok(None),
+        }
+    }
+
     fn rewrite(
         &self,
         query: Query,
@@ -155,8 +231,8 @@ impl Indexes {
             Option<ReceivedReviewIndexValueData>,
             ReceivedReviewIndexValueData,
         ),
-        mut read: impl FnMut(PrivateChatPageId) -> Result<Zeroizing<Vec<u8>>, AppError>,
-        mut output: impl FnMut(&[u8], NodeSummaryData) -> Result<NodeRefData, AppError>,
+        read: impl FnMut(PrivateChatPageId) -> Result<Zeroizing<Vec<u8>>, AppError>,
+        output: impl FnMut(&[u8], NodeSummaryData) -> Result<NodeRefData, AppError>,
     ) -> Result<(NodeRefData, Vec<NodeRefData>), AppError> {
         if expected.is_some_and(|prior| {
             matches!(query, Query::Ordinal(_)) || prior.sequence >= replacement.sequence
@@ -168,9 +244,30 @@ impl Indexes {
             key: point,
             value: PrivateIndexValueData::ReceivedReview(replacement),
         };
+        self.rewrite_row(
+            context,
+            source,
+            (
+                expected.map(PrivateIndexValueData::ReceivedReview),
+                replacement,
+            ),
+            read,
+            output,
+        )
+    }
+
+    fn rewrite_row(
+        &self,
+        context: PrivateIndexContextData,
+        source: Option<NodeRefData>,
+        (expected, replacement): (Option<PrivateIndexValueData>, PrivateIndexLeafRowData),
+        mut read: impl FnMut(PrivateChatPageId) -> Result<Zeroizing<Vec<u8>>, AppError>,
+        mut output: impl FnMut(&[u8], NodeSummaryData) -> Result<NodeRefData, AppError>,
+    ) -> Result<(NodeRefData, Vec<NodeRefData>), AppError> {
+        let point = replacement.key;
         if let Some(root) = source {
             let path = self.open_path(root, context, point, &mut read)?;
-            if read_row(&path)? != expected {
+            if path.row_data().map_err(|_| denied())?.map(|row| row.value) != expected {
                 return Err(denied());
             }
             return path.rewrite_selected_path(context, &replacement, &self.key, read, output);
@@ -226,6 +323,16 @@ impl Indexes {
                 kind,
             },
             point,
+        )
+    }
+
+    fn approval_coordinates(&self, action: ActionId) -> (PrivateIndexContextData, [u8; 32]) {
+        (
+            PrivateIndexContextData {
+                cid: self.cid,
+                kind: PrivateIndexKindData::ReviewApprovedAction,
+            },
+            ApprovedReviewIndexValueData::action_key(self.cid, action),
         )
     }
 }

@@ -4346,6 +4346,15 @@ the older Head when its exact index files survive. That can rewind the
 remembered review freeze or storage allowance. An external monotonic
 anchor would be needed to detect replay of the entire component.
 
+A recipient approval receipt requires the same exact signed Approve under
+both selected header indexes, the current joined source, its selected
+historical Remove and an exact verified local reply parent when present.
+The receipt preserves the original signed Create in its own encrypted
+record and immutable action index. Its write-ahead tag covers the already
+admitted effect. Recovery rechecks the old selector, exact immutable
+outputs and the single index change before retiring the pending record.
+Ordinary ID8 and publication authority remain separate.
+
 The first private selection checks the same exact Raw, signing files
 and held original under the founder loan. An authenticated write-ahead
 file commits the encrypted immutable record, the intent and case index
@@ -4363,8 +4372,9 @@ bounded path at each obsolete page's authenticated minimum proves it
 unreachable before removal. The selected head and exact file handles
 remain held through retirement. The immutable decision records stay
 available for original-intent recovery. The connected route can disclose the
-exact selected Approve proof to a current member. Recipient adoption of
-that proof remains open.
+exact selected Approve proof to a current member. The joined member can
+cover its own receipt for that original. Rendering uses a separate
+admission path that remains open.
 
 ## Chat history admission and retained audit (20 October, continuation)
 

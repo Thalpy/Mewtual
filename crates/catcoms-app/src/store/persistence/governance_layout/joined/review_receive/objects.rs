@@ -2,8 +2,9 @@
 //! selected object always refuses; only an authenticated manifest miss can
 //! supply the separate first-lane path.
 use super::{
+    approval::MAX_APPROVAL_FRAME,
     header::{ReceiverKey, MAX_HEADER_BYTES},
-    lane_head::{LaneHead, HEAD_BYTES},
+    lane_head::{LaneHead, MAX_HEAD_BYTES},
     manifest::{head_digest, ReviewScope, SelectedLane},
     *,
 };
@@ -16,6 +17,7 @@ const HEAD_SUFFIX: &str = "head";
 const HEADER_SUFFIX: &str = "header";
 const PAGE_SUFFIX: &str = "page";
 const FORK_SUFFIX: &str = "fork";
+const APPROVAL_SUFFIX: &str = "receipt";
 
 pub(super) fn lane_directory_name(scope: ReviewScope) -> String {
     format!("g-{}", hex::encode(scope.as_bytes()))
@@ -35,6 +37,10 @@ pub(super) fn page_name(id: PrivateChatPageId) -> String {
 
 pub(super) fn fork_name(digest: &[u8; 32]) -> String {
     object_name(digest, FORK_SUFFIX)
+}
+
+pub(super) fn approval_name(digest: &[u8; 32]) -> String {
+    object_name(digest, APPROVAL_SUFFIX)
 }
 
 fn object_name(digest: &[u8; 32], suffix: &str) -> String {
@@ -84,7 +90,7 @@ impl HeldLane {
         root.require()?;
         let directory = HeldDirectory::open(root.child(&lane_directory_name(scope)))?;
         let sealed_head =
-            HeldObject::read(directory.child(&head_name(&selected.head)), HEAD_BYTES)?;
+            HeldObject::read(directory.child(&head_name(&selected.head)), MAX_HEAD_BYTES)?;
         let head = LaneHead::open(key, &sealed_head.bytes)?;
         if head_digest(&sealed_head.bytes) != selected.head || head.is_frozen() != selected.frozen {
             return Err(denied());
@@ -107,6 +113,13 @@ impl HeldLane {
         self.keep(
             self.directory.child(&header_name(&digest)),
             MAX_HEADER_BYTES,
+        )
+    }
+
+    pub(super) fn approval(&self, digest: &[u8; 32]) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        self.keep(
+            self.directory.child(&approval_name(digest)),
+            MAX_APPROVAL_FRAME,
         )
     }
 

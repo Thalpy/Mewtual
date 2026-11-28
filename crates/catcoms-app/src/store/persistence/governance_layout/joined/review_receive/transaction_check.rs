@@ -1,16 +1,17 @@
 //! Recover exactly the previously prepared manifest update from authenticated
 //! outputs. A repaired transaction keeps its original selected predecessor.
 use super::{
+    approval,
     header::ReceiverKey,
     index::{Indexes, Query},
     lane_head::LaneHead,
     manifest::{head_digest, ManifestKey, ReviewScope, SelectedLane},
     objects::HeldLane,
-    plan::{ReviewLaneRead, ReviewPlan},
+    plan::{ApprovalSelection, ReviewLaneRead, ReviewPlan},
     wal::{Effect, WriteAhead},
     *,
 };
-use catcoms_replication::chat::FounderGenesisAnchorData;
+use catcoms_replication::chat::{owner_bodies::ReviewStreamRecord, FounderGenesisAnchorData};
 
 pub(super) struct TransactionScope<'a> {
     pub(super) scope: ReviewScope,
@@ -114,6 +115,39 @@ impl TransactionScope<'_> {
                     return Err(denied());
                 }
                 SelectedLane::successor(previous, transaction.head, [frame.len()], true)?
+            }
+            Effect::Approval { frame, path } => {
+                let source = source.ok_or_else(denied)?;
+                let raw = approval::open(self.lane_key, self.pin, frame)?;
+                let record = ReviewStreamRecord::decode(self.pin, &raw).map_err(|_| denied())?;
+                let ApprovalSelection::Selected { row: header, .. } =
+                    read.select_approval(self.pin, record.entry_data(), read_page, read_header)?
+                else {
+                    return Err(denied());
+                };
+                let row = approval::row(header, &record, frame)?;
+                let proposed = effect_head.approvals.ok_or_else(denied)?;
+                let old = self.indexes.require_approved_delta(
+                    source.head.approvals,
+                    row,
+                    (proposed, &path.exact),
+                    read_page,
+                )?;
+                if old != path.old
+                    || effect_head
+                        != source
+                            .head
+                            .cover_approval(&source.sealed_head.bytes, proposed)?
+                {
+                    return Err(denied());
+                }
+                SelectedLane::successor(
+                    previous,
+                    transaction.head,
+                    std::iter::once(frame.len())
+                        .chain(path.exact.iter().map(|(_, frame)| frame.len())),
+                    false,
+                )?
             }
         };
         original.replace(self.scope, previous, selected)?;

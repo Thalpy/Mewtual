@@ -18,12 +18,14 @@ use zeroize::Zeroizing;
 mod cow;
 mod path;
 mod review;
+mod review_approval;
 mod review_receiver;
 mod rewrite;
 pub(in crate::store) use path::{
     PrivateIndexPathData, PRIVATE_INDEX_BOUNDARY_OPEN_BYTES, PRIVATE_INDEX_PATH_METADATA_BYTES,
 };
 pub(in crate::store) use review::ReviewIndexValueData;
+pub(in crate::store) use review_approval::ApprovedReviewIndexValueData;
 pub(in crate::store) use review_receiver::ReceivedReviewIndexValueData;
 pub(in crate::store) use rewrite::{
     rewrite_private_branch_data, rewrite_private_leaf_data, PrivateIndexRewriteData,
@@ -37,6 +39,8 @@ const REVIEW_CASE_DOMAIN: &[u8] = b"catcoms/private-chat-review-case-index/v1\0"
 const RECEIVED_REVIEW_ORDINAL_DOMAIN: &[u8] =
     b"catcoms/private-chat-received-review-ordinal-index/v1\0";
 const RECEIVED_REVIEW_CASE_DOMAIN: &[u8] = b"catcoms/private-chat-received-review-case-index/v1\0";
+const APPROVED_REVIEW_ACTION_DOMAIN: &[u8] =
+    b"catcoms/private-chat-reviewed-original-action-index/v1\0";
 const VERSION: u16 = 1;
 const BRANCH_ROW_BYTES: usize = 80;
 const MAX_VALUE_BYTES: usize = 384;
@@ -79,6 +83,7 @@ pub(in crate::store) enum PrivateIndexKindData {
     ReviewCase,
     ReviewReceivedOrdinal,
     ReviewReceivedCase,
+    ReviewApprovedAction,
 }
 impl PrivateIndexKindData {
     fn domain(self) -> &'static [u8] {
@@ -89,6 +94,7 @@ impl PrivateIndexKindData {
             Self::ReviewCase => REVIEW_CASE_DOMAIN,
             Self::ReviewReceivedOrdinal => RECEIVED_REVIEW_ORDINAL_DOMAIN,
             Self::ReviewReceivedCase => RECEIVED_REVIEW_CASE_DOMAIN,
+            Self::ReviewApprovedAction => APPROVED_REVIEW_ACTION_DOMAIN,
         }
     }
     fn code(self) -> u8 {
@@ -99,6 +105,7 @@ impl PrivateIndexKindData {
             Self::ReviewCase => 4,
             Self::ReviewReceivedOrdinal => 5,
             Self::ReviewReceivedCase => 6,
+            Self::ReviewApprovedAction => 7,
         }
     }
     fn header_bytes(self) -> usize {
@@ -107,7 +114,7 @@ impl PrivateIndexKindData {
             Self::Publication => PUBLICATION_HEADER_BYTES,
             Self::ReviewIntent => REVIEW_INTENT_HEADER_BYTES,
             Self::ReviewCase => REVIEW_CASE_HEADER_BYTES,
-            Self::ReviewReceivedOrdinal | Self::ReviewReceivedCase => {
+            Self::ReviewReceivedOrdinal | Self::ReviewReceivedCase | Self::ReviewApprovedAction => {
                 TOKEN_HEADER_BYTES - TOKEN_DOMAIN.len() + self.domain().len()
             }
         }
@@ -128,6 +135,7 @@ pub(in crate::store) enum PrivateIndexValueData {
     Publication(PublicationValueData),
     Review(ReviewIndexValueData),
     ReceivedReview(ReceivedReviewIndexValueData),
+    ApprovedReview(ApprovedReviewIndexValueData),
 }
 impl PrivateIndexValueData {
     fn check_key(self, context: PrivateIndexContextData, key: [u8; 32]) -> Result<()> {
@@ -159,6 +167,9 @@ impl PrivateIndexValueData {
                 | PrivateIndexKindData::ReviewReceivedCase,
                 Self::ReceivedReview(value),
             ) => value.require_key(context, key),
+            (PrivateIndexKindData::ReviewApprovedAction, Self::ApprovedReview(value)) => {
+                value.require_key(context, key)
+            }
             _ => Err(PrivateIndexError::Context),
         }
     }
@@ -177,6 +188,9 @@ impl PrivateIndexValueData {
             | PrivateIndexKindData::ReviewReceivedCase => {
                 Self::ReceivedReview(ReceivedReviewIndexValueData::decode(raw)?)
             }
+            PrivateIndexKindData::ReviewApprovedAction => {
+                Self::ApprovedReview(ApprovedReviewIndexValueData::decode(raw)?)
+            }
         };
         value.check_key(context, key)?;
         Ok(value)
@@ -188,6 +202,7 @@ impl PrivateIndexValueData {
             Self::Publication(value) => value.encode_data(),
             Self::Review(value) => return value.encode(),
             Self::ReceivedReview(value) => return value.encode(),
+            Self::ApprovedReview(value) => return value.encode(),
         }
         .map_err(|_| PrivateIndexError::Malformed)?;
         if raw.is_empty() || raw.len() > MAX_VALUE_BYTES {

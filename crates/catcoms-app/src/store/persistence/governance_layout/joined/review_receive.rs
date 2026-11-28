@@ -6,6 +6,7 @@ use crate::store::persistence::v2_member_outbox::fs::{
     read_bounded_held, require_exact_held, HeldDirectory,
 };
 
+mod approval;
 mod declaration;
 mod header;
 mod index;
@@ -20,8 +21,9 @@ mod wal;
 mod write;
 pub(super) use declaration::{recover, require_no_claim_stage};
 #[cfg(test)]
-pub(in crate::store) use fault::{with_receiver_fault, ReceiverFault};
-pub use journal::NativeTextReviewHeaderStatus;
+pub(in crate::store) use fault::{with_receiver_fault, with_receiver_hook, ReceiverFault};
+pub use journal::{NativeTextReviewApprovalStatus, NativeTextReviewHeaderStatus};
+pub(in crate::store) use plan::ApprovalSelection;
 #[cfg(test)]
 mod fault;
 
@@ -51,6 +53,38 @@ struct HeldManifest {
 }
 
 impl ServerStore {
+    pub(in crate::store) fn check_received_review_approval(
+        &self,
+        binding: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
+        header: &catcoms_replication::chat::owner_bodies::ReviewStreamEntry,
+    ) -> Result<ApprovalSelection, AppError> {
+        let mounted = self
+            .review_receive_mount
+            .try_lock()
+            .map_err(review_lock_error)?;
+        mounted
+            .as_ref()
+            .ok_or_else(denied)?
+            .check_approval_header(self, binding, header)
+    }
+
+    pub(in crate::store) fn select_received_review_approval(
+        &self,
+        binding: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
+        raw: &[u8],
+        require: impl FnMut() -> Result<(), AppError>,
+        rng: &mut dyn catcoms_rt::CryptoRngCore,
+    ) -> Result<NativeTextReviewApprovalStatus, AppError> {
+        let mounted = self
+            .review_receive_mount
+            .try_lock()
+            .map_err(review_lock_error)?;
+        mounted
+            .as_ref()
+            .ok_or_else(denied)?
+            .select_approval(self, binding, raw, require, rng)
+    }
+
     pub(in crate::store) fn select_received_review_header(
         &self,
         binding: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
@@ -63,14 +97,18 @@ impl ServerStore {
         let mounted = self
             .review_receive_mount
             .try_lock()
-            .map_err(|error| match error {
-                std::sync::TryLockError::WouldBlock => AppError::ChatV2ArchiveBusy,
-                std::sync::TryLockError::Poisoned(_) => denied(),
-            })?;
+            .map_err(review_lock_error)?;
         mounted
             .as_ref()
             .ok_or_else(denied)?
             .select_header(self, binding, incoming, require, rng)
+    }
+}
+
+fn review_lock_error<T>(error: std::sync::TryLockError<T>) -> AppError {
+    match error {
+        std::sync::TryLockError::WouldBlock => AppError::ChatV2ArchiveBusy,
+        std::sync::TryLockError::Poisoned(_) => denied(),
     }
 }
 

@@ -8,7 +8,9 @@ use super::{
 };
 use crate::store::persistence::v2_text::private_index::ReceivedReviewIndexValueData;
 use catcoms_replication::chat::{
-    cold_index::NodeRefData, owner_bodies::ReviewStreamEntry, FounderGenesisAnchorData,
+    cold_index::NodeRefData,
+    owner_bodies::{ReviewDecision, ReviewStreamEntry},
+    FounderGenesisAnchorData,
 };
 use catcoms_storage::private_chat_page::PrivateChatPageId;
 
@@ -22,6 +24,15 @@ pub(super) enum ReviewPlan {
     Fork(Box<ReviewStreamEntry>),
 }
 
+pub(in crate::store) enum ApprovalSelection {
+    Selected {
+        row: ReceivedReviewIndexValueData,
+        header: Box<ReviewStreamEntry>,
+    },
+    WaitingFor(u64),
+    Frozen,
+}
+
 pub(super) struct ReviewLaneRead<'a> {
     pub(super) head: Option<LaneHead>,
     pub(super) key: &'a ReceiverKey,
@@ -29,6 +40,58 @@ pub(super) struct ReviewLaneRead<'a> {
 }
 
 impl ReviewLaneRead<'_> {
+    /// Both selected roots must independently address the same exact
+    /// public Approve. Possession of a signed full record alone cannot skip
+    /// a chain gap, replace the selected case or enter a frozen lane.
+    pub(super) fn select_approval(
+        &self,
+        pin: &FounderGenesisAnchorData,
+        supplied: &ReviewStreamEntry,
+        mut read_page: impl FnMut(PrivateChatPageId) -> Result<Zeroizing<Vec<u8>>, AppError>,
+        mut read_header: impl FnMut([u8; 32]) -> Result<Zeroizing<Vec<u8>>, AppError>,
+    ) -> Result<ApprovalSelection, AppError> {
+        supplied.verify_for_pin(pin).map_err(|_| denied())?;
+        let step = supplied.case_step_data().ok_or_else(denied)?;
+        if step.choice_data() != ReviewDecision::Approve {
+            return Err(denied());
+        }
+        let Some(head) = self.head else {
+            return Ok(ApprovalSelection::WaitingFor(1));
+        };
+        if head.is_frozen() {
+            return Ok(ApprovalSelection::Frozen);
+        }
+        let sequence = supplied.position_data().sequence;
+        if sequence > head.sequence {
+            return Ok(ApprovalSelection::WaitingFor(
+                head.sequence.checked_add(1).ok_or_else(denied)?,
+            ));
+        }
+        let (ordinal, original) = self
+            .load(
+                pin,
+                head.ordinal,
+                Query::Ordinal(sequence),
+                &mut read_page,
+                &mut read_header,
+            )?
+            .ok_or_else(denied)?;
+        let case = self
+            .indexes
+            .lookup(head.cases, Query::Case(step.case_data()), &mut read_page)?
+            .ok_or_else(denied)?;
+        if ordinal != case
+            || &original != supplied
+            || (sequence == head.sequence && supplied.id().as_bytes() != &head.entry)
+        {
+            return Err(denied());
+        }
+        Ok(ApprovalSelection::Selected {
+            row: ordinal,
+            header: Box::new(original),
+        })
+    }
+
     pub(super) fn plan(
         &self,
         pin: &FounderGenesisAnchorData,

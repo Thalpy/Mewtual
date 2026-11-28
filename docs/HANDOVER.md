@@ -12,9 +12,17 @@ metadata write from its original pin and exact write-ahead file.
 Native startup provisions the receiver on an eligible recovered joined
 vault. The first ID9 declaration preserves ID12. Existing ID9 vaults keep
 their exact catalog and require a separate migration for the receiver.
-First-session initialization for a new join, automatic polling, recipient
-approval receipts, projection, admin actions and combined acceptance are
-still open. The desktop Chat V2 switch remains off.
+
+The joined source can save the exact original named by a selected Approve.
+It first checks the signed header and case, the removed Admission and any
+reply parent from verified local history. It reports the missing header or
+reply parent so the caller can retry. The encrypted receipt has a separate
+action index. Exact retries and cold recovery preserve the selected copy
+without changing ordinary history.
+
+First-session initialization for a new join, automatic polling, projection,
+admin actions and combined acceptance are still open. The desktop Chat V2
+switch remains off.
 
 ## View held posts in founder chat history
 

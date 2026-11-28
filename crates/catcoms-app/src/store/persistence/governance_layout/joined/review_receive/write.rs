@@ -1,10 +1,14 @@
 //! Cover the exact immutable outputs before the manifest CAS. Recovering
 //! a visible new manifest never recreates a missing selected output.
 use super::{
+    approval,
     index::{Indexes, MAX_PAGES},
     lane_head::LaneHead,
     manifest::{ReviewScope, SelectedLane},
-    objects::{fork_name, head_name, header_name, lane_directory_name, page_name, HeldObject},
+    objects::{
+        approval_name, fork_name, head_name, header_name, lane_directory_name, page_name,
+        HeldObject,
+    },
     wal::{Effect, WriteAhead},
     *,
 };
@@ -73,6 +77,18 @@ pub(super) fn finish_covered_effect(
         Effect::Fork(frame) => {
             expected.push(Output {
                 name: fork_name(&head.fork),
+                bytes: frame,
+            });
+        }
+        Effect::Approval { frame, path } => {
+            for (page, frame) in &path.exact {
+                expected.push(Output {
+                    name: page_name(page.page),
+                    bytes: frame,
+                });
+            }
+            expected.push(Output {
+                name: approval_name(&approval::digest(frame)),
                 bytes: frame,
             });
         }
