@@ -4,9 +4,12 @@ use super::*;
 use crate::chat::FounderGenesisAnchorData;
 use catcoms_crypto::verify_with_public_bytes;
 
+mod record;
+pub use record::{ReviewStreamRecord, MAX_REVIEW_STREAM_RECORD_BYTES};
+
 const DOMAIN: &[u8] = b"mewtual/chat/removed-post-decision-entry/v1\0";
-const SEMANTIC_BYTES: usize = DOMAIN.len() + 4 * 32 + 2 * 8;
-pub const REVIEW_STREAM_ENTRY_BYTES: usize = SEMANTIC_BYTES + 64;
+pub const UNSIGNED_REVIEW_STREAM_ENTRY_BYTES: usize = DOMAIN.len() + 4 * 32 + 2 * 8;
+pub const REVIEW_STREAM_ENTRY_BYTES: usize = UNSIGNED_REVIEW_STREAM_ENTRY_BYTES + 64;
 
 /// Entry identity commits the signed fields and excludes the signature.
 /// Verify every received representation before using this ID.
@@ -37,22 +40,26 @@ pub struct ReviewStreamEntry {
     signature: [u8; 64],
 }
 
+/// Exact immutable input to cover before the dedicated native signature.
+/// This data carries no authority to open the founder key.
+pub struct UnsignedReviewStreamEntry([u8; UNSIGNED_REVIEW_STREAM_ENTRY_BYTES]);
+
 catcoms_rt::redacted_debug! {
     ReviewStreamEntry;
     ReviewStreamEntryId;
     ReviewStreamPosition;
+    UnsignedReviewStreamEntry;
 }
 
-impl ReviewStreamEntry {
-    /// Sign using the exact original founder key held by the caller.
-    /// Body data and the arithmetic do not authorize that key operation.
-    pub fn sign_using(
+impl UnsignedReviewStreamEntry {
+    /// Prepare the input the journal will retain. Exact recovery rederives
+    /// it from the pinned scope, reserved position and original body.
+    pub fn prepare(
         trusted: &FounderGenesisAnchorData,
         position: ReviewStreamPosition,
         decision: &ExactReviewDecisionBody,
-        sign: impl FnOnce(&[u8]) -> Result<[u8; 64], ChatError>,
     ) -> Result<Self, ChatError> {
-        let mut entry = Self {
+        let entry = ReviewStreamEntry {
             stream: stream_data(trusted)?,
             position,
             body: decision.id(),
@@ -60,9 +67,41 @@ impl ReviewStreamEntry {
         };
         entry.require_shape()?;
         entry.require_decision(trusted, decision)?;
-        entry.signature = sign(&entry.semantic_bytes())?;
+        Ok(Self(entry.semantic_bytes()))
+    }
+
+    pub fn signing_bytes(&self) -> &[u8; UNSIGNED_REVIEW_STREAM_ENTRY_BYTES] {
+        &self.0
+    }
+
+    /// Verify retained raw output against the exact input. An interrupted
+    /// producer can finish from verified Raw without entering the key again.
+    pub fn attach_signature(
+        self,
+        trusted: &FounderGenesisAnchorData,
+        signature: [u8; 64],
+    ) -> Result<ReviewStreamEntry, ChatError> {
+        let mut bytes = [0; REVIEW_STREAM_ENTRY_BYTES];
+        bytes[..UNSIGNED_REVIEW_STREAM_ENTRY_BYTES].copy_from_slice(&self.0);
+        bytes[UNSIGNED_REVIEW_STREAM_ENTRY_BYTES..].copy_from_slice(&signature);
+        let entry = ReviewStreamEntry::decode(&bytes)?;
         entry.verify_for_pin(trusted)?;
         Ok(entry)
+    }
+}
+
+impl ReviewStreamEntry {
+    /// Sign with the exact original founder key held by the caller.
+    /// A durable producer covers prepared bytes and Raw separately.
+    pub fn sign_using(
+        trusted: &FounderGenesisAnchorData,
+        position: ReviewStreamPosition,
+        decision: &ExactReviewDecisionBody,
+        sign: impl FnOnce(&[u8]) -> Result<[u8; 64], ChatError>,
+    ) -> Result<Self, ChatError> {
+        let prepared = UnsignedReviewStreamEntry::prepare(trusted, position, decision)?;
+        let signature = sign(prepared.signing_bytes())?;
+        prepared.attach_signature(trusted, signature)
     }
 
     /// Independent host pin, exact signature and stream binding only.
@@ -124,8 +163,8 @@ impl ReviewStreamEntry {
 
     pub fn encode(&self) -> [u8; REVIEW_STREAM_ENTRY_BYTES] {
         let mut bytes = [0; REVIEW_STREAM_ENTRY_BYTES];
-        bytes[..SEMANTIC_BYTES].copy_from_slice(&self.semantic_bytes());
-        bytes[SEMANTIC_BYTES..].copy_from_slice(&self.signature);
+        bytes[..UNSIGNED_REVIEW_STREAM_ENTRY_BYTES].copy_from_slice(&self.semantic_bytes());
+        bytes[UNSIGNED_REVIEW_STREAM_ENTRY_BYTES..].copy_from_slice(&self.signature);
         bytes
     }
 
@@ -196,7 +235,7 @@ impl ReviewStreamEntry {
         Ok(())
     }
 
-    fn semantic_bytes(&self) -> [u8; SEMANTIC_BYTES] {
+    fn semantic_bytes(&self) -> [u8; UNSIGNED_REVIEW_STREAM_ENTRY_BYTES] {
         let position = self.position;
         let sequence = position.sequence.to_be_bytes();
         let previous = position.previous.map_or([0; 32], |id| id.0);
@@ -210,7 +249,7 @@ impl ReviewStreamEntry {
             &epoch,
             self.body.as_bytes(),
         ];
-        let mut bytes = [0; SEMANTIC_BYTES];
+        let mut bytes = [0; UNSIGNED_REVIEW_STREAM_ENTRY_BYTES];
         let mut next = bytes.as_mut_slice();
         for field in fields {
             let (prefix, tail) = next.split_at_mut(field.len());

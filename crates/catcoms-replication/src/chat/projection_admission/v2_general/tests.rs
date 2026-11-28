@@ -1947,7 +1947,7 @@ fn removed_create_evidence_names_the_selected_remove_and_keeps_signature_bytes()
 fn removed_reply_requires_verified_dependencies_and_never_admits_a_delete() {
     use crate::chat::owner_bodies::{
         ExactReviewDecisionBody, ExactReviewOriginal, ReviewDecision, ReviewDecisionBody,
-        ReviewSpec,
+        ReviewSpec, ReviewStreamEntry, ReviewStreamPosition, ReviewStreamRecord,
     };
     let mut f = Fixture::new();
     let key = DeviceKeypair::from_seed(&[109; 32]);
@@ -2095,6 +2095,58 @@ fn removed_reply_requires_verified_dependencies_and_never_admits_a_delete() {
         approve.require_record_data(&V2RemovedCreateRecord::decode(&other_record).unwrap()),
         Err(ChatError::Scope)
     );
+    // The journal frame pins the same exact representation. The actual
+    // founder/selection custody is separate from this data format test.
+    let profile = f.verifier.replay_data().profile();
+    let trusted = FounderGenesisAnchorData {
+        group: profile.spec().group.clone(),
+        founder: profile.spec().founder,
+        profile: profile.id(),
+        admission: OwnerFactId::from_bytes([43; 32]),
+        tenure: profile.tenure(),
+        header: OwnerHeaderId::from_bytes([44; 32]),
+        state: f.verifier.replay_data().header().spec().state,
+    };
+    let entry = ReviewStreamEntry::sign_using(
+        &trusted,
+        ReviewStreamPosition {
+            sequence: 1,
+            previous: None,
+            membership_header: f.verifier.replay_data().header().id(),
+            membership_epoch: remove_epoch,
+        },
+        &approve,
+        |bytes| Ok(f.owner.key.sign(bytes)),
+    )
+    .unwrap();
+    let packed = ReviewStreamRecord::encode(&trusted, &entry, &approve, &record).unwrap();
+    let reopened = ReviewStreamRecord::decode(&trusted, &packed).unwrap();
+    assert_eq!(reopened.entry_data(), &entry);
+    assert_eq!(reopened.decision_data(), &approve);
+    assert_eq!(reopened.held_data().original_bytes_data(), &original);
+    assert!(matches!(
+        ReviewStreamRecord::encode(&trusted, &entry, &approve, &other_record),
+        Err(ChatError::Scope)
+    ));
+    // Splice an alternate genuine record on the storage boundary. Do not
+    // use the checked encoder to construct the cold reader's bad input.
+    let prefix = packed.len() - record.len() - 4;
+    let mut crossed = packed[..prefix].to_vec();
+    crossed.extend_from_slice(&(other_record.len() as u32).to_be_bytes());
+    crossed.extend_from_slice(&other_record);
+    assert!(matches!(
+        ReviewStreamRecord::decode(&trusted, &crossed),
+        Err(ChatError::Scope)
+    ));
+    let wrong_pin = FounderGenesisAnchorData {
+        group: trusted.group.clone(),
+        header: OwnerHeaderId::from_bytes([45; 32]),
+        ..trusted
+    };
+    assert!(ReviewStreamRecord::decode(&wrong_pin, &packed).is_err());
+    let mut extra = packed.to_vec();
+    extra.push(0);
+    assert!(ReviewStreamRecord::decode(&trusted, &extra).is_err());
     assert_eq!(ready.case_data(), waiting.case_data());
     assert_eq!(ready.original_digest_data(), waiting.original_digest_data());
     assert_eq!(

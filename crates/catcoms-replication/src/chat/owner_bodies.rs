@@ -19,7 +19,9 @@ pub use review::{
     ReviewCaseId, ReviewDecision, ReviewDecisionBody, ReviewSpec, MAX_REVIEW_BODY_BYTES,
 };
 pub use review_stream::{
-    ReviewStreamEntry, ReviewStreamEntryId, ReviewStreamPosition, REVIEW_STREAM_ENTRY_BYTES,
+    ReviewStreamEntry, ReviewStreamEntryId, ReviewStreamPosition, ReviewStreamRecord,
+    UnsignedReviewStreamEntry, MAX_REVIEW_STREAM_RECORD_BYTES, REVIEW_STREAM_ENTRY_BYTES,
+    UNSIGNED_REVIEW_STREAM_ENTRY_BYTES,
 };
 
 const RECORD_DOMAIN: &[u8] = b"mewtual/chat/acceptance-record/v2\0";
