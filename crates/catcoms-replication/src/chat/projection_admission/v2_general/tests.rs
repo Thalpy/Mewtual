@@ -1949,6 +1949,7 @@ fn removed_reply_requires_verified_dependencies_and_never_admits_a_delete() {
         ExactReviewDecisionBody, ExactReviewOriginal, ReviewDecision, ReviewDecisionBody,
         ReviewSpec, ReviewStreamEntry, ReviewStreamPosition, ReviewStreamRecord,
     };
+    use crate::chat::owner_facts::OwnerFactId;
     let mut f = Fixture::new();
     let key = DeviceKeypair::from_seed(&[109; 32]);
     let other = DeviceKeypair::from_seed(&[110; 32]);

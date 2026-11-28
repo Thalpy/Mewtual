@@ -125,6 +125,7 @@ jobs:
           --import ./scripts/test-svelte.mjs --test
           src/native-text-history.test.ts src/native-text-app.test.ts src/native-saved-chat.test.ts
           src/native-text-driver.test.ts src/native-text-intents.test.ts src/native-text-session.test.ts
+          src/native-text-audit-component.test.ts src/visual-native-text-fixture.test.ts
           src/tauri-command-security.test.ts src/studio-exit-routes.test.ts
 
   native:
@@ -229,6 +230,8 @@ jobs:
               ('native-membership-dispatch', 'native_text::tests::native_text_membership_dispatch_uses_the_original_founder_row', 1),
           ]
           held_review = [
+              ('native-held-audit-parser', 'native_text::history::tests::held_posts_accept_only_their_own_small_page_and_cursor', 1),
+              ('native-held-audit-size', 'native_text::history::held_posts::tests::two_maximum_escaped_posts_fit_the_held_response_limit', 1),
               ('native-held-review-lock', 'native_text::tests::held_review_does_not_adopt_an_unlock_after_router_admission', 1),
               ('native-held-review-deadline', 'native_text::membership::review::tests::review_deadline_starts_before_task_poll_and_preserves_the_original_cancellation', 1),
               ('native-held-review-authority', 'native_text::membership::review::tests::a_new_limit_preserves_an_earlier_request_authority', 1),

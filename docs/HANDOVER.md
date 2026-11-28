@@ -60,6 +60,10 @@ catalog with an empty decision journal. The exact original hold marker,
 joined pins and archive must still agree when cold recovery selects the
 new catalog. Startup can read that format but does not provision it
 automatically. An ID10-only build refuses a vault once ID11 is selected.
+The Windows cold fixture selects the original covered Stage after the
+hold marker is restored. The same fixture preserves an unexpected journal
+file and refuses the open. Five focused App cases and the focused Core
+review cases passed. The old grammar was exercised in-process.
 The decision writer, approval delivery and activation remain open.
 
 ## Rejoin from the retired native session

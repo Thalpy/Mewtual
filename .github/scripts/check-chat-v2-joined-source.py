@@ -12,7 +12,7 @@ import re
 import sys
 
 REPO = Path(__file__).resolve().parents[2]
-REGISTRY_NORMAL_COUNT = 384
+REGISTRY_NORMAL_COUNT = 403
 COHORTS = (
     ("core-read-accessors", "catcoms-replication", "v2_general::tests::read_accessors", 3),
     ("joined-facts", "catcoms-sync", "owner_v2::joined_source::tests", 4),
@@ -79,13 +79,13 @@ REGISTRY_PREFIX = "store::critical_namespaces::native_registry::"
 REGISTRY_PARTITIONS = (
     ("capability", "capability::", (), 2),
     ("data", "data::", (), 11),
-    ("lifecycle", "lifecycle::", (), 69),
+    ("lifecycle", "lifecycle::", (), 76),
     ("preparation", "preparation::", (), 39),
     ("operational-cell", "operational::cell::", (), 49),
     ("operational-facade", "operational::facade::", (), 34),
-    ("operational-sources", "operational::sources::", (), 108),
+    ("operational-sources", "operational::sources::", (), 118),
     ("operational-rest", "operational::", (
-        "operational::cell::", "operational::facade::", "operational::sources::"), 72),
+        "operational::cell::", "operational::facade::", "operational::sources::"), 74),
 )
 
 
