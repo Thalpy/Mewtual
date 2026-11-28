@@ -72,12 +72,16 @@ absence check and hold selection. An independently selected original
 keeps its place in history. First-session founder provisioning,
 signed decisions and the admin view remain open. Chat V2 remains disabled.
 
-An internal declaration can extend a recovered founder's selected hold
+Native startup extends a recovered founder's selected hold
 catalog with a decision journal. The authenticated empty head is covered
 before the catalog is selected. The original hold marker, joined pins
 and archive must still agree when cold recovery selects the catalog.
-Startup can read that format. Automatic provisioning remains open.
+Startup mounts the new catalog before exposing the founder. First-session
+provisioning for a newly created founder remains open.
 An ID10-only build refuses a vault once ID11 is selected.
+After selection, a missing or damaged decision marker or directory leaves
+ordinary chat available and review unavailable. Startup preserves the
+declared journal and any surviving files.
 The Windows cold fixture selects the original covered Stage after the
 hold marker is restored. Once the declaration is settled, an unexpected
 journal file stays on disk and stops review work. The founder row still

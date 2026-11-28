@@ -3512,6 +3512,16 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
     let review_cover =
         std::fs::read(&review_marker).expect("cold founder provisions review storage");
     assert_eq!(review_cover.len(), 32);
+    let decision_marker = founder_path.join("chat-critical-namespaces.review-decision.marker");
+    let decision_head = founder_path
+        .join("chat-v2-review-decisions")
+        .join("head.current");
+    let review_catalog = founder_path.join("chat-critical-namespaces.bin");
+    let decision_cover = std::fs::read(&decision_marker).expect("startup covers both declarations");
+    let decision_empty = std::fs::read(&decision_head).expect("startup covers the empty head");
+    assert_eq!(decision_cover.len(), 32);
+    assert_eq!(decision_empty.len(), 32);
+    let selected_catalog = std::fs::read(&review_catalog).unwrap();
     let mut held = serde_json::json!({
         "server": found["server"], "channel": found["channel"], "expectedContext": found["context"],
         "heldAfter": null, "limit": 2,
@@ -3584,6 +3594,9 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
         "cold replay returns the exact original packet"
     );
     assert_eq!(std::fs::read(review_marker).unwrap(), review_cover);
+    assert_eq!(std::fs::read(decision_marker).unwrap(), decision_cover);
+    assert_eq!(std::fs::read(decision_head).unwrap(), decision_empty);
+    assert_eq!(std::fs::read(review_catalog).unwrap(), selected_catalog);
     if join_after_restart {
         fn group_directory(dir: &std::path::Path, depth: usize) -> Option<std::path::PathBuf> {
             assert!(depth < 12, "isolated fixture tree");

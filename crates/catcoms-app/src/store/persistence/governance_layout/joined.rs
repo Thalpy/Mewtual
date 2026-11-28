@@ -74,6 +74,7 @@ pub(in crate::store) struct ColdJoinedSelection {
     shared_history: Option<shared_history::SelectedSharedHistory>,
     review_hold: Option<review_hold::SelectedReviewHold>,
     review_decision: Option<review_decision::SelectedReviewDecision>,
+    review_decision_declared: bool,
     review_receive: Option<review_receive::SelectedReviewReceiver>,
     review_receive_declared: bool,
     _fee: CatalogReadReservation,
@@ -191,14 +192,12 @@ impl ColdJoinedSelection {
         if let Some(review) = &self.review_hold {
             review.require(store)?;
         }
-        if let Some(journal) = &self.review_decision {
-            journal.require(store)?;
-        } else {
-            review_decision::require_absent(store)?;
-        }
         // Review repair debt is independent of ordinary joined history.
         // When an authenticated descriptor is selected its missing files
         // cannot create a fresh review journal during ordinary startup.
+        if !self.review_decision_declared {
+            review_decision::require_absent(store)?;
+        }
         if !self.review_receive_declared {
             review_receive::require_absent(store)?;
         }
@@ -348,12 +347,9 @@ impl ServerStore {
                         review_hold::SelectedReviewHold::capture(self, &key, descriptor)
                     })
                     .transpose()?;
-                let journal = parsed
-                    .review_decision
-                    .map(|descriptor| {
-                        review_decision::SelectedReviewDecision::capture(self, &key, descriptor)
-                    })
-                    .transpose()?;
+                let journal = parsed.review_decision.map(|descriptor| {
+                    review_decision::SelectedReviewDecision::capture(self, &key, descriptor)
+                });
                 let receiver = parsed.review_receive.and_then(|descriptor| {
                     review_receive::SelectedReviewReceiver::capture(self, descriptor, &key).ok()
                 });
@@ -587,7 +583,8 @@ impl ServerStore {
             index,
             shared_history,
             review_hold,
-            review_decision,
+            review_decision_declared: review_decision.is_some(),
+            review_decision: review_decision.and_then(Result::ok),
             review_receive,
             review_receive_declared,
             _fee: fee,

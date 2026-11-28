@@ -203,17 +203,21 @@ impl Physical {
             return Err(refused());
         }
         let store = self.current()?.checked_store()?;
-        if store.has_mounted_review_hold()? || !store.has_mounted_shared_history()? {
+        if !store.has_mounted_shared_history()? || store.has_declared_review_decision()? {
             return Ok(false);
         }
+        let kind = if store.has_mounted_review_hold()? {
+            ReviewDeclarationKind::Decision
+        } else {
+            ReviewDeclarationKind::Hold
+        };
         // The caller retains the original unpublished native owner. No
         // listener or native command can observe a half-selected catalog.
         let Some(founder) = self.recovered_cold_founder()? else {
             return Ok(false);
         };
         self.require_recovered_cold_founder(&founder)?;
-        let mut declaration =
-            store.prepare_founder_review_declaration(ReviewDeclarationKind::Hold, rng)?;
+        let mut declaration = store.prepare_founder_review_declaration(kind, rng)?;
         declaration.select(store)?;
         Ok(true)
     }

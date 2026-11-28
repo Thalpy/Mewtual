@@ -4311,10 +4311,13 @@ founder leaves through exact Stage selection. The declaration covers the
 original authenticated empty decision head before Stage selection. A foreign claim, crossed
 marker, unexpected entry or unsupported opener stops before the journal
 can acquire authority. Once selected, ID11 prevents an ID10-only binary
-from treating the vault as an older layout. Native startup does not yet
-provision it automatically, and its mounted declaration supplies no decision
-or message admission. Occupied or corrupt transaction names are classified
-only in the review operation after the exact mount has been proved.
+from treating the vault as an older layout. Native startup provisions it
+after covering and reopening the original ID10 declaration. The mounted
+declaration supplies no decision or message admission. Once declared, a
+damaged marker or directory leaves the optional mount unavailable and
+prevents reprovisioning. Review checks its exact mount before classifying
+transaction files. Recovery of an in-progress catalog declaration still
+requires all of the original physical evidence.
 
 The first review signature requires the original founder, exact witnessed
 hold, the selected frozen admission and a strict ID8 absence check. A

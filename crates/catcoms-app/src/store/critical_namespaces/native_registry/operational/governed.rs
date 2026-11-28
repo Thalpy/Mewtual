@@ -258,9 +258,9 @@ impl NativeTextJoinedStorage {
         self.index.native_row_count_data()
     }
 
-    /// Upgrade a recovered founder's existing shared-history vault before
-    /// publishing it. The exact selected catalog requires a fresh opener,
-    /// so a successful change must drop this old startup owner.
+    /// Cover one missing founder review namespace before publishing the
+    /// source. The hold declaration precedes the decision journal. Reopen
+    /// after each successful change to acquire the new catalog selection.
     pub fn select_review_storage_before_founder_startup(
         &self,
         rng: &mut dyn CryptoRngCore,

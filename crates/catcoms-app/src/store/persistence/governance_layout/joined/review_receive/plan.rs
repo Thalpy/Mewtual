@@ -140,3 +140,154 @@ impl ReviewLaneRead<'_> {
         Ok(Some((row, entry)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use catcoms_crypto::DeviceKeypair;
+    use catcoms_replication::chat::{
+        acceptance_tree::TreeContext,
+        cold_actions::OriginalActionDigest,
+        join_bindings::GenesisAnchorBindingData,
+        owner_bodies::{
+            AcceptanceRecord, AcceptanceSpec, ExactReviewDecisionBody, ExactReviewOriginal,
+            ReviewDecision, ReviewDecisionBody, ReviewSpec, ReviewStreamPosition,
+            UnsignedReviewStreamEntry,
+        },
+        owner_facts::OwnerFactId,
+        owner_header::{OwnerHeaderId, OwnerStateCommitment, OwnerTenureId},
+        ActionId, BasisId, GrantId,
+    };
+    use rand_chacha::ChaCha20Rng;
+    use rand_core::SeedableRng;
+
+    #[test]
+    fn recipient_signed_fork_preserves_both_exact_headers_and_the_original_tip() {
+        let founder = DeviceKeypair::from_seed(&[2; 32]);
+        let pin = FounderGenesisAnchorData {
+            group: vec![1; 16],
+            founder: founder.verifying_key().to_bytes(),
+            profile: OwnerFactId::from_bytes([3; 32]),
+            admission: OwnerFactId::from_bytes([4; 32]),
+            tenure: OwnerTenureId::from_bytes([5; 32]),
+            header: OwnerHeaderId::from_bytes([6; 32]),
+            state: OwnerStateCommitment::from_bytes([7; 32]),
+        };
+        let binding = GenesisAnchorBindingData {
+            group: pin.group.clone(),
+            founder: pin.founder,
+            profile: *pin.profile.as_bytes(),
+            admission: *pin.admission.as_bytes(),
+            tenure: *pin.tenure.as_bytes(),
+            header: *pin.header.as_bytes(),
+            state: *pin.state.as_bytes(),
+        };
+        let position = ReviewStreamPosition {
+            sequence: 1,
+            previous: None,
+            membership_header: OwnerHeaderId::from_bytes([14; 32]),
+            membership_epoch: 3,
+        };
+        let signed = |choice, intent| {
+            let target = AcceptanceRecord::new(AcceptanceSpec {
+                group: pin.group.clone(),
+                context: TreeContext {
+                    profile: pin.profile,
+                    admission: OwnerFactId::from_bytes([8; 32]),
+                },
+                channel: 9,
+                action: ActionId::from_bytes([10; 32]),
+                subject: DeviceKeypair::from_seed(&[11; 32])
+                    .verifying_key()
+                    .to_bytes(),
+                grant: GrantId::from_bytes([12; 32]),
+                basis: BasisId::from_bytes([13; 32]),
+                create: None,
+            })
+            .unwrap();
+            let body = ReviewDecisionBody::new(ReviewSpec {
+                target,
+                intent: [intent; 16],
+                decision: choice,
+                previous: None,
+            })
+            .unwrap();
+            let exact = ExactReviewDecisionBody::new(
+                body,
+                ExactReviewOriginal {
+                    digest: OriginalActionDigest::from_bytes([15; 32]),
+                    remove_header: position.membership_header,
+                    remove_epoch: position.membership_epoch,
+                },
+            )
+            .unwrap();
+            let prepared =
+                UnsignedReviewStreamEntry::prepare_public(&pin, position, &exact).unwrap();
+            let signature = founder.sign(prepared.signing_bytes());
+            prepared.attach_signature(&pin, signature).unwrap()
+        };
+        let first = signed(ReviewDecision::Reject, 16);
+        let contradiction = signed(ReviewDecision::Approve, 17);
+        let mut rng = ChaCha20Rng::seed_from_u64(809);
+        let scope = manifest::ReviewScope::derive_data(&[18; 32], &binding).unwrap();
+        let key = ReceiverKey::new(&[19; 32], &[20; 32], scope.as_bytes());
+        let indexes = Indexes::new(&[19; 32], scope);
+        let first_frame = key.cover_header_data(&pin, &first, &mut rng).unwrap();
+        let row = Indexes::row(&first, &first_frame).unwrap();
+        let paths = [Query::Ordinal(1), Query::Case(row.case)].map(|kind| {
+            indexes
+                .prepare(kind, None, (None, row), |_| unreachable!(), &mut rng)
+                .unwrap()
+        });
+        let head = LaneHead::next(&first, None, paths.each_ref().map(|path| path.root)).unwrap();
+        let read_page = |id| {
+            let page = paths
+                .iter()
+                .flat_map(|path| &path.new)
+                .find(|page| page.reference.page == id)
+                .ok_or_else(denied)?;
+            Ok(Zeroizing::new(page.frame.as_bytes().to_vec()))
+        };
+        let read_header = |id| {
+            if id != row.frame {
+                return Err(denied());
+            }
+            Ok(first_frame.clone())
+        };
+        let read = ReviewLaneRead {
+            head: Some(head),
+            key: &key,
+            indexes: &indexes,
+        };
+        assert!(matches!(
+            read.plan(&pin, &first, read_page, read_header).unwrap(),
+            ReviewPlan::Duplicate
+        ));
+        let ReviewPlan::Fork(selected) = read
+            .plan(&pin, &contradiction, read_page, read_header)
+            .unwrap()
+        else {
+            panic!("an authenticated contradiction must be preserved");
+        };
+        assert!(*selected == first);
+        let fork = key
+            .cover_fork_data(&pin, &selected, &contradiction, &mut rng)
+            .unwrap();
+        let original_head = head.seal(&key, &mut rng).unwrap();
+        let frozen = head.freeze(&original_head, &fork).unwrap();
+        assert_eq!(frozen.sequence, head.sequence);
+        assert_eq!(frozen.entry, head.entry);
+        assert!(frozen.is_frozen());
+        let (older, seen) = key.open_fork(&pin, &fork).unwrap();
+        assert!(older == first && seen == contradiction);
+        let read = ReviewLaneRead {
+            head: Some(frozen),
+            ..read
+        };
+        assert!(matches!(
+            read.plan(&pin, &contradiction, read_page, read_header)
+                .unwrap(),
+            ReviewPlan::Frozen
+        ));
+    }
+}

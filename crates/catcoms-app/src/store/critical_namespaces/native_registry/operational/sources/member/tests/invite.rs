@@ -2665,16 +2665,12 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
                         founder_dir.path(), SECRET, &mut history_rng, current_policy(),
                     ).unwrap();
-                    {
-                        use crate::store::critical_namespaces::review_hold_namespace::declaration::ReviewDeclarationKind;
-                        let store = cold.actual_store_for_test().unwrap();
-                        let mut journal = store.prepare_founder_review_declaration(ReviewDeclarationKind::Decision, &mut history_rng).unwrap();
-                        journal.select(store).unwrap();
-                    }
+                    assert!(cold.select_review_storage_before_founder_startup(&mut history_rng).unwrap());
                     drop(cold);
                     cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
                         founder_dir.path(), SECRET, &mut history_rng, current_policy(),
                     ).unwrap();
+                    assert!(!cold.select_review_storage_before_founder_startup(&mut history_rng).unwrap());
                 }
                 let mut cold = cold
                     .prepare_recovered_founder()
@@ -7219,6 +7215,46 @@ async fn review_decision_native_cold_selection_requires_the_original_hold_and_an
             "unexpected files cannot enter a decision"
         ))
         .is_err());
+    assert_eq!(std::fs::read(&debris).unwrap(), b"torn decision record");
+    assert_eq!(std::fs::read(&current_path).unwrap(), candidate);
+    drop(reopened);
+
+    // The catalog still owns the exact ID11 declaration when an optional
+    // physical anchor is damaged. It can neither repair nor recreate it.
+    let decision_dir = root.path().join("chat-v2-review-decisions");
+    let decision_marker = root
+        .path()
+        .join("chat-critical-namespaces.review-decision.marker");
+    let original_marker = std::fs::read(&decision_marker).unwrap();
+    let check_ordinary = |rng: &mut rand_chacha::ChaCha20Rng| {
+        let ordinary = open(rng).unwrap();
+        assert_eq!(ordinary.row_count_data().unwrap(), 1);
+        assert!(!ordinary
+            .select_review_storage_before_founder_startup(rng)
+            .unwrap());
+        let store = ordinary.actual_store_for_test().unwrap();
+        assert!(!store.has_mounted_review_decision().unwrap());
+        assert!(store
+            .with_review_decision_control::<()>(|_, _| {
+                panic!("a damaged optional journal cannot act")
+            })
+            .is_err());
+        assert!(ordinary.prepare_recovered_founder().is_ok());
+        assert_eq!(std::fs::read(&current_path).unwrap(), candidate);
+        assert!(!stage.exists() && !claim.exists());
+    };
+    for missing in [&decision_marker, &decision_dir] {
+        let parked = missing.with_extension("parked-for-recovery-test");
+        std::fs::rename(missing, &parked).unwrap();
+        check_ordinary(&mut rng);
+        assert!(!missing.exists());
+        std::fs::rename(parked, missing).unwrap();
+    }
+    let mut corrupt = original_marker.clone();
+    corrupt[0] ^= 0x40;
+    std::fs::write(&decision_marker, &corrupt).unwrap();
+    check_ordinary(&mut rng);
+    assert_eq!(std::fs::read(&decision_marker).unwrap(), corrupt);
+    std::fs::write(decision_marker, original_marker).unwrap();
     assert_eq!(std::fs::read(debris).unwrap(), b"torn decision record");
-    assert_eq!(std::fs::read(current_path).unwrap(), candidate);
 }

@@ -35,6 +35,17 @@ fn summary(
 }
 
 impl ServerStore {
+    /// The authenticated original Current already declares the journal.
+    /// A damaged optional mount may not acquire a new declaration.
+    pub(in crate::store) fn has_declared_review_decision(&self) -> Result<bool, AppError> {
+        let catalog = self
+            .pending_join_catalog
+            .try_lock()
+            .map_err(|_| refused())?;
+        let selected = catalog.as_ref().ok_or_else(refused)?;
+        Ok(selected.current.review_decision_payload_digest.is_some())
+    }
+
     pub(in crate::store) fn parse_joined_pin_catalog(
         &self,
         plain: &[u8],

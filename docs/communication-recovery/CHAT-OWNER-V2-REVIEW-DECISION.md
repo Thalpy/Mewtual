@@ -105,9 +105,10 @@ The ID11 storage declaration reserves a separate journal in a recovered
 founder's ID10 catalog. It preserves the occupied descriptors and uses a new
 keyed marker and a domain-specific declaration seed. Cold startup proves
 the covered claim, exact original hold and authenticated empty head.
-It can recover an admitted declaration, but ordinary founder startup does
-not provision the journal before the decision writer is integrated. An
-older ID10-only build refuses once ID11 is selected. The original
+Recovered founder startup provisions the hold and decision namespaces in
+order and reopens each selected catalog. Newly created founders still need
+first-session provisioning. An older ID10-only build refuses once ID11 is
+selected. The original
 recovered founder can cover the first signature under the App's exact
 Intent, Attempt and Raw files. It rechecks the original hold, current
 membership and ordinary archive before the dedicated native key call.
