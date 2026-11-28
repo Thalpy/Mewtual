@@ -100,16 +100,21 @@ impl ApprovalSweep {
         status: NativeTextReviewApprovalStatus,
     ) -> Option<ActionId> {
         use NativeTextReviewApprovalStatus::{Covered, Duplicate};
-        if matches!(status, Covered(_) | Duplicate(_)) {
-            if self.completed.len() == APPROVAL_COMPLETIONS {
-                self.completed.pop_front();
-            }
-            self.completed.push_back(entry);
+        let (Covered(action) | Duplicate(action)) = status else {
+            return None;
+        };
+        if self.completed.contains(&entry) {
+            return None;
         }
-        match status {
-            Covered(action) => Some(action),
-            _ => None,
+        if self.completed.len() == APPROVAL_COMPLETIONS {
+            // Keep known completions when scanning a larger stream in
+            // order. Replacing them here would fetch every body each pass.
+            return matches!(status, Covered(_)).then_some(action);
         }
+        self.completed.push_back(entry);
+        // A durable receipt can outlive the reply that first selected it.
+        // The first exact retry on this row can advertise the same item.
+        Some(action)
     }
 }
 
@@ -1341,10 +1346,19 @@ mod tests {
             sweep.selected(deferred, WaitingForReplyParent(action)),
             None
         );
+        assert_eq!(sweep.selected(duplicate, Duplicate(action)), Some(action));
         assert_eq!(sweep.selected(duplicate, Duplicate(action)), None);
         assert!(sweep.completed.contains(&first));
         assert!(sweep.completed.contains(&duplicate));
         assert!(!sweep.completed.contains(&deferred));
+        for id in 4..=APPROVAL_COMPLETIONS as u8 + 1 {
+            let entry = ReviewStreamEntryId::from_bytes_data([id; 32]).unwrap();
+            assert_eq!(sweep.selected(entry, Duplicate(action)), Some(action));
+        }
+        assert_eq!(sweep.completed.len(), APPROVAL_COMPLETIONS);
+        assert_eq!(sweep.selected(deferred, Duplicate(action)), None);
+        assert_eq!(sweep.selected(deferred, Covered(action)), Some(action));
+        assert!(sweep.completed.contains(&first));
     }
 
     #[test]
