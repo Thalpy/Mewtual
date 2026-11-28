@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decodeNativeOriginalPage, decodeNativeOwnMessage, decodeNativeReceived, decodeNativeReceivedNotice, readNativeAudit, readNativeHeldPosts, readNativeOriginals, readNativeOwnMessage, updateNativeReceived } from "./native-text-history.ts";
+import { decodeNativeOriginalPage, decodeNativeOwnMessage, decodeNativeReceived, decodeNativeReceivedNotice, readNativeAudit, readNativeHeldPosts, readNativeOriginals, readNativeOwnMessage, readNativeReviewedArchive, updateNativeReceived } from "./native-text-history.ts";
 const item={ordinal:"0",action:"01".repeat(32),signer:"02".repeat(32),channel:"9",presented_ms:"18446744073709551615",status:"pending",body:{kind:"create",text:"original",reply_to:null}};
 test("the founder audit reader binds each revision and drops replies for a departed view", async () => {
   const scope = { server: 1, channel: "9", context: "03".repeat(32) };
@@ -32,6 +32,33 @@ test("native own-history keeps lossless cursors and rejects foreign scope or mal
  for(const patch of [{backend:"legacy"},{scope:"group"},{next:"0"},{next:"01"},{next:"18446744073709551616"},{extra:true}])assert.throws(()=>decodeNativeOriginalPage({...page,...patch},"0",null,"9"));
  for(const patch of [{channel:"8"},{ordinal:"1"},{status:"received"},{body:{kind:"create",text:"",reply_to:null}},{body:{kind:"future"}},{body:{...item.body,text:"\ud800"}}])assert.throws(()=>decodeNativeOriginalPage({...page,items:[{...item,...patch}]},"0",null,"9"));
  assert.throws(()=>decodeNativeOriginalPage(page,"0","2","9"));
+});
+
+test("reviewed history advances a filtered page and reads each exact body independently", async () => {
+  const target = { server: 1, channel: "9", context: "03".repeat(32) };
+  const cursor = "a".repeat(438);
+  const index = { backend: "text-v2", scope: "reviewed-archive-index", status: "current", ids: [], next: cursor };
+  const action = "be".repeat(32);
+  const body = { action, certainty: "proven", replyAllowed: false, text: "Recovered approved post" };
+  const calls: Record<string, unknown>[] = [];
+  const invoke = async (_command: string, args: Record<string, unknown>) => {
+    calls.push(args);
+    if (args.reviewedAfter === null) return index;
+    if (args.reviewedAfter === cursor) return { ...index, ids: [action], next: null };
+    assert.equal(args.archivedAction, action);
+    return { backend: "text-v2", scope: "received-archive", item: body };
+  };
+  const first = await readNativeReviewedArchive(invoke, target, () => true, null);
+  assert.equal(first?.next, cursor);
+  assert.deepEqual(first?.items, []);
+  const next = await readNativeReviewedArchive(invoke, target, () => true, cursor);
+  assert.deepEqual(next?.items, [body]);
+  assert.equal(next?.next, null);
+  assert.equal(calls.length, 3);
+  await assert.rejects(readNativeReviewedArchive(async () => ({ ...index, ids: [action, action] }), target, () => true, null));
+  await assert.rejects(readNativeReviewedArchive(async () => ({ ...index, status: "stale" }), target, () => true, null));
+  const stale = await readNativeReviewedArchive(async () => ({ ...index, status: "stale", next: null }), target, () => true, cursor);
+  assert.equal(stale?.status, "stale");
 });
 
 test("held review pages advance across an unavailable window and reject stale or mixed results", async () => {

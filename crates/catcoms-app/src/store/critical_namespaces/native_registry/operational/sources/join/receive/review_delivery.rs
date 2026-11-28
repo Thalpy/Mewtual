@@ -4,7 +4,8 @@ use super::dependencies::REPLY_FEE;
 use super::*;
 use crate::store::{
     persistence::governance_layout::joined::review_receive::{
-        pinned_founder, ApprovalSelection, ReviewHeaderPoll,
+        pinned_founder, ApprovalSelection, ReviewActionPage, ReviewActionScope, ReviewHeaderPoll,
+        SelectedReviewActions, REVIEW_ACTION_CURSOR_BYTES,
     },
     NativeTextInvitePacketData, NativeTextReviewApprovalStatus, NativeTextReviewHeaderPollStatus,
     NativeTextReviewHeaderStatus,
@@ -20,7 +21,10 @@ use catcoms_replication::chat::{
 };
 use catcoms_rt::TransportError;
 use catcoms_sync::{
-    owner_v2::{PreparedV2ReviewDelivery, V2MemberDependencyRoute, V2ReviewDeliveryData},
+    owner_v2::{
+        PreparedV2ReviewDelivery, V2MemberDependencyRoute, V2MemberPublicationObservation,
+        V2ReviewDeliveryData,
+    },
     V2MemberContactData, V2_MEMBER_CONTACT_BYTES,
 };
 use std::ops::RangeInclusive;
@@ -99,9 +103,67 @@ pub struct NativeTextJoinedReviewResponse {
     context: Context,
 }
 
+/// The result of one bounded scan of the original joined channel's selected
+/// reviewed receipts. A stale cursor should restart from the first page.
+pub enum NativeTextJoinedReviewedPage {
+    Unavailable,
+    StaleCursor,
+    Current(Box<NativeTextJoinedReviewedActions>),
+}
+
+pub struct NativeTextJoinedReviewedActions {
+    original: NativeTextJoinedRowSelection,
+    channel: u128,
+    ui: UiEffectNegative,
+    caller: RequestCancellation,
+    membership: V2MemberPublicationObservation,
+    selected: SelectedReviewActions,
+}
+
+impl NativeTextJoinedReviewedPage {
+    /// Exact ciphertext width for a continuation, before any IPC encoding.
+    pub const CURSOR_BYTES: usize = REVIEW_ACTION_CURSOR_BYTES;
+}
+
+impl NativeTextJoinedReviewedActions {
+    /// Resolve under the native publication guard for the original row and
+    /// conversation. An empty slice may have an opaque continuation when
+    /// this bounded scan inspected only receipts from other channels.
+    pub fn with_publication<T>(
+        &self,
+        selection: &NativeTextJoinedRowSelection,
+        channel: u128,
+        publish: impl FnOnce(&[ActionId], Option<&[u8]>) -> T,
+    ) -> Result<T, Refusal> {
+        self.selected
+            .observation
+            .with_publication(|| {
+                if !self.original.same_original(selection)
+                    || self.channel != channel
+                    || !self.original.is_current_cached()
+                    || !self.ui.is_current_cached()
+                    || !self.membership.is_current_cached()
+                    || self.caller.is_cancelled()
+                {
+                    return Err(Refusal::Stale);
+                }
+                Ok(publish(
+                    &self.selected.actions,
+                    self.selected.next.as_ref().map(|cursor| cursor.as_slice()),
+                ))
+            })
+            .map_err(|error| match error {
+                AppError::ChatV2ArchiveBusy => Refusal::Busy,
+                _ => Refusal::Stale,
+            })?
+    }
+}
+
 catcoms_rt::redacted_debug! {
     NativeTextJoinedReviewExchange;
     NativeTextJoinedReviewResponse;
+    NativeTextJoinedReviewedPage;
+    NativeTextJoinedReviewedActions;
 }
 
 impl NativeTextJoinedReviewExchange {
@@ -130,6 +192,59 @@ impl NativeTextJoinedReviewExchange {
 }
 
 impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
+    /// List durable reviewed IDs with a cursor valid for the exact archive
+    /// root and this row's channel. This grants no projection authority.
+    pub fn reviewed_action_page(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        channel: u128,
+        after: Option<&[u8]>,
+        caller: &RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<NativeTextJoinedReviewedPage, Refusal> {
+        let (selected, membership) = self.with_member_receiver(selection, caller, |source| {
+            let (binding, _) = source.review_poll_membership()?;
+            let target = ReviewActionScope {
+                row_request: selection.request_data(),
+                channel,
+            };
+            let selected = source
+                .store
+                .read_selected_review_actions(binding, (target, after), rng)
+                .map_err(review_storage_refusal)?;
+            if let Some(ReviewActionPage::Selected(page)) = selected.as_ref() {
+                for anchor in page.anchors.iter().flatten().copied() {
+                    if source
+                        .node
+                        .require_review_membership_anchor(source.prefix, anchor)
+                        .map_err(|_| Refusal::Stale)?
+                        != binding
+                    {
+                        return Err(Refusal::Stale);
+                    }
+                }
+                let (membership, _) = source.effect_data()?;
+                Ok((selected, Some(membership)))
+            } else {
+                Ok((selected, None))
+            }
+        })?;
+        Ok(match selected {
+            None => NativeTextJoinedReviewedPage::Unavailable,
+            Some(ReviewActionPage::StaleCursor) => NativeTextJoinedReviewedPage::StaleCursor,
+            Some(ReviewActionPage::Selected(selected)) => {
+                NativeTextJoinedReviewedPage::Current(Box::new(NativeTextJoinedReviewedActions {
+                    original: selection.clone(),
+                    channel,
+                    ui: self.original.command.ui.into_effect_negative(),
+                    caller: caller.clone(),
+                    membership: membership.ok_or(Refusal::Stale)?,
+                    selected,
+                }))
+            }
+        })
+    }
+
     #[cfg(test)]
     pub(in crate::store) fn require_review_anchor_for_test(
         &self,

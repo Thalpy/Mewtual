@@ -1026,8 +1026,11 @@ after the selected header, historical Remove and reply parent agree. Its
 result distinguishes saved, duplicate, waiting for a header, waiting for a
 reply parent and frozen. Exact-ID display requires an independent guarded
 lookup. The joined worker scans approved headers for its attached channel
-and can refresh an active view after a receipt is selected. History
-pagination still needs to include receipt IDs after navigation or restart.
+and can refresh an active view after a receipt is selected. The separate
+`reviewedAfter` history cursor is opaque, scoped to the original joined row
+and channel, and valid for the selected approval root. Every exact body
+read checks ordinary history first. A stale cursor restarts review history
+while the ordinary cursor continues.
 [Exact contract](communication-recovery/CHAT-OWNER-V2-REVIEW-DECISION.md).
 
 ## Guarded current chat projection core (5 November; authored, unexecuted)

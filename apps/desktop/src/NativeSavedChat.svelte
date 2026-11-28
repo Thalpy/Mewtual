@@ -84,7 +84,7 @@
           <article>
             <small>{item.certainty === "provisional" ? "Saved received · Provisional" : "Saved received · Verified"}</small>
             <p>{item.text}</p>
-            {#if reply}<button type="button" onclick={() => reply(item.action)} disabled={busy}>Reply</button>{/if}
+            {#if reply && item.replyAllowed !== false}<button type="button" onclick={() => reply(item.action)} disabled={busy}>Reply</button>{/if}
           </article>
         {/each}
         {#if shownArchive.more && readArchive}<button onclick={() => readArchive(true)} disabled={busy || shownArchive.loading}>Load more received messages</button>{/if}
@@ -94,7 +94,7 @@
       <article>
         <small>{item.certainty === "provisional" ? "Received · Provisional" : "Received · Verified"}</small>
         <p>{item.text}</p>
-        {#if reply}<button type="button" onclick={() => reply(item.action)} disabled={busy}>Reply</button>{/if}
+        {#if reply && item.replyAllowed !== false}<button type="button" onclick={() => reply(item.action)} disabled={busy}>Reply</button>{/if}
       </article>
     {/each}
     {#if more}<button onclick={loadMore} disabled={loading || busy}>Load more saved messages</button>{/if}

@@ -483,3 +483,37 @@ test("a delayed old Found cannot release its replacement generation's busy owner
  oldReply.resolve(response(0));await old;assert.equal(app.state().busy,true,"old finally must preserve the live replacement owner");
  newReply.resolve(response(1));await current;assert.equal(app.state().busy,false);app.done();
 });
+
+
+test("actual App retains ordinary history while a stale reviewed cursor restarts", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  const ordinary = { action: row.action, text: "Ordinary history", certainty: "proven" };
+  const approved = { action: "12".repeat(32), text: "Approved after removal", certainty: "proven", replyAllowed: false };
+  const cursor = "17".repeat(219);
+  const index = { backend: "text-v2", scope: "reviewed-archive-index" };
+  const body = { backend: "text-v2", scope: "received-archive" };
+  app.nativeArchivePages(
+    { backend: "text-v2", scope: "received-archive-index", available: true, ids: [ordinary.action], more: false },
+    { ...body, item: ordinary },
+  );
+  app.nativeReviewedPages({ ...index, status: "current", ids: [], next: cursor });
+  await app.nativeArchiveRefresh();
+  assert.deepEqual(app.archive().items, [ordinary]);
+  assert.deepEqual(app.archive().reviewed, []);
+  assert.equal(app.archive().reviewedAfter, cursor);
+
+  app.nativeReviewedPages(
+    { ...index, status: "stale", ids: [], next: null },
+    { ...index, status: "current", ids: [approved.action], next: null },
+  );
+  app.nativeArchivePages({ ...body, item: approved });
+  await app.nativeArchiveRefresh(true);
+  assert.deepEqual(app.nativeReviewedCalls().map((args: Record<string, unknown>) => args.reviewedAfter), [null, cursor, null]);
+  assert.equal(app.nativeArchiveCalls().length, 3, "ordinary pagination did not restart");
+  assert.deepEqual(app.archive().items, [ordinary]);
+  assert.deepEqual(app.archive().reviewed, [approved]);
+  assert.equal(app.archive().reviewedAfter, undefined);
+  app.done();
+});

@@ -33,8 +33,9 @@ pub use join::{
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
     NativeTextJoinedMemberSaveJob, NativeTextJoinedReceivedOriginal, NativeTextJoinedReconnect,
     NativeTextJoinedRequestPreparation, NativeTextJoinedReviewExchange,
-    NativeTextJoinedReviewResponse, NativeTextJoinedRowSelection,
-    NativeTextJoinedSavedContactApprovals, NativeTextJoinedSelectionPreparation,
+    NativeTextJoinedReviewResponse, NativeTextJoinedReviewedActions, NativeTextJoinedReviewedPage,
+    NativeTextJoinedRowSelection, NativeTextJoinedSavedContactApprovals,
+    NativeTextJoinedSelectionPreparation,
 };
 mod member;
 mod network;

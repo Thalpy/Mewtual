@@ -3223,10 +3223,33 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         std::time::Duration::from_secs(12),
                         async { tokio::join!(exchange.receive(), serve) },
                     ).await.unwrap();
+                    let crate::store::NativeTextJoinedReviewedPage::Current(before_add) = survivor()
+                        .reviewed_action_page(&selection, channel, None, &fresh, &mut history_rng)
+                        .unwrap()
+                    else {
+                        panic!("the selected receiver has an empty page before the Add");
+                    };
+                    before_add.with_publication(&selection, channel, |actions, next| {
+                        assert!(actions.is_empty() && next.is_none());
+                    }).unwrap();
                     let (current, epoch) = survivor().apply_governing_response(
                         &selection, &governing.unwrap(), &fresh, &mut history_rng,
                     ).unwrap();
                     assert_eq!((current, epoch), (approved.position_data().membership_header, removed_epoch + 1));
+                    assert!(before_add.with_publication(&selection, channel, |_, _| {
+                        panic!("a page from the previous membership view released after Add");
+                    }).is_err());
+                    drop(before_add);
+                    let crate::store::NativeTextJoinedReviewedPage::Current(after_add) = survivor()
+                        .reviewed_action_page(&selection, channel, None, &fresh, &mut history_rng)
+                        .unwrap()
+                    else {
+                        panic!("the live membership can still read the selected receiver");
+                    };
+                    after_add.with_publication(&selection, channel, |actions, next| {
+                        assert!(actions.is_empty() && next.is_none());
+                    }).unwrap();
+                    drop(after_add);
                     survivor().require_review_anchor_for_test(&selection, (removed_head, removed_epoch), &fresh).unwrap();
                     survivor().require_review_anchor_for_test(&selection, (third_head, third_epoch), &fresh).unwrap();
                     assert!(survivor().require_review_anchor_for_test(&selection, (third_head, removed_epoch), &fresh).is_err());
@@ -3437,8 +3460,28 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     };
                     let (cancel, revoked) = tokio::sync::watch::channel(false);
                     let review_scope = RequestCancellation::new(revoked, None);
+                    let crate::store::NativeTextJoinedReviewedPage::Current(page) = survivor()
+                        .reviewed_action_page(&selection, channel, None, &review_scope, &mut history_rng)
+                        .unwrap()
+                    else {
+                        panic!("the durable approval must be discoverable");
+                    };
+                    assert_eq!(
+                        page.with_publication(&selection, channel, |actions, next| {
+                            assert!(next.is_none());
+                            actions.to_vec()
+                        }).unwrap(),
+                        [action],
+                    );
+                    assert!(page.with_publication(&selection, other_channel, |_, _| {
+                        panic!("the reviewed page changed channels");
+                    }).is_err());
                     let delivered = read(ReviewStreamQuery::Header(1), &mut provider, &mut history_rng, &review_scope).await;
                     cancel.send(true).unwrap();
+                    assert!(page.with_publication(&selection, channel, |_, _| {
+                        panic!("a cancelled page exposed a reviewed ID");
+                    }).is_err());
+                    drop(page);
                     assert!(survivor().with_review_delivery::<()>(&selection, delivered, &fresh, |_| {
                         panic!("a response to a cancelled review scope must stay private")
                     }).is_err());
@@ -3486,10 +3529,33 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     assert_eq!(record.held_data().target_data().spec().context.admission, third_own);
                     assert_eq!(record.held_data().removal_data(), (removed_head, removed_epoch));
                     drop(cold_receipt);
+                    use crate::store::persistence::governance_layout::joined::review_receive::{
+                        ReviewActionPage, ReviewActionScope,
+                    };
+                    for (page_channel, expected) in [(channel, &[action][..]), (other_channel, &[][..])] {
+                        let target = ReviewActionScope {
+                            row_request: registration.request,
+                            channel: page_channel,
+                        };
+                        let Some(ReviewActionPage::Selected(page)) = store.read_selected_review_actions(
+                            anchor, (target, None), &mut history_rng,
+                        ).unwrap() else {
+                            panic!("the reopened approved index must be readable");
+                        };
+                        assert_eq!(page.actions.as_slice(), expected);
+                        assert!(page.next.is_none());
+                    }
                     let parked = approval_receipt.0.with_extension("parked");
                     let selector = std::fs::read(&manifest).unwrap();
                     std::fs::rename(&approval_receipt.0, &parked).unwrap();
                     assert!(store.read_received_review_approval(anchor, (channel, action)).is_err());
+                    let target = ReviewActionScope {
+                        row_request: registration.request,
+                        channel: other_channel,
+                    };
+                    assert!(store.read_selected_review_actions(
+                        anchor, (target, None), &mut history_rng,
+                    ).is_err(), "the wrong-channel skip must still prove the receipt");
                     assert!(!approval_receipt.0.exists());
                     assert_eq!(std::fs::read(&manifest).unwrap(), selector);
                     std::fs::rename(&parked, approval_receipt.0).unwrap();

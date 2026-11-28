@@ -4,9 +4,9 @@
 use super::*;
 use catcoms_app::store::{
     NativeTextFounderAudit, NativeTextHistoryResponseCredit, NativeTextJoinedMemberProjection,
-    NativeTextJoinedRowSelection, NativeTextJoinedSelectionPreparation,
-    NativeTextMemberHistoryPage, NativeTextMemberHistoryStatus, NativeTextMemberPreparation,
-    V2MemberSaveRefusal,
+    NativeTextJoinedReviewedPage, NativeTextJoinedRowSelection,
+    NativeTextJoinedSelectionPreparation, NativeTextMemberHistoryPage,
+    NativeTextMemberHistoryStatus, NativeTextMemberPreparation, V2MemberSaveRefusal,
 };
 use catcoms_replication::chat::{
     ActionId, Body, GuardedProjection, ProjectionCertainty, SignedAction,
@@ -56,6 +56,9 @@ enum ReadRequest {
     HeldPosts {
         cursor: Option<[u8; 32]>,
         limit: usize,
+    },
+    ReviewedPosts {
+        cursor: Option<[u8; NativeTextJoinedReviewedPage::CURSOR_BYTES]>,
     },
 }
 #[derive(Clone, Copy)]
@@ -116,6 +119,7 @@ fn parse(payload: &InvokeBody) -> Result<Read, &'static str> {
                     | "auditAction"
                     | "auditAfter"
                     | "heldAfter"
+                    | "reviewedAfter"
                     | "trace"
             )
         })
@@ -182,6 +186,25 @@ fn parse(payload: &InvokeBody) -> Result<Read, &'static str> {
             channel,
             context,
             request: ReadRequest::HeldPosts { cursor, limit },
+        });
+    }
+    if let Some(after) = object.get("reviewedAfter") {
+        if object.len() != 4 {
+            return Err("Invalid reviewed history request.");
+        }
+        let cursor = match after {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(value) => Some(
+                membership::decode_exact_hex(value)
+                    .map_err(|_| "Invalid reviewed history cursor.")?,
+            ),
+            _ => return Err("Invalid reviewed history cursor."),
+        };
+        return Ok(Read {
+            server,
+            channel,
+            context,
+            request: ReadRequest::ReviewedPosts { cursor },
         });
     }
     if object.contains_key("auditAction") || object.contains_key("auditAfter") {
@@ -378,6 +401,13 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                     .await
                     .map(Response::HeldPosts)
             }
+            ReadRequest::ReviewedPosts { cursor } => execute_reviewed(
+                &state,
+                &invocation,
+                cursor.as_ref().map(|raw| raw.as_slice()),
+            )
+            .await
+            .map(|output| Response::ReviewedPage(Box::new(output))),
         };
         #[cfg(test)]
         {
@@ -407,6 +437,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                 }
                 Ok(Response::Audit(_)) => resolver.reject(STALE),
                 Ok(Response::HeldPosts(output)) => output.resolve(&state, resolver),
+                Ok(Response::ReviewedPage(output)) => output.resolve(resolver),
                 Err(error) => resolver.reject(&*error),
             }
         }
@@ -504,6 +535,7 @@ enum Response {
     ArchivePage(ArchivePageOutput),
     Audit(AuditOutput),
     HeldPosts(held_posts::Output),
+    ReviewedPage(Box<ReviewedPageOutput>),
 }
 
 struct AuditOutput {
@@ -517,6 +549,97 @@ struct ArchivePageOutput {
     _payment: Arc<Payment>,
 }
 
+struct ReviewedPageOutput {
+    page: NativeTextJoinedReviewedPage,
+    row: Option<NativeTextJoinedRowSelection>,
+    channel: u128,
+    _permit: OwnedMutexGuard<()>,
+    _payment: Arc<Payment>,
+}
+
+impl ReviewedPageOutput {
+    fn resolve<R: tauri::Runtime>(&self, resolver: tauri::ipc::InvokeResolver<R>) {
+        let body = |status, ids: &[ActionId], next: Option<&[u8]>| {
+            serde_json::json!({
+                "backend": "text-v2",
+                "scope": "reviewed-archive-index",
+                "status": status,
+                "ids": ids.iter().map(|id| hex::encode(id.as_bytes())).collect::<Vec<_>>(),
+                "next": next.map(hex::encode),
+            })
+            .to_string()
+        };
+        match (&self.page, &self.row) {
+            (NativeTextJoinedReviewedPage::Unavailable, _) => {
+                resolver.resolve(InvokeResponseBody::Json(body("unavailable", &[], None)))
+            }
+            (NativeTextJoinedReviewedPage::StaleCursor, _) => {
+                resolver.resolve(InvokeResponseBody::Json(body("stale", &[], None)))
+            }
+            (NativeTextJoinedReviewedPage::Current(page), Some(row)) => {
+                let mut resolver = Some(resolver);
+                let _ = page.with_publication(row, self.channel, |ids, next| {
+                    resolver
+                        .take()
+                        .unwrap()
+                        .resolve(InvokeResponseBody::Json(body("current", ids, next)));
+                });
+                if let Some(resolver) = resolver {
+                    resolver.reject(STALE);
+                }
+            }
+            (NativeTextJoinedReviewedPage::Current(_), None) => resolver.reject(STALE),
+        }
+    }
+}
+
+async fn execute_reviewed(
+    state: &AppState,
+    call: &Invocation,
+    cursor: Option<&[u8]>,
+) -> Result<ReviewedPageOutput, String> {
+    let scope = call.scope.clone();
+    let permit = call
+        .member_work
+        .foreground(scope.clone())
+        .await
+        .ok_or(STALE)?;
+    let original = capture(state, call).await?;
+    let channel = call.read.channel;
+    let payment = call.payment.clone();
+    let cursor = cursor.map(<[u8]>::to_vec);
+    tauri::async_runtime::spawn_blocking(move || {
+        let (page, row) = match original {
+            Preparation::Joined(original, row) => {
+                let page = original
+                    .reviewed_action_page(
+                        &row,
+                        channel,
+                        cursor.as_deref(),
+                        &scope,
+                        &mut OsCryptoRng,
+                    )
+                    .map_err(|error| match error {
+                        V2MemberSaveRefusal::Busy => BUSY,
+                        V2MemberSaveRefusal::Stale | V2MemberSaveRefusal::Cancelled => STALE,
+                        _ => "Approved posts could not be read.",
+                    })?;
+                (page, Some(row))
+            }
+            Preparation::Founder(_) => (NativeTextJoinedReviewedPage::Unavailable, None),
+        };
+        Ok(ReviewedPageOutput {
+            page,
+            row,
+            channel,
+            _permit: permit,
+            _payment: payment,
+        })
+    })
+    .await
+    .map_err(|_| STALE.to_owned())?
+}
+
 struct ReceivedOutput {
     scope: &'static str,
     projection: Option<NativeTextJoinedMemberProjection>,
@@ -527,7 +650,9 @@ struct ReceivedOutput {
 impl ReceivedOutput {
     fn resolve<R: tauri::Runtime>(&self, resolver: tauri::ipc::InvokeResolver<R>) {
         let Some(projection) = &self.projection else {
-            resolver.resolve(InvokeResponseBody::Json(received_body(self.scope, None)));
+            resolver.resolve(InvokeResponseBody::Json(received_body(
+                self.scope, None, false,
+            )));
             return;
         };
         let mut resolver = Some(resolver);
@@ -538,6 +663,7 @@ impl ReceivedOutput {
                 .resolve(InvokeResponseBody::Json(received_body(
                     self.scope,
                     Some(result),
+                    projection.is_reviewed_only(),
                 )));
         });
         if let Some(resolver) = resolver {
@@ -546,8 +672,12 @@ impl ReceivedOutput {
     }
 }
 
-fn received_body(scope: &'static str, projection: Option<&GuardedProjection>) -> String {
-    let item = match projection {
+fn received_body(
+    scope: &'static str,
+    projection: Option<&GuardedProjection>,
+    reviewed_only: bool,
+) -> String {
+    let mut item = match projection {
         Some(GuardedProjection::Visible {
             create,
             text,
@@ -563,6 +693,9 @@ fn received_body(scope: &'static str, projection: Option<&GuardedProjection>) ->
         }),
         _ => serde_json::Value::Null,
     };
+    if reviewed_only && item.is_object() {
+        item["replyAllowed"] = false.into();
+    }
     serde_json::json!({"backend":"text-v2","scope":scope,"item":item}).to_string()
 }
 
@@ -1211,6 +1344,35 @@ mod tests {
             let mut request = payload.clone();
             request[field] = invalid;
             assert!(parse(&InvokeBody::Json(request)).is_err());
+        }
+    }
+
+    #[test]
+    fn reviewed_history_requires_one_exact_opaque_cursor() {
+        let mut payload = serde_json::json!({
+            "server": 1, "channel": "7", "expectedContext": "01".repeat(32),
+            "reviewedAfter": null,
+        });
+        assert!(matches!(
+            parse(&InvokeBody::Json(payload.clone())).unwrap().request,
+            ReadRequest::ReviewedPosts { cursor: None }
+        ));
+        let width = NativeTextJoinedReviewedPage::CURSOR_BYTES;
+        assert_eq!(width, 219, "the frontend must use the same opaque width");
+        payload["reviewedAfter"] = "ab".repeat(width).into();
+        assert!(matches!(
+            parse(&InvokeBody::Json(payload.clone())).unwrap().request,
+            ReadRequest::ReviewedPosts { cursor: Some(raw) } if raw == [0xab; 219]
+        ));
+        for (field, value) in [
+            ("reviewedAfter", "ab".repeat(width - 1).into()),
+            ("reviewedAfter", "AB".repeat(width).into()),
+            ("archiveAfter", serde_json::Value::Null),
+            ("limit", 2.into()),
+        ] {
+            let mut invalid = payload.clone();
+            invalid[field] = value;
+            assert!(parse(&InvokeBody::Json(invalid)).is_err());
         }
     }
 

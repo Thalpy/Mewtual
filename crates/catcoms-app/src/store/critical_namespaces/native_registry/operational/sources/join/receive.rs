@@ -59,7 +59,10 @@ pub use governing::{
 pub use history_discovery::{
     NativeTextJoinedHistoryExchange, NativeTextJoinedHistoryPage, NativeTextJoinedHistoryResponse,
 };
-pub use review_delivery::{NativeTextJoinedReviewExchange, NativeTextJoinedReviewResponse};
+pub use review_delivery::{
+    NativeTextJoinedReviewExchange, NativeTextJoinedReviewResponse,
+    NativeTextJoinedReviewedActions, NativeTextJoinedReviewedPage,
+};
 
 const INGRESS_FEE: usize = 8 * 1024;
 // Padded plaintext, canonical signed action and its original frame may overlap.
@@ -284,6 +287,14 @@ impl NativeTextJoinedArchivedActions {
 }
 
 impl NativeTextJoinedMemberProjection {
+    /// A detached reviewed copy can be read but cannot supply a new
+    /// ordinary reply parent. A selected ordinary original takes priority.
+    pub fn is_reviewed_only(&self) -> bool {
+        self.archive
+            .as_ref()
+            .is_some_and(|archive| archive.review.is_some())
+    }
+
     /// Exact member of the replayed target's selected archive action set.
     /// Historical dependencies and local outbox entries cannot satisfy it.
     pub fn archived_includes(&self, action: ActionId) -> bool {

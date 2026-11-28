@@ -64,7 +64,10 @@ pub use receive::{
 };
 mod reconnect;
 pub use receive::NativeTextJoinedSavedContactApprovals;
-pub use receive::{NativeTextJoinedReviewExchange, NativeTextJoinedReviewResponse};
+pub use receive::{
+    NativeTextJoinedReviewExchange, NativeTextJoinedReviewResponse,
+    NativeTextJoinedReviewedActions, NativeTextJoinedReviewedPage,
+};
 
 catcoms_rt::redacted_debug! { NativeTextJoinedContactConsent; ScopedContactConsent; }
 pub use reconnect::{NativeTextJoinedContactApprovalProof, NativeTextJoinedReconnect};

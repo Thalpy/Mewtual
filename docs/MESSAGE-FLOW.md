@@ -27,7 +27,9 @@ exact approved original after its public case and ordinary reply ancestry
 are verified. This receipt leaves ordinary history unchanged.
 An exact joined history lookup with a verified ordinary archive miss can
 read the covered approval and render it through the original native
-source. History discovery still needs to enumerate these receipt IDs.
+source. A separate bounded history cursor discovers the selected review
+receipt IDs for that conversation, including after reopen. Each ID still
+requires its own exact guarded body read.
 When the original founder connection is available, the joined worker
 polls the next selected header and occasionally rechecks the current tip.
 This shares a single inventory slot with ordinary discovery. Exact

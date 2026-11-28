@@ -20,6 +20,11 @@ use catcoms_replication::chat::{
 };
 use std::ops::RangeInclusive;
 
+mod paging;
+pub(in crate::store) use paging::{
+    ReviewActionPage, ReviewActionScope, SelectedReviewActions, REVIEW_ACTION_CURSOR_BYTES,
+};
+
 const READ_WORK: usize =
     3 * MAX_VIEW_FILES * MAX_INDEX_FRAME_BYTES + 6 * approval::MAX_APPROVAL_FRAME + 128 * 1024;
 const POLL_WORK: usize = 128 * 1024;
@@ -204,30 +209,18 @@ impl SelectedReviewReceiver {
             self.require_settled()?;
             return Ok(None);
         };
-        let ciphertext = lane.approval(&indexed.receipt)?;
         let pin = pinned_founder(binding);
-        let raw = approval::open(&lane_key, &pin, &ciphertext)?;
-        let record = ReviewStreamRecord::decode(&pin, &raw).map_err(|_| denied())?;
-        if record.held_data().target_data().spec().channel != channel {
-            return Err(denied());
-        }
-        let read = ReviewLaneRead {
+        let selected = ReviewLaneRead {
             head: Some(lane.head),
             key: &lane_key,
             indexes: &indexes,
         };
-        let ApprovalSelection::Selected { row: header, .. } = read.select_approval(
-            &pin,
-            record.entry_data(),
-            |id| lane.page(id),
-            |digest| lane.header(digest),
-        )?
-        else {
-            return Err(denied());
-        };
-        if indexed != approval::row(header, &record, &ciphertext)? {
-            return Err(denied());
-        }
+        let (raw, ()) = read_selected_receipt(&lane, &selected, &pin, indexed, |record| {
+            if record.held_data().target_data().spec().channel != channel {
+                return Err(denied());
+            }
+            Ok(())
+        })?;
         lane.require(&self.directory)?;
         manifest.require_current(&self.directory)?;
         self.require_settled()?;
@@ -241,6 +234,32 @@ impl SelectedReviewReceiver {
             _fee: fee,
         }))
     }
+}
+
+fn read_selected_receipt<T>(
+    lane: &HeldLane,
+    read: &ReviewLaneRead<'_>,
+    pin: &catcoms_replication::chat::FounderGenesisAnchorData,
+    indexed: crate::store::persistence::v2_text::private_index::ApprovedReviewIndexValueData,
+    inspect: impl FnOnce(&ReviewStreamRecord<'_>) -> Result<T, AppError>,
+) -> Result<(Zeroizing<Vec<u8>>, T), AppError> {
+    let ciphertext = lane.approval(&indexed.receipt)?;
+    let raw = approval::open(read.key, pin, &ciphertext)?;
+    let record = ReviewStreamRecord::decode(pin, &raw).map_err(|_| denied())?;
+    let ApprovalSelection::Selected { row: header, .. } = read.select_approval(
+        pin,
+        record.entry_data(),
+        |id| lane.page(id),
+        |digest| lane.header(digest),
+    )?
+    else {
+        return Err(denied());
+    };
+    if indexed != approval::row(header, &record, &ciphertext)? {
+        return Err(denied());
+    }
+    let inspected = inspect(&record)?;
+    Ok((raw, inspected))
 }
 
 fn scan_approval_ordinals<T>(

@@ -72,7 +72,8 @@ pub use operational::{
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
     NativeTextJoinedReceivedOriginal, NativeTextJoinedReviewExchange,
-    NativeTextJoinedReviewResponse, NativeTextJoinedSelectionPreparation,
+    NativeTextJoinedReviewResponse, NativeTextJoinedReviewedActions, NativeTextJoinedReviewedPage,
+    NativeTextJoinedSelectionPreparation,
 };
 pub use operational::{
     NativeTextJoinedContactApprovalProof, NativeTextJoinedContactConsent,

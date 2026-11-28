@@ -216,7 +216,7 @@
   import type { NativeTextIntent, NativeTextIntents } from "./native-text-intents";
   import { createNativeTextDriver } from "./native-text-driver";
   import { decodeNativeMembershipNotice, decodeRestoredChatSession, type NativeTextServer } from "./native-text-session";
-  import { decodeNativeReceived, decodeNativeReceivedNotice, isNativeHistoryBusy, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived, type NativeOriginal, type NativeOwnMessage, type NativeReceived } from "./native-text-history";
+  import { decodeNativeReceived, decodeNativeReceivedNotice, isNativeHistoryBusy, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, readNativeReviewedArchive, updateNativeReceived, type NativeOriginal, type NativeOwnMessage, type NativeReceived } from "./native-text-history";
   import NativeSavedChat from "./NativeSavedChat.svelte";
   import {
     captureLockContinuity, closeContinuityAcknowledgement, NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
@@ -401,8 +401,9 @@
   const nativeReceivedReads = new Map<string, { dirty: boolean; current: () => boolean; read: () => Promise<void> }>();
   let nativeReceivedPump: Promise<void> | null = null;
   let nativeArchive = $state.raw<{
-    server: number; channel: string; context: string; items: NativeReceived[];
-    after: string | null; more: boolean; loading: boolean; note: string | null;
+    server: number; channel: string; context: string; items: NativeReceived[]; reviewed: NativeReceived[];
+    after: string | null; more: boolean; reviewedAfter: string | null | undefined;
+    loading: boolean; note: string | null;
   } | null>(null);
   let nativeArchiveRevision = 0;
   let nativeArchiveFirstPage = $state(false);
@@ -7334,6 +7335,7 @@
       nativeArchive = {
         ...nativeArchive,
         items: nativeArchive.items.filter(item => item.action !== action),
+        reviewed: nativeArchive.reviewed.filter(item => item.action !== action),
       };
     }
     if (nativeReceivedScope?.server === server && nativeReceivedScope.channel === channel && nativeReceivedScope.context === context) {
@@ -7436,7 +7438,8 @@
       && !nativeConversationRemoved(server, context);
     const base = append && nativeArchive?.server === server && nativeArchive.channel === channel && nativeArchive.context === context
       ? nativeArchive : null;
-    const previous = { server, channel, context, items: base?.items ?? [], after: base?.after ?? null, more: base?.more ?? false };
+    const previous = { server, channel, context, items: base?.items ?? [], after: base?.after ?? null, more: base?.more ?? false,
+      reviewed: base?.reviewed ?? [], reviewedAfter: base ? base.reviewedAfter : null };
     const changed = new Set<string>();
     nativeArchiveReadChanges = changed;
     // An invalidated page loses visible ownership immediately. Its physical
@@ -7445,7 +7448,7 @@
     nativeArchive = { ...previous, note: null, loading: true };
     try {
       let retries = 3;
-      const page = await readNativeReceivedArchive(async (_command, args) => {
+      const invokePage = async (_command: string, args: Record<string, unknown>) => {
         while (current()) {
           try { return await invoke<unknown>("get_message_page", args); }
           catch (failure) {
@@ -7454,28 +7457,56 @@
           }
         }
         return null;
-      }, { server, channel, context }, current, previous.after);
-      if (!page || !current()) return;
-      const covered = new Set(page.covered.filter(action => !changed.has(action)));
+      };
+      const target = { server, channel, context };
+      const page = !base || previous.more
+        ? await readNativeReceivedArchive(invokePage, target, current, previous.after)
+        : null;
+      if (!current()) return;
+      let reviewed: Awaited<ReturnType<typeof readNativeReviewedArchive>> = null;
+      let reviewFailed = false;
+      let resetReviewed = false;
+      if (previous.reviewedAfter !== undefined) {
+        try {
+          reviewed = await readNativeReviewedArchive(invokePage, target, current, previous.reviewedAfter);
+          if (reviewed?.status === "stale" && previous.reviewedAfter !== null) {
+            resetReviewed = true;
+            reviewed = await readNativeReviewedArchive(invokePage, target, current, null);
+          }
+        } catch { reviewFailed = true; }
+      }
+      if (!current()) return;
+      const ordinaryCovered = new Set(page?.covered ?? []);
+      const reviewedCovered = new Set(reviewed?.covered ?? []);
+      const covered = new Set([...ordinaryCovered, ...reviewedCovered].filter(action => !changed.has(action)));
       for (const action of covered) nativeReceivedReads.delete(action);
       if (nativeReceivedScope?.server === server && nativeReceivedScope.channel === channel && nativeReceivedScope.context === context) {
         nativeReceived = nativeReceived.filter(item => !covered.has(item.action));
       }
-      const note = page.blocked ? "Saved received messages could not be loaded. Try again."
-        : !page.available ? "Saved received messages are unavailable for this group."
-        : page.incomplete ? "Some saved received messages could not be loaded."
+      const note = page?.blocked ? "Saved received messages could not be loaded. Try again."
+        : page && !page.available ? "Saved received messages are unavailable for this group."
+        : page?.incomplete ? "Some saved received messages could not be loaded."
+        : reviewFailed || reviewed?.blocked || reviewed?.incomplete ? "Some approved posts could not be loaded."
         : null;
+      const reviewedBase = resetReviewed || reviewed?.status === "unavailable" ? [] : previous.reviewed;
+      const reviewedAfter = reviewed?.status === "unavailable" ? undefined
+        : reviewed?.status === "current" && !reviewed.blocked ? reviewed.next ?? undefined
+        : resetReviewed ? null : previous.reviewedAfter;
       nativeArchive = {
         ...previous,
-        items: [...previous.items.filter(item => !covered.has(item.action)), ...page.items]
+        items: [...previous.items.filter(item => !ordinaryCovered.has(item.action)), ...(page?.items ?? [])]
           .filter(item => !changed.has(item.action)).slice(-64),
-        after: page.blocked ? previous.after : page.ids.at(-1) ?? previous.after,
-        more: page.blocked ? previous.more : page.more,
+        reviewed: [...reviewedBase.filter(item => !reviewedCovered.has(item.action) && !ordinaryCovered.has(item.action)), ...(reviewed?.items ?? [])]
+          .filter(item => !changed.has(item.action)).slice(-64),
+        reviewedAfter,
+        after: !page || page.blocked ? previous.after : page.ids.at(-1) ?? previous.after,
+        more: !page || page.blocked ? previous.more : page.more,
         note,
         loading: false,
       };
     } catch {
-      if (current()) nativeArchive = { ...previous, items: previous.items.filter(item => !changed.has(item.action)), note: "Saved received messages could not be loaded. Try again.", loading: false };
+      if (current()) nativeArchive = { ...previous, items: previous.items.filter(item => !changed.has(item.action)),
+        reviewed: previous.reviewed.filter(item => !changed.has(item.action)), note: "Saved received messages could not be loaded. Try again.", loading: false };
     } finally {
       if (nativeArchiveReadChanges === changed) nativeArchiveReadChanges = null;
       nativeArchiveReading = false;
@@ -28924,7 +28955,10 @@
         {#if cur?.backend === "text-v2" && nativeSelectedRemoved}
           <p class="muted" role="status">You were removed from this conversation.</p>
         {:else if cur?.backend === "text-v2"}
-          {@const archive = nativeArchive !== null && nativeArchive.server === activeServerId && nativeArchive.channel === cur.active && nativeArchive.context === cur.context ? nativeArchive : null}
+          {@const archive = nativeArchive !== null && nativeArchive.server === activeServerId && nativeArchive.channel === cur.active && nativeArchive.context === cur.context
+            ? { ...nativeArchive, more: nativeArchive.more || nativeArchive.reviewedAfter !== undefined,
+                items: [...new Map([...nativeArchive.reviewed, ...nativeArchive.items].map(item => [item.action, item])).values()] }
+            : null}
           <button type="button" class="ghost small sb-members" aria-expanded={membersOpen} aria-controls="native-member-list" onclick={toggleMembers}>
             {membersOpen ? "Hide members" : "Show members"}
           </button>

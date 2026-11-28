@@ -27,8 +27,8 @@ An exact joined history lookup can use the approved copy after a verified
 ordinary archive miss. It rechecks the receipt, original membership,
 Remove and any ordinary reply parent before producing the display. The
 original archive absence and receipt selection both stay current through
-publication. Normal archive discovery and history refresh still need a way
-to enumerate approved originals.
+publication. Joined history pages now discover retained approvals with a
+separate cursor and read each body through the exact guarded lookup.
 
 The joined desktop worker polls signed headers from the original founder
 connection. It resumes from the selected journal, occasionally rechecks
@@ -40,16 +40,16 @@ The joined worker also fetches exact approvals for its attached channel
 in bounded turns. It revisits a waiting reply without holding up later
 cases. The current row can refresh a covered post. A verified review
 freeze clears the current display and reloads ordinary history.
-History pagination still needs to enumerate receipts, including after
-reopen or when an approval notice went to an inactive conversation.
+The same guarded receipts are available after reopen or after returning
+to an inactive conversation.
 
 The recovered founder can see selected decision status in Held posts.
 The exact native decision command uses the original founder, held case and
 previous decision label. The renderer still needs the action controls and
 durable retry ownership before offering them to the founder.
 
-First-session initialization, cold route restoration, receipt enumeration,
-review action controls and combined acceptance remain open. The desktop
+First-session initialization, cold route restoration, review action
+controls and combined acceptance remain open. The desktop
 Chat V2 switch remains off.
 
 ## View held posts in founder chat history

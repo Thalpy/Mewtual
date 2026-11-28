@@ -7,7 +7,7 @@ import { persistenceWarning, sendAndRefresh, sendOutcome } from "./message-send.
 import { closeContinuityAcknowledgement, NativeVaultLockCoordinator } from "./window-close.ts";
 import { VideoReviewQueue } from "./video-review.ts";
 import { createNativeTextDriver } from "./native-text-driver.ts";
-import { decodeNativeReceived, decodeNativeReceivedNotice, isNativeHistoryBusy, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived } from "./native-text-history.ts";
+import { decodeNativeReceived, decodeNativeReceivedNotice, isNativeHistoryBusy, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, readNativeReviewedArchive, updateNativeReceived } from "./native-text-history.ts";
 import { PendingSendRetry } from "./pending-send-retry.ts";
 import { decodeNativeMembershipNotice, decodeRestoredChatSession } from "./native-text-session.ts";
 import { sessionContinuationCurrent } from "./viewscope.ts";
@@ -44,7 +44,7 @@ export function pendingManagerBackend(initial:unknown){return{sealed:JSON.string
 /** Shared test fixture for real App save queue, hydration, decisions and submit/retry. */
 export function pendingManagerApp(initial: unknown, backend=pendingManagerBackend(initial)) {
   const dependencies = { initial, backend, addPendingSend, durableStopOriginal, durableStopTerminal, retiredStopWarning, matchingPendingMutation, matchingPendingSend, samePendingIntent, pendingSendRetryBlock, resolvePendingSend, recoverQuarantinedIntent, quarantinedPendingIntent, validateMutationPayload, validateSendPayload, pendingContinuityVersion, sendRefusedUnaccepted,
-    MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, sendOutcome, NativeVaultLockCoordinator, closeContinuityAcknowledgement, VideoReviewQueue, createNativeTextDriver, decodeNativeReceived, decodeNativeReceivedNotice, isNativeHistoryBusy, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, updateNativeReceived, PendingSendRetry, decodeNativeMembershipNotice, decodeRestoredChatSession, sessionContinuationCurrent };
+    MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, sendOutcome, NativeVaultLockCoordinator, closeContinuityAcknowledgement, VideoReviewQueue, createNativeTextDriver, decodeNativeReceived, decodeNativeReceivedNotice, isNativeHistoryBusy, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, readNativeReviewedArchive, updateNativeReceived, PendingSendRetry, decodeNativeMembershipNotice, decodeRestoredChatSession, sessionContinuationCurrent };
   return new Function(...Object.keys(dependencies), `
     let locked = false, uiStateReady = false, uiStateLoadGeneration = 1, uiStateHydrationAttempt = 0, uiStateSaveTimer,uiSessionRetired=false;
     let uiStateSaveChain = Promise.resolve(), uiStateSaveFailed = false, uiStateFailureToast = 0;
@@ -58,6 +58,7 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
     let nativeReceivedPump = null;
     let nativeArchive = null, nativeArchiveRevision = 0, nativeArchiveFirstPage = false, nativeArchiveReading = false, nativeArchiveReadChanges = null;
     let nativeArchivePages = [], nativeArchiveCalls = [];
+    let nativeReviewedPages = [], nativeReviewedCalls = [];
     const untrack = read => read();
     let nativeRemovedContexts = {}, membersOpen = false;
     let busy=false,showAdd=false,startTab="join";
@@ -129,6 +130,12 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
         const next = nativeOwnPages.shift();
         if (next instanceof Error) throw next;
         return await (next ?? {backend:"text-v2",scope:"own-message-revision",action:args.ownAction,scanning:false,item:null});
+      }
+      if (command === "get_message_page" && "reviewedAfter" in args) {
+        nativeReviewedCalls.push(structuredClone(args));
+        const next = nativeReviewedPages.shift();
+        if (next instanceof Error) throw next;
+        return await (next ?? { backend: "text-v2", scope: "reviewed-archive-index", status: "unavailable", ids: [], next: null });
       }
       if (command === "get_message_page" && ("archiveAfter" in args || "archivedAction" in args)) {
         nativeArchiveCalls.push(structuredClone(args));
@@ -215,6 +222,8 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
       nativeArchiveRefresh: refreshNativeArchive,
       nativeArchivePages(...pages) { nativeArchivePages = pages; },
       nativeArchiveCalls: () => nativeArchiveCalls,
+      nativeReviewedPages(...pages) { nativeReviewedPages = pages; },
+      nativeReviewedCalls: () => nativeReviewedCalls,
       requestNativeArchive,
       loadRequestedNativeArchive,
       archive() { return structuredClone(nativeArchive); },

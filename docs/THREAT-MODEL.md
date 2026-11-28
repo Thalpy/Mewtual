@@ -4383,8 +4383,8 @@ remain held through retirement. The immutable decision records stay
 available for original-intent recovery. The connected route can disclose the
 exact selected Approve proof to a current member. The joined member can
 cover its own receipt for that original. Exact-ID display uses the
-separate guarded archive path described above. Normal receipt discovery
-on navigation or restart remains open.
+separate guarded archive path described above. A selected-only encrypted
+receipt index can enumerate exact IDs on navigation or restart.
 
 The background header poll uses the same original connected founder and
 selected member prefix as the explicit request. The durable cursor is
@@ -4395,7 +4395,11 @@ and entry for its already attached channel. It keeps a bounded cache of
 recent active-row receipts. Waiting for a parent leaves later approvals
 eligible. An authenticated selected review freeze suppresses further
 review work and invalidates the original row's displayed receipt data.
-Receipt enumeration after navigation or restart is still needed.
+Receipt enumeration checks the original row, channel, membership view and
+revision again at native publication. At most two selected entries are
+inspected per page. Only the requested channel's IDs can leave native. The
+fixed-width encrypted continuation can advance a filtered page without
+exposing another channel's index key.
 
 A main-window decision command takes exact held-case coordinates and an
 intent. It uses the recovered founder's own key and signed Case index.

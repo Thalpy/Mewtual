@@ -118,8 +118,8 @@ pub use critical_namespaces::{
     NativeTextJoinedMemberProjection, NativeTextJoinedMemberPublication,
     NativeTextJoinedMemberPublicationReceipt, NativeTextJoinedMemberReceiver,
     NativeTextJoinedReceivedOriginal, NativeTextJoinedReconnect, NativeTextJoinedReviewExchange,
-    NativeTextJoinedReviewResponse, NativeTextJoinedSavedContactApprovals,
-    NativeTextJoinedSelectionPreparation,
+    NativeTextJoinedReviewResponse, NativeTextJoinedReviewedActions, NativeTextJoinedReviewedPage,
+    NativeTextJoinedSavedContactApprovals, NativeTextJoinedSelectionPreparation,
 };
 pub use critical_namespaces::{
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,

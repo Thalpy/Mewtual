@@ -29,7 +29,10 @@ pub use journal::{
     NativeTextReviewApprovalStatus, NativeTextReviewHeaderPollStatus, NativeTextReviewHeaderStatus,
 };
 pub(in crate::store) use plan::ApprovalSelection;
-pub(in crate::store) use read::{ReviewApprovalScan, ReviewHeaderPoll, SelectedReceivedApproval};
+pub(in crate::store) use read::{
+    ReviewActionPage, ReviewActionScope, ReviewApprovalScan, ReviewHeaderPoll,
+    SelectedReceivedApproval, SelectedReviewActions, REVIEW_ACTION_CURSOR_BYTES,
+};
 #[cfg(test)]
 mod fault;
 
@@ -60,6 +63,22 @@ struct HeldManifest {
 }
 
 impl ServerStore {
+    pub(in crate::store) fn read_selected_review_actions(
+        &self,
+        binding: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
+        (target, after): (ReviewActionScope, Option<&[u8]>),
+        rng: &mut dyn catcoms_rt::CryptoRngCore,
+    ) -> Result<Option<ReviewActionPage>, AppError> {
+        let mounted = self
+            .review_receive_mount
+            .try_lock()
+            .map_err(review_lock_error)?;
+        mounted
+            .as_ref()
+            .map(|selected| selected.read_review_actions(self, binding, target, after, rng))
+            .transpose()
+    }
+
     pub(in crate::store) fn scan_selected_review_approvals(
         &self,
         binding: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,

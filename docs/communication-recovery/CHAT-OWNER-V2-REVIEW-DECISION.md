@@ -80,8 +80,8 @@ reply dependencies were checked when selecting the approval. The receiver
 checks both exact historical coordinates against its own real joined
 prefix, including the steps before its original Join. It must still prove
 ordinary reply dependencies and select the case durably before it can add
-the original to its own archive. No UI worker selects or applies the public
-response yet.
+the original to its review archive. The joined desktop worker runs these
+checks before it asks the current conversation to refresh.
 
 The private journal record frames the versioned domain, the signed stream
 entry, the exact decision and the retained original as four bounded,
@@ -236,8 +236,12 @@ its original founder route restored before polling begins. The joined
 worker scans up to four selected header ordinals per turn and requests
 an exact Approve for its attached channel. A missing body or ancestry
 stays eligible on later passes. The worker refreshes an active view
-from its guarded receipt. The separate receipt index still needs normal
-history pagination for inactive views and cold navigation.
+from its guarded receipt. Normal history reads the selected receipt index
+in pages of at most two scanned entries, and can rediscover these originals
+after navigation or restart. The encrypted continuation binds the original
+row, channel and selected approval root. A changed root requires a fresh
+review page. Each body still needs a separate exact guarded read whose
+ordinary result takes precedence.
 
 ## Exact case transitions
 

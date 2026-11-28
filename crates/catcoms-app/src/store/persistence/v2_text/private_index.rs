@@ -22,7 +22,8 @@ mod review_approval;
 mod review_receiver;
 mod rewrite;
 pub(in crate::store) use path::{
-    PrivateIndexPathData, PRIVATE_INDEX_BOUNDARY_OPEN_BYTES, PRIVATE_INDEX_PATH_METADATA_BYTES,
+    PrivateIndexPathData, PrivateIndexSuccessorData, PRIVATE_INDEX_BOUNDARY_OPEN_BYTES,
+    PRIVATE_INDEX_PATH_METADATA_BYTES,
 };
 pub(in crate::store) use review::ReviewIndexValueData;
 pub(in crate::store) use review_approval::ApprovedReviewIndexValueData;

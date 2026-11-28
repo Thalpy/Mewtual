@@ -57,6 +57,11 @@ export function createVisualNativeTextFixture(empty = false) {
     if (["get_message_page", "send_message", "edit_message", "delete_message"].includes(command)) {
       if (args.server !== 1 || args.channel !== "1" || args.expectedContext !== server.context || !servers.length) throw new Error("Unknown Native Text fixture conversation");
       if (command === "get_message_page") {
+        if ("reviewedAfter" in args) {
+          if (args.reviewedAfter !== null) throw new Error("Invalid Native Text fixture reviewed cursor");
+          return result({ backend: "text-v2", scope: "reviewed-archive-index",
+            status: "unavailable", ids: [], next: null });
+        }
         if ("heldAfter" in args) {
           if (args.heldAfter !== null || args.limit !== 2) {
             throw new Error("Invalid Native Text fixture held-post request");
