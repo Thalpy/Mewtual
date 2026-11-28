@@ -19,6 +19,7 @@ mod invite;
 pub use invite::NativeTextInvitePublication;
 mod join;
 pub use join::{
+    NativeTextFounderRouteApproval, NativeTextFounderRouteAttempt, NativeTextFounderRouteGesture,
     NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,
     NativeTextJoinedArchivedActions, NativeTextJoinedContactApprovalProof,
     NativeTextJoinedContactConsent, NativeTextJoinedDelivery,

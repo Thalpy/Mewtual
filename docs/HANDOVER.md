@@ -1,5 +1,20 @@
 # Mewtual; Handover
 
+## Reconnect to the original A1 founder after explicit approval
+
+The original joined row can remember a user-approved founder address after
+an authenticated direct outbound connection. After reopen the same mounted
+row can dial the remembered endpoint without another invitation. The normal
+join remains one-shot, and A2 does not inherit A1 consent. Forget immediately
+stops queued retries in that mount and covers an encrypted clear before
+returning success. A live inbound-only connection cannot supply an address.
+Three focused Windows native regressions passed. They exercise the exact
+command, cold TCP reconnect only after opt-in, a failed Forget with a
+queued retry, successful cold Forget, and rejection from an installed A2
+row. The App file-replacement and Net connection-retirement regressions
+passed. The focused renderer tests, Svelte check, production build, and
+900 × 640 browser flow also passed.
+
 ## Remember the original A1 founder identity
 
 During first registration, the original A1 owner can cover an encrypted
@@ -106,8 +121,9 @@ it publishes the original founder row. It keeps the same live TCP actor
 and rejects an older or replaced Current. Pre-write pressure can retry
 the original request. An interrupted write can need a cold reopen.
 
-Automatic reconnection, existing ID9 migration and combined acceptance
-remain open. The desktop Chat V2 switch remains off.
+Reconnect after explicit approval is covered for the original A1 row.
+Reconnection for ID9 and A2, migration of existing ID9 review journals,
+and combined acceptance remain open. The desktop Chat V2 switch remains off.
 
 The ordinary received archive still enforces a 2,048-record limit and
 a 256 MiB quota. Hot ledger rotation still reaches that durable limit.

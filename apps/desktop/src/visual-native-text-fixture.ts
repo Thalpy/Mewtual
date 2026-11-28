@@ -3,7 +3,7 @@ import type { NativeAuditRecord, NativeHeldPost, NativeOriginal, NativeOwnRevisi
 /** Development-only IPC data for the actual Native Text App route. This models
  * local saves and a recovered projection. A new fixture owns a
  * fresh journal and rows so browser interactions cannot affect another tab. */
-export function createVisualNativeTextFixture(empty = false) {
+export function createVisualNativeTextFixture(empty = false, joined = false) {
   const context = "a1".repeat(32);
   const server = { backend: "text-v2", server: 1, context, channel: "1", name: "Lantern Room", display_name: "Rowan", is_dm: false };
   const servers = empty ? [] : [server];
@@ -45,9 +45,21 @@ export function createVisualNativeTextFixture(empty = false) {
     if (command === "get_ui_state") return result(ui);
     if (command === "save_ui_state") { ui = String(args.json); return result(null); }
     if (command === "get_native_chat_members" && args.server === 1 && args.expectedContext === server.context && servers.length) {
-      return result({ canRemove: false, members: [
-        { admission: "b3".repeat(32), identity: "c1".repeat(32), fingerprint: "c1c1c1c1", you: true, founder: true },
+      return result({ canRemove: false, canRememberFounderRoute: joined, members: [
+        { admission: "b3".repeat(32), identity: "c1".repeat(32), fingerprint: "c1c1c1c1", you: true, founder: !joined },
+        ...(joined ? [{ admission: "b4".repeat(32), identity: "d2".repeat(32), fingerprint: "d2d2d2d2", you: false, founder: true }] : []),
       ] });
+    }
+    if (command === "remember_native_chat_founder_route" || command === "forget_native_chat_founder_route") {
+      const remember = command === "remember_native_chat_founder_route";
+      if (!joined || !servers.length || args.server !== 1 || args.expectedContext !== server.context
+        || (remember
+          ? Object.keys(args).length !== 4 || typeof args.inviteHex !== "string" || !args.inviteHex
+            || typeof args.approvedHost !== "string" || !args.approvedHost
+          : Object.keys(args).length !== 2)) {
+        throw new Error("Invalid founder address request for this conversation");
+      }
+      return result(null);
     }
     if (command === "found_server") {
       if (servers.length && servers[0].context !== args.requestId) throw new Error("Native Text visual fixture already has a group");

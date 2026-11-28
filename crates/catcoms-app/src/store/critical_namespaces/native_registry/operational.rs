@@ -40,6 +40,7 @@ pub use sources::{
     NativeTextCreationRequest, NativeTextCreationSettings, NativeTextFounderDependencyProvider,
     NativeTextFounderMemberIngressPreparation, NativeTextFounderMemberPublication,
     NativeTextFounderMemberPublicationReceipt, NativeTextFounderMemberReceiver,
+    NativeTextFounderRouteApproval, NativeTextFounderRouteAttempt, NativeTextFounderRouteGesture,
     NativeTextInvitePublication, NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,
     NativeTextJoinedArchivedActions, NativeTextJoinedContactApprovalProof,
     NativeTextJoinedContactConsent, NativeTextJoinedDelivery,

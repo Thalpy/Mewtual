@@ -106,6 +106,7 @@ pub use critical_namespaces::{
     NativeTextFounderReviewReply, NativeTextFounderReviewResult, NativeTextFounderReviewSweep,
 };
 pub use critical_namespaces::{
+    NativeTextFounderRouteApproval, NativeTextFounderRouteAttempt, NativeTextFounderRouteGesture,
     NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,
     NativeTextJoinedArchivedActions, NativeTextJoinedContactApprovalProof,
     NativeTextJoinedContactConsent, NativeTextJoinedDependencyAttachRefusal,
@@ -680,6 +681,7 @@ mod persistence {
     /// Strict bounded native-registry migration reads; deliberately no writer yet.
     pub(in crate::store) mod native_registry;
     pub(in crate::store) mod v2_contact_approvals;
+    pub(in crate::store) mod v2_founder_consent;
     pub(in crate::store) mod v2_founder_route;
     mod v2_group_directory;
     /// Chat V2 ordinary-member durable outbox; independent of the founder `v2_text` journal.

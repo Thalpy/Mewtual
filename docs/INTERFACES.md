@@ -993,6 +993,21 @@ A crash may leave final and Stage together: only byte-identical fully
 authenticated copies can supply the inert hint, and cold read repairs neither.
 An ID9/A2 owner never inherits this file's route interpretation.
 
+`remember_native_chat_founder_route` is a main-window command on the exact
+selected joined A1 row. It takes `server`, `expectedContext`, the original
+accepted `inviteHex`, and a user-approved numeric `approvedHost`. The
+accepted invite can be older than its join expiry because this starts no
+new join. The app saves an encrypted standing address only after observing
+the authenticated outbound socket to that exact signed TCP endpoint.
+If a live connection uses a different route, the app can preserve that
+connection and decline to remember the new endpoint.
+`forget_native_chat_founder_route` takes only `server` and
+`expectedContext`. It revokes pending retries before covering a clear in
+the same optional file. Both commands return JSON null on success.
+`get_native_chat_members` advertises the A1 control with
+`canRememberFounderRoute`; each mutation still checks the original
+registration, current membership, source and UI generation.
+
 `owner_bodies::ReviewDecisionBody` binds one complete target, stable case ID, intent nonce, decision
 and exact previous body ID in at most665bytes. It checks data transitions and actual action/header
 signatures, not selected-current case state or owner/root provenance. A later selected Approve can

@@ -1,6 +1,7 @@
 <script lang="ts">
   import ChatAdminLedger from "./ChatAdminLedger.svelte";
   import NativeTextAudit from "./NativeTextAudit.svelte";
+  import NativeTextFounderRoute from "./NativeTextFounderRoute.svelte";
   import type { LedgerReads } from "./chat-admin-ledger.ts";
   import { memberRole, identityForRoleLabel } from "./member-role.ts";
   import { invoke } from "@tauri-apps/api/core";
@@ -4545,7 +4546,7 @@
     }
   }
   type NativeRosterMember = Member & { admission: string; founder: boolean };
-  type NativeRoster = { members: NativeRosterMember[]; canRemove: boolean };
+  type NativeRoster = { members: NativeRosterMember[]; canRemove: boolean; canRememberFounderRoute?: boolean };
   type NativeRosterSnapshot = NativeRoster & { server: number; mount: number; failure: string; loading: boolean };
   let nativeRoster = $state<NativeRosterSnapshot | null>(null);
   let nativeRosterRequest = 0;
@@ -4558,6 +4559,9 @@
   let nativeContactStatus = $state("");
   let nativeContactBusy = $state(false);
   let nativeRemovedContexts = $state<Record<number, string>>({});
+  function canUseNativeFounderRoute() {
+    return !locked && !uiSessionRetired && uiStateReady && !windowCloseInFlight;
+  }
   async function refreshNativeMembers(server: number, generation: number, mount = chatLedgerMount) {
     if (cur?.backend !== "text-v2") return;
     const expectedContext = cur.context;
@@ -30907,6 +30911,12 @@
               </form>
               <button type="button" class="ghost small" disabled={nativeContactBusy} onclick={() => void useNativeContact("forget")}>Forget saved contacts</button>
               {#if nativeContactStatus}<p class="small" role="status">{nativeContactStatus}</p>{/if}
+            {/if}
+            {#if snapshot.canRememberFounderRoute && cur.context && activeServerId !== null
+              && !locked && uiStateReady && !windowCloseInFlight}
+              {#key `${activeServerId}:${cur.context}:${chatLedgerMount}`}
+                <NativeTextFounderRoute server={activeServerId} context={cur.context} isUiLive={canUseNativeFounderRoute} />
+              {/key}
             {/if}
           {/if}
           <button type="button" class="ghost small" disabled={snapshot?.loading || !!removingNativeAdmission} onclick={() => { if (activeServerId !== null) void refreshNativeMembers(activeServerId, viewGeneration); }}>Refresh members</button>

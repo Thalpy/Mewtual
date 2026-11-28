@@ -288,7 +288,7 @@ pub(in crate::store::persistence) fn finish_exact_write_on(
 
 /// Rename one fixed name onto another in the same held directory (the WAL MAIN promotion
 /// or the selector CAS). The caller has verified the source's exact bytes immediately before.
-pub(super) fn rename_fixed(from: &Path, to: &Path) -> Result<(), AppError> {
+pub(in crate::store::persistence) fn rename_fixed(from: &Path, to: &Path) -> Result<(), AppError> {
     fs::rename(from, to).map_err(io)
 }
 

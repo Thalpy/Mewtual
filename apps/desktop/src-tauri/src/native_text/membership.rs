@@ -1,11 +1,15 @@
 //! Inspect and remove exact published admissions through the native row.
 use super::*;
-use catcoms_app::store::NativeTextJoinedContactConsent;
+use catcoms_app::store::{
+    NativeTextFounderRouteGesture, NativeTextInvitePacketData, NativeTextJoinedContactConsent,
+    MAX_NATIVE_TEXT_INVITE_PACKET_BYTES,
+};
 use catcoms_replication::chat::owner_facts::OwnerFactId;
 use catcoms_replication::chat::owner_header::OwnerBodyId;
 use catcoms_sync::V2_MEMBER_CONTACT_BYTES;
 use std::net::IpAddr;
 use tauri::ipc::InvokeResponseBody;
+use zeroize::Zeroizing;
 
 mod review;
 mod review_decision;
@@ -20,6 +24,8 @@ pub(super) const COMMANDS: &[&str] = &[
     "forget_native_chat_contacts",
     "check_native_chat_removed_posts",
     "decide_native_chat_held_post",
+    "remember_native_chat_founder_route",
+    "forget_native_chat_founder_route",
 ];
 const LIST: &str = COMMANDS[0];
 const REMOVE: &str = COMMANDS[1];
@@ -28,6 +34,9 @@ const CONNECT: &str = COMMANDS[3];
 const FORGET: &str = COMMANDS[4];
 const REVIEW: &str = COMMANDS[5];
 const DECIDE: &str = COMMANDS[6];
+const REMEMBER_FOUNDER: &str = COMMANDS[7];
+const FORGET_FOUNDER: &str = COMMANDS[8];
+const FOUNDER_FAILED: &str = "Could not save the founder's address. Use the original invitation and an address your device can connect to directly.";
 
 enum Operation {
     List,
@@ -35,6 +44,8 @@ enum Operation {
     Share,
     Connect([u8; V2_MEMBER_CONTACT_BYTES], IpAddr, bool),
     Forget,
+    RememberFounder(Zeroizing<Vec<u8>>, IpAddr),
+    ForgetFounder,
     Review {
         admission: OwnerFactId,
         contact: [u8; V2_MEMBER_CONTACT_BYTES],
@@ -68,17 +79,20 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             .original_target()
             .ok_or(listing::STALE)?;
         let account = keep_session::current(&state, generation).ok_or(listing::STALE)?;
-        let (server, context, operation) =
-            parse(invoke.message.command(), invoke.message.payload())?;
-        // A review check waits on a peer between short local turns. It
-        // cannot reserve the ordinary command slot during that wait.
-        let lane = if matches!(&operation, Operation::Review { .. }) {
-            &state.native_text.removed_post_checks
-        } else {
-            &state.native_text.inflight
+        let command = invoke.message.command();
+        // These requests wait on a peer between short local turns. Keep
+        // the ordinary slot available for chat and a concurrent Forget.
+        let lane = match command {
+            REVIEW => &state.native_text.removed_post_checks,
+            REMEMBER_FOUNDER => &state.native_text.founder_route_requests,
+            _ => &state.native_text.inflight,
         };
         let permit = lane.clone().try_acquire_owned().map_err(|_| BUSY)?;
         let mut source_payment = Some(state.native_text.ui_budget.prepare().map_err(|_| BUSY)?);
+        let founder_packet_payment = (command == REMEMBER_FOUNDER)
+            .then(|| state.native_text.ui_budget.prepare().map_err(|_| BUSY))
+            .transpose()?;
+        let (server, context, operation) = parse(command, invoke.message.payload())?;
         let table = state.servers.try_lock().map_err(|_| BUSY)?;
         let row = table.native(&server).ok_or(listing::STALE)?;
         if row.data().request != context {
@@ -96,7 +110,11 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             || (founder
                 && matches!(
                     operation,
-                    Operation::Share | Operation::Connect(..) | Operation::Forget
+                    Operation::Share
+                        | Operation::Connect(..)
+                        | Operation::Forget
+                        | Operation::RememberFounder(..)
+                        | Operation::ForgetFounder
                 ))
         {
             return Err(FAILED);
@@ -112,6 +130,16 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             }
             _ => None,
         };
+        let founder_gesture = match (&operation, &row.data().selection) {
+            (Operation::RememberFounder(..), server_table::NativeSelection::Joined(selection)) => {
+                Some(
+                    selection
+                        .capture_founder_route_gesture()
+                        .map_err(|_| BUSY)?,
+                )
+            }
+            _ => None,
+        };
         let source = connected::Source::for_installed(
             generation,
             &target,
@@ -120,21 +148,39 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             &mut source_payment,
         )
         .ok_or(listing::STALE)?;
-        Ok((source, operation, founder, consent, permit))
+        Ok((
+            source,
+            operation,
+            founder,
+            consent,
+            founder_gesture,
+            permit,
+            founder_packet_payment,
+        ))
     })();
-    let (source, operation, founder, consent, permit) = match captured {
-        Ok(value) => value,
-        Err(error) => {
-            invoke.resolver.reject(error);
-            return true;
-        }
-    };
+    let (source, operation, founder, consent, founder_gesture, permit, founder_packet_payment) =
+        match captured {
+            Ok(value) => value,
+            Err(error) => {
+                invoke.resolver.reject(error);
+                return true;
+            }
+        };
     let resolver = invoke.resolver;
     drop(invoke.message);
     spawn(Box::pin(async move {
         let _permit = permit;
+        let _founder_packet_payment = founder_packet_payment;
         let state = app.state::<AppState>();
-        let result = perform(&state, &source, operation, founder, consent).await;
+        let result = perform(
+            &state,
+            &source,
+            operation,
+            founder,
+            consent,
+            founder_gesture,
+        )
+        .await;
         let result = result.and_then(|body| {
             let _commit = state.ui_session_commit.try_lock().map_err(|_| BUSY)?;
             let store = state.store.try_lock().map_err(|_| BUSY)?;
@@ -160,6 +206,7 @@ async fn perform(
     operation: Operation,
     founder: bool,
     consent: Option<NativeTextJoinedContactConsent>,
+    founder_gesture: Option<NativeTextFounderRouteGesture>,
 ) -> Result<(String, Option<catcoms_app::store::NativeTextRoster>), &'static str> {
     if let Operation::Review {
         admission,
@@ -201,6 +248,58 @@ async fn perform(
         .map_err(|_| FAILED)?;
     }
     let (prepared, selection) = source.capture_joined(state).await.ok_or(listing::STALE)?;
+    if let Operation::RememberFounder(raw, host) = operation {
+        let gesture = founder_gesture.ok_or(listing::STALE)?;
+        let attempt = tauri::async_runtime::spawn_blocking(move || {
+            let _local = local;
+            let invite = NativeTextInvitePacketData::decode(&raw).map_err(|_| FOUNDER_FAILED)?;
+            prepared
+                .prepare_remember_founder_route(&selection, &invite, host, gesture, negative)
+                .map_err(refusal)
+        })
+        .await
+        .map_err(|_| FOUNDER_FAILED)??;
+        #[cfg(test)]
+        {
+            let edge = state.native_text.founder_route_edge.lock().unwrap().take();
+            if let Some(edge) = edge {
+                edge.wait_once().await;
+            }
+        }
+        let proof = attempt
+            .connect_for_approval(&state.endpoint_dials)
+            .await
+            .map_err(|_| FOUNDER_FAILED)?;
+        let caller = source.negative();
+        let local = source
+            .member_work()
+            .foreground(caller.clone())
+            .await
+            .ok_or(listing::STALE)?;
+        let (prepared, selection) = source.capture_joined(state).await.ok_or(listing::STALE)?;
+        let commit = contact_commit(state, source, &caller)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            let (_local, _commit) = (local, commit);
+            prepared
+                .remember_founder_route(&selection, proof, &caller, &mut OsCryptoRng)
+                .map_err(refusal)
+        })
+        .await
+        .map_err(|_| FOUNDER_FAILED)??;
+        return Ok(("null".into(), None));
+    }
+    if matches!(operation, Operation::ForgetFounder) {
+        let commit = contact_commit(state, source, &negative)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            let (_local, _commit) = (local, commit);
+            prepared
+                .forget_founder_route(&selection, &negative, &mut OsCryptoRng)
+                .map_err(refusal)
+        })
+        .await
+        .map_err(|_| FAILED)??;
+        return Ok(("null".into(), None));
+    }
     if let Operation::Connect(raw, host, remember) = operation {
         let attempt = tauri::async_runtime::spawn_blocking(move || {
             let _local = local;
@@ -324,6 +423,7 @@ fn encode(
     let body = serde_json::to_string(&serde_json::json!({
         "members": data,
         "canRemove": roster.can_remove(),
+        "canRememberFounderRoute": roster.can_remember_founder_route(),
     }))
     .map_err(|_| FAILED)?;
     Ok((body, Some(roster)))
@@ -376,6 +476,39 @@ fn parse(command: &str, body: &InvokeBody) -> Result<(u64, [u8; 32], Operation),
             Operation::Connect(decode_exact_hex(contact)?, host, remember)
         }
         FORGET if fields.len() == 2 => Operation::Forget,
+        REMEMBER_FOUNDER if fields.len() == 4 => {
+            const _: () = assert!(
+                MAX_NATIVE_TEXT_INVITE_PACKET_BYTES + 512
+                    <= catcoms_app::store::NativeUiInvocationBudget::metadata_bytes()
+            );
+            let hex = fields
+                .get("inviteHex")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(FAILED)?;
+            if hex.is_empty()
+                || hex.len() % 2 != 0
+                || hex.len() > 2 * MAX_NATIVE_TEXT_INVITE_PACKET_BYTES
+                || hex
+                    .bytes()
+                    .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
+            {
+                return Err(FAILED);
+            }
+            let host: IpAddr = fields
+                .get("approvedHost")
+                .and_then(serde_json::Value::as_str)
+                .filter(|host| host.len() <= 45)
+                .ok_or(FAILED)?
+                .parse()
+                .map_err(|_| FAILED)?;
+            if host.is_unspecified() || host.is_multicast() {
+                return Err(FAILED);
+            }
+            let mut packet = Zeroizing::new(vec![0; hex.len() / 2]);
+            hex::decode_to_slice(hex, packet.as_mut_slice()).map_err(|_| FAILED)?;
+            Operation::RememberFounder(packet, host)
+        }
+        FORGET_FOUNDER if fields.len() == 2 => Operation::ForgetFounder,
         REVIEW if fields.len() == 4 => {
             let raw = decode_exact_hex(
                 fields
@@ -431,6 +564,36 @@ pub(super) fn decode_exact_hex<const N: usize>(text: &str) -> Result<[u8; N], &'
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_founder_route_consent_requires_an_explicit_exact_operation() {
+        let context = hex::encode([0x3c; 32]);
+        let mut remember = serde_json::json!({
+            "server": 7, "expectedContext": context,
+            "inviteHex": "aabb", "approvedHost": "127.0.0.1",
+        });
+        assert!(matches!(
+            parse(REMEMBER_FOUNDER, &InvokeBody::Json(remember.clone())),
+            Ok((7, _, Operation::RememberFounder(packet, host)))
+                if packet.as_slice() == [0xaa, 0xbb] && host.is_loopback()
+        ));
+        assert!(parse(FORGET_FOUNDER, &InvokeBody::Json(remember.clone())).is_err());
+        for host in ["localhost", "0.0.0.0", "224.0.0.1", "127.0.0.1:1234"] {
+            remember["approvedHost"] = host.into();
+            assert!(parse(REMEMBER_FOUNDER, &InvokeBody::Json(remember.clone())).is_err());
+        }
+        remember["approvedHost"] = "127.0.0.1".into();
+        for invite in ["", "a", "AABB", "111g"] {
+            remember["inviteHex"] = invite.into();
+            assert!(parse(REMEMBER_FOUNDER, &InvokeBody::Json(remember.clone())).is_err());
+        }
+        let short = serde_json::json!({"server": 7, "expectedContext": context});
+        assert!(parse(REMEMBER_FOUNDER, &InvokeBody::Json(short.clone())).is_err());
+        assert!(matches!(
+            parse(FORGET_FOUNDER, &InvokeBody::Json(short)),
+            Ok((7, _, Operation::ForgetFounder))
+        ));
+    }
 
     #[test]
     fn native_membership_requires_the_exact_admission() {

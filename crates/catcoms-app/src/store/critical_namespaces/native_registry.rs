@@ -62,6 +62,11 @@ pub use operational::{
     NativeTextFounderReviewReply, NativeTextFounderReviewResult, NativeTextFounderReviewSweep,
 };
 pub use operational::{
+    NativeTextFounderRouteApproval, NativeTextFounderRouteAttempt, NativeTextFounderRouteGesture,
+    NativeTextJoinedContactApprovalProof, NativeTextJoinedContactConsent,
+    NativeTextJoinedReconnect, NativeTextJoinedSavedContactApprovals,
+};
+pub use operational::{
     NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,
     NativeTextJoinedArchivedActions, NativeTextJoinedDependencyAttachRefusal,
     NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
@@ -75,10 +80,6 @@ pub use operational::{
     NativeTextJoinedReceivedOriginal, NativeTextJoinedReviewExchange,
     NativeTextJoinedReviewResponse, NativeTextJoinedReviewedActions, NativeTextJoinedReviewedPage,
     NativeTextJoinedSelectionPreparation,
-};
-pub use operational::{
-    NativeTextJoinedContactApprovalProof, NativeTextJoinedContactConsent,
-    NativeTextJoinedReconnect, NativeTextJoinedSavedContactApprovals,
 };
 pub use operational::{
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,

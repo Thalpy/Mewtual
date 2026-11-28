@@ -114,6 +114,7 @@ export const TAURI_COMMAND_GROUPS = {
       // member-signed offer and the numeric host explicitly approved in the UI.
       "get_native_chat_members", "remove_native_chat_member", "share_native_chat_contact", "connect_native_chat_contact",
       "forget_native_chat_contacts", "check_native_chat_removed_posts", "decide_native_chat_held_post",
+      "remember_native_chat_founder_route", "forget_native_chat_founder_route",
     ],
   },
   authenticated_server_reads: {

@@ -1130,8 +1130,8 @@ fn forget_connection_path(
 }
 
 /// Mirror the path ledger's authoritative final-close healing for address-bearing route state.
-fn forget_authenticated_routes(
-    routes: &mut HashMap<(libp2p::PeerId, ConnectionId), AuthenticatedDialRoute>,
+fn forget_authenticated_routes<T>(
+    routes: &mut HashMap<(libp2p::PeerId, ConnectionId), T>,
     peer: libp2p::PeerId,
     connection: ConnectionId,
     remaining: u32,
@@ -1425,6 +1425,11 @@ enum Command {
         peer: PeerId,
         address: String,
         reply: oneshot::Sender<Option<catcoms_rt::ConnectionLease>>,
+    },
+    ObserveAuthenticatedDirectConnection {
+        peer: PeerId,
+        address: String,
+        reply: oneshot::Sender<Option<AuthenticatedDirectConnection>>,
     },
     /// A reciprocal-repair batch whose direct routes must all terminate at `peer`.
     /// Validation happens inside the actor, immediately before the ordinary dial gate, so an
@@ -3806,6 +3811,8 @@ struct Actor {
     /// Exact authenticated dial endpoints, keyed by physical connection so a close removes only
     /// its own route while a simultaneous TCP/QUIC or DCUtR connection survives.
     authenticated_routes: HashMap<(libp2p::PeerId, ConnectionId), AuthenticatedDialRoute>,
+    // Only sockets actually observed by a standing-consent command get an owner.
+    reviewed_direct_connections: HashMap<(libp2p::PeerId, ConnectionId), Arc<()>>,
     /// The newest bounded outbound Noise successes, retained across close edges for this process.
     authenticated_route_evidence: VecDeque<AuthenticatedDialRoute>,
     /// Peers **this node's own configuration** named as infrastructure or as a bootstrap: the
@@ -4647,6 +4654,32 @@ impl Actor {
                     .flatten();
                 let _ = reply.send(lease);
             }
+            Command::ObserveAuthenticatedDirectConnection {
+                peer,
+                address,
+                reply,
+            } => {
+                if reply.is_closed() {
+                    return;
+                }
+                let connection = self
+                    .authenticated_routes
+                    .iter()
+                    .find(|(_, route)| route.peer == peer && route.address == address)
+                    .map(|(key, _)| *key);
+                let observed = connection.and_then(|connection| {
+                    let peer = connection_leases::current(&self.connection_leases.table, peer)?;
+                    let route = self
+                        .reviewed_direct_connections
+                        .entry(connection)
+                        .or_insert_with(|| Arc::new(()));
+                    Some(AuthenticatedDirectConnection {
+                        peer,
+                        route: Arc::downgrade(route),
+                    })
+                });
+                let _ = reply.send(observed);
+            }
             Command::DialPeerBatch {
                 peer,
                 addrs,
@@ -5373,6 +5406,12 @@ impl Actor {
                 ..
             } => {
                 let previous_paths = active_connection_paths(&self.connection_paths, peer_id);
+                forget_authenticated_routes(
+                    &mut self.reviewed_direct_connections,
+                    peer_id,
+                    connection_id,
+                    num_established,
+                );
                 forget_and_publish_authenticated_routes(
                     &mut self.authenticated_routes,
                     &self.authenticated_route_tx,
@@ -5917,6 +5956,23 @@ pub struct MeshConnectionDial {
     leases: std::sync::Weak<std::sync::Mutex<HashMap<PeerId, catcoms_rt::ConnectionLease>>>,
 }
 
+/// Non-owning proof of one live, exact authenticated outbound socket.
+/// A sibling inbound or replacement connection cannot keep it live.
+pub struct AuthenticatedDirectConnection {
+    peer: catcoms_rt::ConnectionLease,
+    route: std::sync::Weak<()>,
+}
+
+catcoms_rt::redacted_debug! {
+    AuthenticatedDirectConnection;
+}
+
+impl AuthenticatedDirectConnection {
+    pub fn is_live(&self) -> bool {
+        self.route.strong_count() != 0 && self.peer.is_live()
+    }
+}
+
 impl MeshConnectionDial {
     pub fn connection_lease(&self, peer: PeerId) -> Option<catcoms_rt::ConnectionLease> {
         let leases = self.leases.upgrade()?;
@@ -5937,6 +5993,29 @@ impl MeshConnectionDial {
         let (reply, answer) = oneshot::channel();
         commands
             .send(Command::CheckAuthenticatedDirectRoute {
+                peer,
+                address: address.to_owned(),
+                reply,
+            })
+            .await
+            .map_err(|_| TransportError::Closed)?;
+        drop(commands);
+        answer.await.map_err(|_| TransportError::Closed)
+    }
+
+    /// Observe the exact outbound connection, independently of aggregate peer liveness.
+    pub async fn observe_authenticated_direct_connection(
+        &self,
+        peer: PeerId,
+        address: &str,
+    ) -> Result<Option<AuthenticatedDirectConnection>, TransportError> {
+        if address.len() > 256 {
+            return Err(TransportError::InvalidDialBatch);
+        }
+        let commands = self.commands.upgrade().ok_or(TransportError::Closed)?;
+        let (reply, answer) = oneshot::channel();
+        commands
+            .send(Command::ObserveAuthenticatedDirectConnection {
                 peer,
                 address: address.to_owned(),
                 reply,
@@ -6154,6 +6233,7 @@ impl MeshService {
             pending_infra_dials,
             connection_paths: HashMap::new(),
             authenticated_routes: HashMap::new(),
+            reviewed_direct_connections: HashMap::new(),
             authenticated_route_evidence: VecDeque::new(),
             protected,
         };
@@ -8243,6 +8323,36 @@ mod tests {
         assert!(rx.has_changed().unwrap());
         assert_eq!(rx.borrow_and_update().clone(), vec![route(22_488)]);
         assert_eq!(routes.get(&(peer, surviving)), Some(&route(22_488)));
+    }
+
+    #[test]
+    fn observed_direct_connection_retires_even_when_the_peer_lease_survives() {
+        let peer = libp2p_peer();
+        let aggregate = catcoms_rt::ConnectionLease::default();
+        let outgoing = ConnectionId::new_unchecked(1);
+        let alternate = ConnectionId::new_unchecked(2);
+        let mut owners = HashMap::from([
+            ((peer, outgoing), Arc::new(())),
+            ((peer, alternate), Arc::new(())),
+        ]);
+        let observe = |owners: &HashMap<_, _>, connection| AuthenticatedDirectConnection {
+            peer: aggregate.clone(),
+            route: Arc::downgrade(&owners[&(peer, connection)]),
+        };
+        let original = observe(&owners, outgoing);
+        let survivor = observe(&owners, alternate);
+        assert!(original.is_live());
+        forget_authenticated_routes(&mut owners, peer, outgoing, 1);
+        assert!(aggregate.is_live());
+        assert!(survivor.is_live());
+        assert!(!original.is_live());
+        // The replacement may reuse the same endpoint. Its ownership is new.
+        let replacement = ConnectionId::new_unchecked(3);
+        owners.insert((peer, replacement), Arc::new(()));
+        assert!(observe(&owners, replacement).is_live());
+        assert!(!original.is_live());
+        forget_authenticated_routes(&mut owners, peer, replacement, 0);
+        assert!(!survivor.is_live());
     }
 
     #[test]

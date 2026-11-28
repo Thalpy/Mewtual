@@ -102,6 +102,11 @@ pub use native_registry::{
     NativeTextFounderReviewReply, NativeTextFounderReviewResult, NativeTextFounderReviewSweep,
 };
 pub use native_registry::{
+    NativeTextFounderRouteApproval, NativeTextFounderRouteAttempt, NativeTextFounderRouteGesture,
+    NativeTextJoinedContactApprovalProof, NativeTextJoinedContactConsent,
+    NativeTextJoinedReconnect, NativeTextJoinedSavedContactApprovals,
+};
+pub use native_registry::{
     NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,
     NativeTextJoinedArchivedActions, NativeTextJoinedDependencyAttachRefusal,
     NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
@@ -115,10 +120,6 @@ pub use native_registry::{
     NativeTextJoinedReceivedOriginal, NativeTextJoinedReviewExchange,
     NativeTextJoinedReviewResponse, NativeTextJoinedReviewedActions, NativeTextJoinedReviewedPage,
     NativeTextJoinedSelectionPreparation,
-};
-pub use native_registry::{
-    NativeTextJoinedContactApprovalProof, NativeTextJoinedContactConsent,
-    NativeTextJoinedReconnect, NativeTextJoinedSavedContactApprovals,
 };
 pub use native_registry::{
     NativeTextJoinedDelivery, NativeTextJoinedExchange, NativeTextJoinedInstallation,

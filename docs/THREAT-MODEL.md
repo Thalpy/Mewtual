@@ -262,6 +262,23 @@ ID9 declaration/A2 always refuses this A1 interpretation. The same-vault
 component rollback boundary applies, but replaying this immutable original
 hint supplies no membership, signing, message or new-connection permission.
 
+An explicit A1 Remember can add one separate encrypted standing consent.
+The accepted zero-address reservation supplies the original founder, peer
+and signed TCP port. The local user supplies the numeric host. Saving also
+requires a live outbound connection to that exact endpoint. An inbound
+socket, another endpoint, or a replacement socket that preserves the peer
+lease cannot complete that proof. Attached workers reprove the original
+registration and current local and founder membership before using the
+same bounded endpoint scheduler. Incomplete or unreadable optional bytes
+grant no dial authority, and ID9/A2 use their own route proof.
+
+Forget rotates the original row's approval before it writes the clear.
+If the write fails, this mount keeps older approvals suppressed. A restart
+before durable Forget can recover the last selected complete record if
+there is no unresolved Stage. A cold rollback of authentic vault files
+can also restore the earlier consent, under the same local rollback model
+as existing member contact records.
+
 16 November Score/voice integration candidate: this branch combines the reviewed
 Score and voice admission history with the newer Chat/security and Studio save
 baseline. The entries below retain each branch's evidence; they do not establish

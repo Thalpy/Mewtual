@@ -114,6 +114,10 @@ Chat V2 remain unfinished and disabled.
 [Contract and pending checks](communication-recovery/CHAT-V2-NATIVE-SOURCE-RETIREMENT.md).
 
 Native text transport now retains actual TCP key-task custody through teardown.
+The joined desktop restores one optional A1 founder route in a separately
+paced background turn. Exact registration and local and founder membership
+are checked under a short row permit. The resulting paid dial observes the
+original source, session, membership and consent generations after release.
 The affected networking package passed 208 tests and strict Clippy; the Root
 source/admission cohort passed 37 cases. Native commands, canonical
 retirement, joined sources and Chat V2 acceptance remain unfinished and disabled.

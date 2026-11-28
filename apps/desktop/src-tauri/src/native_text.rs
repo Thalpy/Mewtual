@@ -37,6 +37,9 @@ pub(super) struct Registry {
     pub(super) selected: bool,
     inflight: Arc<Semaphore>,
     removed_post_checks: Arc<Semaphore>,
+    founder_route_requests: Arc<Semaphore>,
+    #[cfg(test)]
+    founder_route_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     bootstrap: Arc<StdMutex<Option<boot::Bootstrap>>>,
     retired_authorized: Arc<AtomicU64>,
     retired_lock_requested: Arc<AtomicBool>,
@@ -162,6 +165,9 @@ impl Default for Registry {
             selected: false,
             inflight: Arc::new(Semaphore::new(1)),
             removed_post_checks: Arc::new(Semaphore::new(1)),
+            founder_route_requests: Arc::new(Semaphore::new(1)),
+            #[cfg(test)]
+            founder_route_edge: StdMutex::new(None),
             bootstrap: Arc::new(StdMutex::new(Some(boot::Bootstrap::Fresh))),
             retired_authorized: Arc::new(AtomicU64::new(0)),
             retired_lock_requested: Arc::new(AtomicBool::new(true)),

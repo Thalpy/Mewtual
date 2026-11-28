@@ -41,6 +41,7 @@ mod archive_discovery;
 mod contact;
 mod contact_recovery;
 mod dependencies;
+mod founder_consent;
 mod governing;
 mod history_discovery;
 mod removed_review;
@@ -51,6 +52,10 @@ pub use dependencies::{
     NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,
     NativeTextJoinedDependencyAttachRefusal, NativeTextJoinedDependencyExchange,
     NativeTextJoinedDependencyProvider, NativeTextJoinedDependencyResponse,
+};
+pub(super) use founder_consent::FounderRouteConsentState;
+pub use founder_consent::{
+    NativeTextFounderRouteApproval, NativeTextFounderRouteAttempt, NativeTextFounderRouteGesture,
 };
 pub use governing::{
     NativeTextJoinedGoverningExchange, NativeTextJoinedGoverningIncoming,
@@ -203,6 +208,7 @@ struct ReceiverSource<'a, R: CryptoRngCore> {
     warm: Option<&'a JoinedPendingIo>,
     registration: NativeTextJoinedRegistrationData,
     founder: Option<PeerId>,
+    founder_hint: &'a OnceLock<PeerId>,
 }
 
 struct PaidReceiverLedger {
@@ -378,7 +384,13 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             }
             let own =
                 catcoms_replication::chat::owner_header::OwnerBodyId::from_bytes(*own.as_bytes());
+            let original_a1 =
+                crate::store::critical_namespaces::joined_pin::require_a1_founder_route_profile(
+                    source.store,
+                )
+                .is_ok();
             crate::store::NativeTextRoster::from_selected(source.store, replay, own)
+                .map(|roster| roster.with_founder_route_option(original_a1))
                 .map_err(|_| V2MemberSaveRefusal::Failed)
         })
     }
@@ -1038,6 +1050,7 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                         warm: pending.io.as_ref().filter(|_| runtime.recovered.is_none()),
                         registration: data,
                         founder: runtime.founder_contact.get().copied(),
+                        founder_hint: &runtime.founder_contact,
                     })
                 },
             )?

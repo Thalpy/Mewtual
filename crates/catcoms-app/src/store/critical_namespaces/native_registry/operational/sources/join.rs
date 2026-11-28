@@ -51,6 +51,7 @@ pub use publication::{
 };
 mod receive;
 pub use receive::{
+    NativeTextFounderRouteApproval, NativeTextFounderRouteAttempt, NativeTextFounderRouteGesture,
     NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,
     NativeTextJoinedArchivedActions, NativeTextJoinedDependencyAttachRefusal,
     NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyProvider,
@@ -701,6 +702,7 @@ struct JoinedRowSelection {
     archive_relay: Mutex<receive::ArchiveRelayState>,
     contact_approval_generation: Mutex<watch::Sender<bool>>,
     contact_forget_generation: Mutex<watch::Sender<bool>>,
+    founder_route_consent: Mutex<receive::FounderRouteConsentState>,
     next_governing_peer: AtomicUsize,
     keys: Arc<OnceLock<NativeChatSourceClose>>,
     _metadata: Arc<retirement::Control>,
@@ -1138,6 +1140,7 @@ impl<R: CryptoRngCore> MountedNode<R> {
                     archive_relay: Mutex::new(receive::ArchiveRelayState::default()),
                     contact_approval_generation: Mutex::new(watch::channel(false).0),
                     contact_forget_generation: Mutex::new(watch::channel(false).0),
+                    founder_route_consent: Mutex::new(receive::FounderRouteConsentState::default()),
                     next_governing_peer: AtomicUsize::new(0),
                     keys,
                     _metadata: control.clone(),

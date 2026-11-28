@@ -34,6 +34,10 @@ When the original founder connection is available, the joined worker
 polls the next selected header and occasionally rechecks the current tip.
 This shares a single inventory slot with ordinary discovery. Exact
 ordinary history requests retain their own lower slot.
+An A1 joined desktop can restore that connection from its explicit saved
+founder address. It uses the signed original peer and TCP port, rechecks
+live membership, then releases its local row permit before dialing.
+The original invitation and normal Join alone retain only the peer hint.
 [Review flow](communication-recovery/CHAT-OWNER-V2-REVIEW-DECISION.md#founder-review-stream).
 
 Security prerequisite: an incoming subscription retries retained publication

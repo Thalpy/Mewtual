@@ -211,7 +211,7 @@ impl ServerStore {
         Ok(Some(peer))
     }
 
-    fn with_original_a1_invite<T>(
+    pub(super) fn with_original_a1_invite<T>(
         &self,
         original: NativeTextJoinedRegistrationData,
         inspect: impl FnOnce(&SignedInviteBindingData) -> Result<T, AppError>,
@@ -224,7 +224,7 @@ impl ServerStore {
         })
     }
 
-    fn with_warm_a1_invite<T>(
+    pub(super) fn with_warm_a1_invite<T>(
         &self,
         pending: &JoinedPendingIo,
         original: NativeTextJoinedRegistrationData,
@@ -258,7 +258,7 @@ fn with_binding_from_request<T>(
     inspect(binding)
 }
 
-fn scope(value: NativeTextJoinedRegistrationData) -> [u8; 32] {
+pub(super) fn scope(value: NativeTextJoinedRegistrationData) -> [u8; 32] {
     let mut hash = blake3::Hasher::new_derive_key(SCOPE_DOMAIN);
     for field in [
         value.context.vault,
