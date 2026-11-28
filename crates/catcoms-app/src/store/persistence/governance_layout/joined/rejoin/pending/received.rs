@@ -43,6 +43,26 @@ enum Held {
     Selected(File),
 }
 
+impl Held {
+    fn replay_file(
+        &self,
+        catalog: RejoinReadCatalog<'_>,
+        name: &'static str,
+        frame: &[u8],
+    ) -> Result<Option<&File>, AppError> {
+        if !catalog.existing_only() {
+            return Ok(None);
+        }
+        let file = match self {
+            Self::Selected(file) => file,
+            Self::Stage(Some(stage)) => &stage.file,
+            Self::Stage(None) => return Err(denied()),
+        };
+        catalog.require_leaf(name, (file, frame))?;
+        Ok(Some(file))
+    }
+}
+
 /// A warm retry cannot adopt an equal-byte file or a new Pending owner.
 pub(in crate::store) struct RejoinReceivedOwner {
     held: Held,
@@ -64,7 +84,10 @@ impl RejoinReceivedOwner {
         }
     }
 
-    fn cover(&mut self, path: &Path) -> Result<(), AppError> {
+    fn cover(&mut self, path: &Path, catalog: RejoinReadCatalog<'_>) -> Result<(), AppError> {
+        if let Some(file) = self.held.replay_file(catalog, RECEIVED, &self.frame)? {
+            return cover_existing(path, file, &self.frame);
+        }
         match &mut self.held {
             Held::Stage(file) => cover_new(path, &self.frame, file),
             Held::Selected(file) => cover_existing(path, file, &self.frame),
@@ -143,7 +166,33 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         require_current: impl Fn() -> Result<(), AppError>,
     ) -> Result<Option<NativeTextRejoinReceivedReceipt>, AppError> {
+        self.select_rejoin_received(
+            RejoinReadCatalog::Current {
+                inventory,
+                original: (registration, removal),
+            },
+            (pending, slot),
+            (invite, token),
+            input,
+            rng,
+            require_current,
+        )
+    }
+
+    fn select_rejoin_received(
+        &self,
+        catalog: RejoinReadCatalog<'_>,
+        (pending, slot): (&RejoinPendingOwner, &mut Option<RejoinReceivedOwner>),
+        (invite, token): (&NativeTextInvitePacketData<'_>, [u8; 32]),
+        input: RejoinReceivedInput<'_>,
+        rng: &mut impl CryptoRngCore,
+        require_current: impl Fn() -> Result<(), AppError>,
+    ) -> Result<Option<NativeTextRejoinReceivedReceipt>, AppError> {
         require_current()?;
+        let (inventory, (registration, removal)) = catalog.parts();
+        if catalog.existing_only() && !matches!(input, RejoinReceivedInput::LocalRetry) {
+            return Err(denied());
+        }
         let received = match input {
             RejoinReceivedInput::Connected {
                 pending_cookie,
@@ -156,7 +205,7 @@ impl ServerStore {
             }
             RejoinReceivedInput::LocalRetry => None,
         };
-        let catalog = self.cover_selected_rejoin_catalog(registration, removal, inventory)?;
+        let digest = catalog.digest(self)?;
         let pool = &self
             .governance_layout_policy
             .as_ref()
@@ -166,12 +215,14 @@ impl ServerStore {
             .pending
             .pool;
         pending.invoice().validate(pool, WORK_BYTES)?;
-        let binding = Binding::new(catalog, registration, removal, invite, token)?;
+        let binding = Binding::new(digest, registration, removal, invite, token)?;
         let key = Zeroizing::new(self.keys.db_key()?);
         let attempt_path = fixed(self, false, ATTEMPT)?;
         let pending_path = fixed(self, false, PENDING)?;
         let paths = [attempt_path.as_path(), pending_path.as_path()];
         let files = pending.files(&binding)?;
+        catalog.require_leaf(ATTEMPT, files[0])?;
+        catalog.require_leaf(PENDING, files[1])?;
         let original = self.open_covered_rejoin_files(
             inventory,
             &binding,
@@ -191,10 +242,14 @@ impl ServerStore {
             let fee = pool.try_reserve(WORK)?;
             let candidate = if let Some((file, frame)) = read(&path, MAX_FRAME)? {
                 // Verify before holding an existing file or changing anything.
+                catalog.require_leaf(RECEIVED, (&file, &frame))?;
                 let plain = open_frame(&key, PURPOSE, &frame)?;
                 verify_delivery(&binding, &original, &plain, received)?;
                 (Held::Selected(file), frame)
             } else {
+                if catalog.existing_only() {
+                    return Err(denied());
+                }
                 // A later journal binds the exact original Received frame.
                 // Its missing parent cannot be rebuilt with a new nonce.
                 welcome::require_unstarted(self)?;
@@ -224,6 +279,7 @@ impl ServerStore {
             });
         }
         let record = slot.as_mut().ok_or_else(denied)?;
+        let _ = record.held.replay_file(catalog, RECEIVED, &record.frame)?;
         if !std::sync::Arc::ptr_eq(&record.pending_cookie, pending.cookie()) {
             return Err(denied());
         }
@@ -233,7 +289,7 @@ impl ServerStore {
         // The barrier operates on the held file. Recheck the two original
         // request files and vault owner on both sides of covering the reply.
         require()?;
-        record.cover(&path)?;
+        record.cover(&path, catalog)?;
         inventory.sync_rejoin_catalog_parent(self)?;
         record.require(&path)?;
         require()?;

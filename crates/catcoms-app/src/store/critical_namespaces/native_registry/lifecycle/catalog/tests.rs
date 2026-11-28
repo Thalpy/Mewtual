@@ -319,6 +319,92 @@ fn same_vault_rejoin_catalog_adds_only_its_critical_capability() {
 }
 
 #[test]
+fn installed_rejoin_catalog_binding_requires_the_exact_encrypted_birth_frame() {
+    use crate::store::critical_namespaces::{
+        rejoin_namespace as rejoin, review_receive_namespace as review,
+        shared_history_namespace as history,
+    };
+    use rand_core::SeedableRng;
+
+    let (joined, _) = joined_catalog();
+    let shared = history::prepare_declaration(&joined, &VAULT).unwrap();
+    let initial_review = review::prepare_declaration(&shared, &VAULT).unwrap();
+    let receipt = grammar::parse_review_receive_family(&initial_review, &VAULT, true).unwrap();
+    let descriptor = receipt.review_receive_payload.unwrap();
+    let born = rejoin::prepare_declaration(&shared, &VAULT).unwrap();
+    let pre_review = rejoin::prepare_declaration(&initial_review, &VAULT).unwrap();
+    let generation = outer::parse(&born, &VAULT, outer::MAX_ENVELOPE_PLAIN)
+        .unwrap()
+        .generation;
+    let key = [0x91; 32];
+    let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0x921);
+    let mut seal =
+        |plain: &[u8]| crate::store::frame(&catcoms_crypto::seal(&key, plain, &mut rng).unwrap());
+    let original = seal(&born);
+    let resealed = seal(&born);
+    let old_review = seal(&pre_review);
+    for direct in [&original, &old_review] {
+        let exact = *blake3::hash(direct).as_bytes();
+        assert!(matches!(
+            rejoin::inspect_installed_catalog_binding(&key, direct, &VAULT).unwrap(),
+            rejoin::InstalledCatalogBindingData::Direct(digest) if digest == exact
+        ));
+        assert_eq!(
+            rejoin::selected_frame_digest(&key, direct, &VAULT).unwrap(),
+            exact
+        );
+    }
+    let child = |generation, descriptor: &[u8]| {
+        let mut data = Encoder::with_capacity(200);
+        data.put_bytes(b"catcoms/chat-v2/review-receiver-rejoin-parent/v1\0")
+            .unwrap();
+        data.put_bytes(descriptor).unwrap();
+        data.put_u64(generation);
+        data.put_bytes(blake3::hash(&original).as_bytes()).unwrap();
+        catalog_declaration::insert_entry_data(&born, &VAULT, review::ID, 2, &data.finish())
+            .unwrap()
+    };
+    let plain = child(generation, descriptor);
+    let extended = seal(&plain);
+    let rejoin::InstalledCatalogBindingData::ReviewSuccessor(parent) =
+        rejoin::inspect_installed_catalog_binding(&key, &extended, &VAULT).unwrap()
+    else {
+        panic!("linked ID12 must be recognized only by installed replay");
+    };
+    assert_eq!(
+        parent
+            .verify_installed_parent(&key, &original, &extended, &VAULT)
+            .unwrap(),
+        *blake3::hash(&original).as_bytes()
+    );
+    assert!(rejoin::selected_frame_digest(&key, &extended, &VAULT).is_err());
+    assert!(grammar::parse_review_receive_family(&plain, &VAULT, true).is_err());
+    assert!(parent
+        .verify_installed_parent(&key, &resealed, &extended, &VAULT)
+        .is_err());
+    assert!(parent
+        .verify_installed_parent(&key, &old_review, &extended, &VAULT)
+        .is_err());
+    assert!(parent
+        .verify_installed_parent(&key, &original, &extended, &[0xee; 32])
+        .is_err());
+    assert!(parent
+        .verify_installed_parent(&key, &original[..original.len() - 1], &extended, &VAULT)
+        .is_err());
+    let wrong_generation = seal(&child(generation - 1, descriptor));
+    assert!(rejoin::inspect_installed_catalog_binding(&key, &wrong_generation, &VAULT).is_err());
+    let invalid_descriptor = seal(&child(generation, &[0x44; 32]));
+    let rejoin::InstalledCatalogBindingData::ReviewSuccessor(invalid) =
+        rejoin::inspect_installed_catalog_binding(&key, &invalid_descriptor, &VAULT).unwrap()
+    else {
+        panic!("descriptor validation is separate from link parsing");
+    };
+    assert!(invalid
+        .verify_installed_parent(&key, &original, &invalid_descriptor, &VAULT)
+        .is_err());
+}
+
+#[test]
 fn same_vault_rejoin_framed_stage_requires_its_authenticated_selected_parent() {
     use crate::store::critical_namespaces::{rejoin_namespace as rejoin, shared_history_namespace};
     use rand_core::SeedableRng;

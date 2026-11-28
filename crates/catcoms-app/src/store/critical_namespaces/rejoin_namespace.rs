@@ -9,6 +9,9 @@ use crate::AppError;
 use catcoms_wire::{Decoder, Encoder};
 use zeroize::Zeroizing;
 
+mod replay;
+pub(in crate::store) use replay::{inspect_installed_catalog_binding, InstalledCatalogBindingData};
+
 pub(super) const ID: u32 = 9;
 pub(super) const VERSION: u32 = 1;
 const TAG: &[u8] = b"catcoms/private-chat-v2-same-vault-rejoin/v1\0";

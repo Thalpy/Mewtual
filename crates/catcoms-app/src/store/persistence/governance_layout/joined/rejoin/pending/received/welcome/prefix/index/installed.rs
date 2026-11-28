@@ -19,6 +19,7 @@ pub(in crate::store) struct InstalledRejoin {
     prefix: Box<RejoinPrefixOwner>,
     index: RejoinIndexOwner,
     additions: MemberAdds,
+    catalog: InstalledCatalogWitness,
     // Retain the original authenticated Index3 and its physical mount while
     // using the successor. Commands can never infer authority from a new
     // file captured at an old pathname.
@@ -61,6 +62,7 @@ impl InstalledRejoin {
             .ok_or_else(denied)?
             .require(&fixed(store, false, PREFIX)?)?;
         self.index.record.require(&fixed(store, false, INDEX)?)?;
+        self.catalog.require(store, &self.inventory.inventory)?;
         self.inventory.inventory.require(store)
     }
 
@@ -129,12 +131,14 @@ impl InstalledRejoin {
         self.require_node(node)?;
         let core = Arc::get_mut(&mut self.prefix.core).ok_or_else(denied)?;
         let outcome = self.welcome.outcome.as_ref().ok_or_else(denied)?;
+        let catalog = &self.catalog;
+        let inventory = &self.inventory.inventory;
         let retired = self.additions.cover(
             (store, self.replacement.context),
             &outcome.frame,
             (&mut core.core, node),
             delivery,
-            caller,
+            (caller, || catalog.require_linked(store, inventory)),
             rng,
         )?;
         Ok((retired, self.require_files(store)))
@@ -270,7 +274,7 @@ impl ServerStore {
         let mut welcome = None;
         let mut prefix = None;
         let mut index = None;
-        let selected = self.recover_rejoin_index(
+        let (selected, catalog) = self.recover_rejoin_index_with_catalog(
             &inventory.inventory,
             original,
             (
@@ -296,6 +300,7 @@ impl ServerStore {
             prefix,
             index: index.ok_or_else(denied)?,
             additions: MemberAdds::default(),
+            catalog,
             inventory,
         };
         owner.row(self, replacement)?;

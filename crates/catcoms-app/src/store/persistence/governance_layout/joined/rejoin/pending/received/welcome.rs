@@ -94,6 +94,18 @@ impl JournalFrame {
             Held::Selected(file) => cover_existing(path, file, &self.frame),
         }
     }
+
+    fn cover_bound(
+        &mut self,
+        path: &Path,
+        catalog: RejoinReadCatalog<'_>,
+        name: &'static str,
+    ) -> Result<(), AppError> {
+        if let Some(file) = self.held.replay_file(catalog, name, &self.frame)? {
+            return cover_existing(path, file, &self.frame);
+        }
+        self.cover(path)
+    }
 }
 
 struct WarmGraph {
@@ -247,12 +259,38 @@ impl ServerStore {
         (registration, removal): (NativeTextJoinedRegistrationData, SelectedRejoinRemoval),
         (pending, received, slot): RejoinWelcomeOwners<'_>,
         (invite, token): (&NativeTextInvitePacketData<'_>, [u8; 32]),
+        entry: (Option<RejoinWelcomeKeyEntry<'_>>, &RequestCancellation),
+        rng: &mut impl CryptoRngCore,
+        require_current: impl Fn() -> Result<(), AppError>,
+    ) -> Result<NativeTextRejoinWelcomeStatus, AppError> {
+        self.select_rejoin_welcome(
+            RejoinReadCatalog::Current {
+                inventory,
+                original: (registration, removal),
+            },
+            (pending, received, slot),
+            (invite, token),
+            entry,
+            rng,
+            require_current,
+        )
+    }
+
+    fn select_rejoin_welcome(
+        &self,
+        catalog: RejoinReadCatalog<'_>,
+        (pending, received, slot): RejoinWelcomeOwners<'_>,
+        (invite, token): (&NativeTextInvitePacketData<'_>, [u8; 32]),
         (mut native, caller): (Option<RejoinWelcomeKeyEntry<'_>>, &RequestCancellation),
         rng: &mut impl CryptoRngCore,
         require_current: impl Fn() -> Result<(), AppError>,
     ) -> Result<NativeTextRejoinWelcomeStatus, AppError> {
         require_current()?;
-        let catalog = self.cover_selected_rejoin_catalog(registration, removal, inventory)?;
+        let (inventory, (registration, removal)) = catalog.parts();
+        if catalog.existing_only() && native.is_some() {
+            return Err(denied());
+        }
+        let digest = catalog.digest(self)?;
         let pool = &self
             .governance_layout_policy
             .as_ref()
@@ -266,13 +304,15 @@ impl ServerStore {
         if !received.covered || !pending.matches_cookie(&received.pending_cookie) {
             return Err(denied());
         }
-        let binding = Binding::new(catalog, registration, removal, invite, token)?;
+        let binding = Binding::new(digest, registration, removal, invite, token)?;
         let key = Zeroizing::new(self.keys.db_key()?);
         let attempt_path = fixed(self, false, ATTEMPT)?;
         let pending_path = fixed(self, false, PENDING)?;
         let received_path = fixed(self, false, RECEIVED)?;
         let paths = [attempt_path.as_path(), pending_path.as_path()];
         let files = pending.files(&binding)?;
+        catalog.require_leaf(ATTEMPT, files[0])?;
+        catalog.require_leaf(PENDING, files[1])?;
         let limits = pending_limits()?;
         let original = self.open_covered_rejoin_files(
             inventory,
@@ -282,6 +322,9 @@ impl ServerStore {
             files,
         )?;
         received.require(&received_path)?;
+        let _ = received
+            .held
+            .replay_file(catalog, RECEIVED, &received.frame)?;
         let plaintext = open_frame(&key, PURPOSE, &received.frame)?;
         let delivery = delivery_bytes(&binding, &original, &plaintext)?;
         original
@@ -313,6 +356,9 @@ impl ServerStore {
         let names = (entry_path.as_path(), outcome_path.as_path());
         if let Some(original) = slot.as_mut() {
             if original.retirement != UnenteredAttempt::Writing {
+                if catalog.existing_only() {
+                    return Err(denied());
+                }
                 require_files()?;
                 original.retire_unentered(self, inventory, names)?;
                 *slot = None;
@@ -322,12 +368,16 @@ impl ServerStore {
         if slot.is_none() {
             let fee = pool.try_reserve(OUTCOME_WORK)?;
             let (entry, outcome, warm) = if let Some(entry) = read(&entry_path, ATTEMPT_MAX)? {
+                catalog.require_leaf(SDK_ATTEMPT, (&entry.0, &entry.1))?;
                 if open_frame(&key, ATTEMPT_TAG, &entry.1)? != expected {
                     return Err(denied());
                 }
                 let outcome = read(&outcome_path, OUTCOME_MAX)?.map(JournalFrame::selected);
                 (JournalFrame::selected(entry), outcome, None)
             } else {
+                if catalog.existing_only() {
+                    return Err(denied());
+                }
                 absent(&outcome_path)?;
                 prefix::require_unstarted(self)?;
                 let native = native.as_mut().ok_or_else(denied)?;
@@ -372,6 +422,12 @@ impl ServerStore {
             }));
         }
         let original_welcome = slot.as_mut().ok_or_else(denied)?;
+        if catalog.existing_only() && original_welcome.outcome.is_none() {
+            return Err(denied());
+        }
+        if let Some(outcome) = &original_welcome.outcome {
+            let _ = outcome.held.replay_file(catalog, OUTCOME, &outcome.frame)?;
+        }
         original_welcome.fee.validate(pool, OUTCOME_WORK)?;
         if !pending.matches_cookie(&original_welcome.pending_cookie)
             || open_frame(&key, ATTEMPT_TAG, &original_welcome.entry.frame)? != expected
@@ -379,12 +435,14 @@ impl ServerStore {
             return Err(denied());
         }
         require()?;
-        original_welcome.entry.cover(&entry_path)?;
+        original_welcome
+            .entry
+            .cover_bound(&entry_path, catalog, SDK_ATTEMPT)?;
         inventory.sync_rejoin_catalog_parent(self)?;
         original_welcome.entry.require(&entry_path)?;
         require_files()?;
         if let Err(error) = require_current() {
-            if original_welcome.can_retire_unentered() {
+            if !catalog.existing_only() && original_welcome.can_retire_unentered() {
                 original_welcome.retire_unentered(self, inventory, names)?;
                 *slot = None;
             }
@@ -515,7 +573,7 @@ impl ServerStore {
         // after revocation. A stale caller cannot start prefix or publication.
         require_cover()?;
         original_welcome.entry.require(&entry_path)?;
-        outcome.cover(&outcome_path)?;
+        outcome.cover_bound(&outcome_path, catalog, OUTCOME)?;
         inventory.sync_rejoin_catalog_parent(self)?;
         require_cover()?;
         original_welcome.entry.require(&entry_path)?;

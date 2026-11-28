@@ -70,7 +70,7 @@ impl WarmWelcome {
             welcome,
             (&mut selected.core, node),
             delivery,
-            caller,
+            (caller, || Ok(())),
             rng,
         )
     }
@@ -568,7 +568,7 @@ impl RecoveredWelcome {
             &outcome.file.1,
             (&mut selected.core, node),
             delivery,
-            caller,
+            (caller, || Ok(())),
             rng,
         )
     }

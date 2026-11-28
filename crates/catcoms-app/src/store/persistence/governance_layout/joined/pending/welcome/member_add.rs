@@ -236,7 +236,10 @@ impl MemberAdds {
         welcome: &[u8],
         (core, node): (&mut PreparedV2JoinedPrefix, &mut ClosedV2JoinedNode<T, R>),
         delivery: &[u8],
-        caller: &catcoms_rt::RequestCancellation,
+        (caller, require_catalog): (
+            &catcoms_rt::RequestCancellation,
+            impl Fn() -> Result<(), AppError>,
+        ),
         rng: &mut impl catcoms_rt::CryptoRngCore,
     ) -> Result<RetiredJoinedMembership, AppError> {
         let require_live = || {
@@ -245,7 +248,15 @@ impl MemberAdds {
             }
             store.validate_mounted_governance_layout()
         };
-        require_live()?;
+        let require_write = || {
+            require_live()?;
+            require_catalog()?;
+            if caller.is_cancelled() {
+                return Err(denied());
+            }
+            Ok(())
+        };
+        require_write()?;
         if self.evicted || self.fork.is_some() {
             return Err(denied());
         }
@@ -271,7 +282,7 @@ impl MemberAdds {
             (&mut self.first, &mut self.fork),
             (core, node),
             frame.header_data(),
-            &require_live,
+            &require_write,
             rng,
         )?;
         if self.pending.is_none() {
@@ -320,12 +331,12 @@ impl MemberAdds {
         {
             return Err(denied());
         }
-        require_live()?;
+        require_write()?;
         write_held(store, &pending.path, &pending.sealed, &mut pending.original)?;
         let opened = codec::open_member_add(&key, context, predecessor, &pending.sealed)?;
         let selected = opened.require_original_candidate(&context.vault, &pending.candidate)?;
         let fetch = node.member_add_request_data(core)?;
-        require_live()?;
+        require_write()?;
         self.first.as_ref().ok_or_else(denied)?.require_current()?;
         write_held(
             store,
@@ -347,6 +358,9 @@ impl MemberAdds {
             &pending.sealed,
         )?;
         pending.selection.require_current()?;
+        // The exact selector was already admitted and covered. Finishing
+        // its in-memory transition must preserve an actual terminal result
+        // even when the caller's final catalog reproof subsequently refuses.
         require_live()?;
         let retired = install_transition(core, node, &mut pending.candidate, selected)?;
         let witness = self.first.take();

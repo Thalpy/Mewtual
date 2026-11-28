@@ -1,5 +1,30 @@
 # Mewtual; Handover
 
+## Preserve the catalog used to bind an installed rejoin
+
+Installed A2 recovery checks the exact seven selected replacement files and
+the original live Current throughout reconstruction. The recovery path can
+read those files and synchronize an existing record. It cannot start a
+transport exchange, enter Welcome, or create a missing replacement record.
+
+The private ID12 predecessor reader verifies an original encrypted catalog
+and the exact insertion of a receiver descriptor. An installed owner keeps
+the predecessor file, identity and digest through attachment and later
+membership changes. It checks that proof before writing a new membership
+record. A selected removal can still retire the row when a final proof
+check fails. The ordinary reader and writer use the original catalog format.
+
+A genuine linked-vault restart and migration are still pending. They must
+cover missing and replaced predecessor files, an unchanged A2 after a later
+Add, and retirement after a late failure. Existing A2 vaults without the
+receiver descriptor continue to defer provisioning.
+
+Three focused App tests and two desktop-native tests passed. The native
+tests exercise the existing direct-format A2 startup, later removal, and
+retirement of the original file loan. The App checks cover exact birth
+catalog data and held-file custody, including replacement, truncation,
+growth, and in-place changes.
+
 ## Reconnect to the original A1 founder after explicit approval
 
 The original joined row can remember a user-approved founder address after
