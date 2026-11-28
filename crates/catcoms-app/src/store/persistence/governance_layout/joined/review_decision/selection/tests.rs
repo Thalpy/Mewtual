@@ -13,10 +13,15 @@ use catcoms_replication::chat::{
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
-#[test]
-fn review_index_recovers_the_original_unindexed_v1_selection() {
-    let mut rng = ChaCha20Rng::seed_from_u64(722);
-    let key = JournalKey::new(&[29; 32], &[30; 32]);
+pub(super) fn signed_case_fixture(
+    choice: ReviewDecision,
+) -> (
+    DeviceKeypair,
+    FounderGenesisAnchorData,
+    ReviewStreamPosition,
+    ExactReviewDecisionBody,
+    Zeroizing<Vec<u8>>,
+) {
     let scope = scope();
     let (held, original) = fixture(scope, 21, 22);
     let target = V2RemovedCreateRecord::decode(&held)
@@ -27,7 +32,7 @@ fn review_index_recovers_the_original_unindexed_v1_selection() {
         ReviewDecisionBody::new(ReviewSpec {
             target,
             intent: [23; 16],
-            decision: ReviewDecision::Approve,
+            decision: choice,
             previous: None,
         })
         .unwrap(),
@@ -54,6 +59,14 @@ fn review_index_recovers_the_original_unindexed_v1_selection() {
         membership_header: original.removal.0,
         membership_epoch: original.removal.1,
     };
+    (founder, pin, position, decision, held)
+}
+
+#[test]
+fn review_index_recovers_the_original_unindexed_v1_selection() {
+    let mut rng = ChaCha20Rng::seed_from_u64(722);
+    let key = JournalKey::new(&[29; 32], &[30; 32]);
+    let (founder, pin, position, decision, held) = signed_case_fixture(ReviewDecision::Approve);
     let unsigned = UnsignedReviewStreamEntry::prepare(&pin, position, &decision).unwrap();
     let signature = founder.sign(unsigned.signing_bytes());
     let entry = unsigned.attach_signature(&pin, signature).unwrap();

@@ -94,8 +94,16 @@ Ten focused Windows App regressions passed for this checkpoint. The
 TCP fixture reopens after head installation and partial input
 retirement, checks the original outcome with its hold file unavailable,
 and verifies ordinary founder recovery when all journal files are lost.
-Additional decisions, approval delivery, native admin controls and
-activation remain open.
+The recovered founder can select later private decisions against the
+exact case revision. A saved intent is looked up before checking the
+current case tip, so retry can still return an earlier result. The
+write-ahead file covers both changed index paths and the record.
+Retirement proves obsolete index pages are unreachable. It keeps every
+original decision record. The two-case TCP fixture checks Reject, Reopen
+and Approve across cold reopens, an interrupted index retirement, and an
+exact retry of the earlier Reject. It also checks that a decision in
+one case leaves the other case's revision independent. Approval delivery,
+native admin controls and activation remain open.
 
 ## Rejoin from the retired native session
 

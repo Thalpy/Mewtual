@@ -12,6 +12,7 @@ use catcoms_wire::{Decoder, Encoder};
 
 const KEY_DOMAIN: &str = "catcoms/private-chat-v2-review-journal-vault-key/v1";
 const INTENT: &[u8] = b"catcoms/private-chat-v2-review-journal-intent/v1\0";
+const BOUND_INTENT: &[u8] = b"catcoms/private-chat-v2-review-journal-intent/v2\0";
 const ATTEMPT: &[u8] = b"catcoms/private-chat-v2-review-journal-attempt/v1\0";
 const RAW: &[u8] = b"catcoms/private-chat-v2-review-journal-raw/v1\0";
 const INTENT_COMMITMENT: &str = "catcoms/private-chat-v2-review-journal-intent-frame/v1";
@@ -21,6 +22,7 @@ const DIGEST_FIELD: usize = 4 + 32;
 pub(super) const MAX_INTENT_BYTES: usize = SEAL_BYTES
     + 4
     + INTENT.len()
+    + DIGEST_FIELD
     + DIGEST_FIELD
     + 4
     + UNSIGNED_REVIEW_STREAM_ENTRY_BYTES
@@ -81,6 +83,7 @@ impl JournalKey {
 /// selected stream and membership before it can use this for an Attempt.
 pub(super) struct ReviewIntent<'a> {
     pub(super) request_digest: [u8; 32],
+    pub(super) selected_base: Option<[u8; 32]>,
     pub(super) decision: ExactReviewDecisionBody,
     pub(super) original: &'a [u8],
     unsigned: &'a [u8; UNSIGNED_REVIEW_STREAM_ENTRY_BYTES],
@@ -92,7 +95,11 @@ impl<'a> ReviewIntent<'a> {
         request_digest: [u8; 32],
         decision: &ExactReviewDecisionBody,
         original: &[u8],
-        (pin, position): (&FounderGenesisAnchorData, ReviewStreamPosition),
+        (pin, position, selected_base): (
+            &FounderGenesisAnchorData,
+            ReviewStreamPosition,
+            Option<[u8; 32]>,
+        ),
         rng: &mut dyn CryptoRngCore,
     ) -> Result<Zeroizing<Vec<u8>>, AppError> {
         let unsigned =
@@ -102,16 +109,29 @@ impl<'a> ReviewIntent<'a> {
             .require_record_data(&record)
             .map_err(|_| denied())?;
         let body = decision.encode();
+        let domain = if selected_base.is_some() {
+            BOUND_INTENT
+        } else {
+            INTENT
+        };
         let mut encoded = Encoder::with_capacity(
-            20 + INTENT.len() + 32 + unsigned.signing_bytes().len() + body.len() + original.len(),
+            20 + domain.len()
+                + 32
+                + selected_base.map_or(0, |_| DIGEST_FIELD)
+                + unsigned.signing_bytes().len()
+                + body.len()
+                + original.len(),
         );
-        for field in [
-            INTENT,
-            &request_digest,
-            unsigned.signing_bytes(),
-            &body,
-            original,
-        ] {
+        for field in [domain, &request_digest] {
+            encoded.put_bytes(field).map_err(|_| denied())?;
+        }
+        if let Some(base) = selected_base {
+            if base == [0; 32] {
+                return Err(denied());
+            }
+            encoded.put_bytes(&base).map_err(|_| denied())?;
+        }
+        for field in [unsigned.signing_bytes().as_slice(), &body, original] {
             encoded.put_bytes(field).map_err(|_| denied())?;
         }
         let sealed = key.seal(encoded, rng)?;
@@ -126,10 +146,20 @@ impl<'a> ReviewIntent<'a> {
             return Err(denied());
         }
         let mut input = Decoder::new(plaintext);
-        if next(&mut input)? != INTENT {
+        let domain = next(&mut input)?;
+        if domain != INTENT && domain != BOUND_INTENT {
             return Err(denied());
         }
         let request_digest = next(&mut input)?.try_into().map_err(|_| denied())?;
+        let selected_base = if domain == BOUND_INTENT {
+            let base: [u8; 32] = next(&mut input)?.try_into().map_err(|_| denied())?;
+            if base == [0; 32] {
+                return Err(denied());
+            }
+            Some(base)
+        } else {
+            None
+        };
         let unsigned = next(&mut input)?.try_into().map_err(|_| denied())?;
         let body = next(&mut input)?;
         let original = next(&mut input)?;
@@ -144,6 +174,7 @@ impl<'a> ReviewIntent<'a> {
         decision.require_record_data(&held).map_err(|_| denied())?;
         Ok(Self {
             request_digest,
+            selected_base,
             decision,
             original,
             unsigned,
@@ -322,13 +353,36 @@ mod tests {
         let key = JournalKey::new(&[27; 32], &[28; 32]);
         let wrong_mount = JournalKey::new(&[27; 32], &[29; 32]);
         let seal_intent = |rng: &mut ChaCha20Rng| {
-            ReviewIntent::seal(&key, [30; 32], &decision, &held, (&pin, position), rng).unwrap()
+            ReviewIntent::seal(
+                &key,
+                [30; 32],
+                &decision,
+                &held,
+                (&pin, position, None),
+                rng,
+            )
+            .unwrap()
         };
         let intent = seal_intent(&mut rng);
         let plain = key.open_intent(&intent).unwrap();
         assert!(wrong_mount.open_intent(&intent).is_err());
         let checked = ReviewIntent::decode(&plain).unwrap();
         assert_eq!(checked.request_digest, [30; 32]);
+        assert!(checked.selected_base.is_none());
+        let bound = ReviewIntent::seal(
+            &key,
+            [30; 32],
+            &decision,
+            &held,
+            (&pin, position, Some([32; 32])),
+            &mut rng,
+        )
+        .unwrap();
+        let bound = key.open_intent(&bound).unwrap();
+        assert_eq!(
+            ReviewIntent::decode(&bound).unwrap().selected_base,
+            Some([32; 32])
+        );
         assert_eq!(checked.original, held.as_slice());
         assert_eq!(checked.decision, decision);
         assert!(checked

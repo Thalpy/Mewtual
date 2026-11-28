@@ -2,6 +2,7 @@
 use super::persistence::v2_review_hold::HeldCase;
 use catcoms_replication::chat::{
     owner_bodies::{ExactReviewOriginal, ReviewCaseId, ReviewDecision},
+    owner_header::OwnerBodyId,
     ActionId,
 };
 
@@ -10,6 +11,7 @@ pub struct NativeTextInitialReviewRequest {
     pub(super) case: HeldCase,
     pub(super) intent: [u8; 16],
     pub(super) decision: ReviewDecision,
+    pub(super) previous: Option<OwnerBodyId>,
 }
 
 catcoms_rt::redacted_debug! { NativeTextInitialReviewRequest; }
@@ -33,6 +35,14 @@ impl NativeTextInitialReviewRequest {
             },
             intent,
             decision,
+            previous: None,
         }
+    }
+
+    /// Match the exact case revision that the founder saw before making
+    /// a follow-up decision. A separate trusted journal lookup proves it.
+    pub fn for_successor(mut self, previous: OwnerBodyId) -> Self {
+        self.previous = Some(previous);
+        self
     }
 }

@@ -172,6 +172,12 @@ impl ReviewStreamEntry {
         self.position
     }
 
+    /// Exact decision-body reference for a later request's case revision.
+    /// Its selected state must be proved through the original journal.
+    pub fn decision_id_data(&self) -> OwnerBodyId {
+        self.body
+    }
+
     pub fn encode(&self) -> [u8; REVIEW_STREAM_ENTRY_BYTES] {
         let mut bytes = [0; REVIEW_STREAM_ENTRY_BYTES];
         bytes[..UNSIGNED_REVIEW_STREAM_ENTRY_BYTES].copy_from_slice(&self.semantic_bytes());

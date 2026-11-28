@@ -427,13 +427,6 @@ pub(in crate::store) fn encode_private_leaf_data(
     PrivateIndexNodeFrame::decode(&raw, context, placement)?;
     Ok(raw)
 }
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Retained tested branch codec reference; operational branch rewriting is unwired"
-    )
-)]
 pub(in crate::store) fn encode_private_branch_data(
     context: PrivateIndexContextData,
     children: &[PrivateIndexChildRefData],

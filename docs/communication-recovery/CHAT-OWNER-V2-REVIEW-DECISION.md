@@ -94,8 +94,18 @@ read after retirement of the signing files and write-ahead file. The
 write-ahead file survives until every original input has retired. An
 earlier valid unindexed transaction still recovers with its original
 files. The missing empty head of an older bare declaration cannot
-authorize a new attempt. Additional case transitions, fork persistence
-and delivery admission remain open.
+authorize a new attempt.
+
+Later private decisions read the original nonce first. A genuine miss
+checks the exact selected case revision and binds the encrypted head
+into Intent before entering the key. The later write-ahead format seals
+the record, replacement head and both bounded index edits. A pending
+retry rederives those edits from the original roots. A committed retry
+reopens the selected request and case paths and retires the original
+signing controls and provably unreachable index pages before retiring
+the write-ahead file. Case revisions remain visible in immutable records.
+Fork persistence on peers, delivery admission and native admin controls
+remain open.
 
 ### Covered founder audit
 

@@ -23,7 +23,7 @@ impl FirstDecisionFiles {
         }
         let selected = DecisionHead::open(key, &head.bytes)?;
         if selected.sequence != 1 {
-            return Err(denied());
+            return Ok(None);
         }
         let Some(roots) = selected.roots else {
             // The original first-decision journal still uses its complete

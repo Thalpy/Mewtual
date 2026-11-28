@@ -4331,8 +4331,13 @@ After covering the exact selected head, recovery proves the immutable
 record and both index pages before retiring the exact signing inputs.
 The write-ahead file retires last, with a final absence check for the
 inputs. Loss of the whole journal cannot supply a new empty baseline.
-The supported first-decision retry is private. Approval delivery and
-additional decisions remain open.
+Later decisions bind the original encrypted head before key entry.
+The pending append verifies both original selected index paths and
+replays the exact copy-on-write edits. When the new head is covered, a
+bounded path at each obsolete page's authenticated minimum proves it
+unreachable before removal. The selected head and exact file handles
+remain held through retirement. The immutable decision records stay
+available for original-intent recovery. Approval delivery remains open.
 
 ## Chat history admission and retained audit (20 October, continuation)
 

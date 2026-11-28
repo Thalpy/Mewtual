@@ -13,6 +13,7 @@ use catcoms_replication::chat::{
 };
 use catcoms_wire::{Decoder, Encoder};
 
+pub(super) mod append;
 pub(super) mod disk;
 pub(super) mod index;
 #[cfg(test)]
@@ -131,9 +132,7 @@ impl DecisionHead {
             sequence: entry.position_data().sequence,
             entry: *entry.id().as_bytes(),
             record: blake3::derive_key(RECORD_DIGEST_DOMAIN, sealed_record),
-            previous_head: previous_head.map_or([0; 32], |(_, frame)| {
-                blake3::derive_key(HEAD_DIGEST_DOMAIN, frame)
-            }),
+            previous_head: previous_head.map_or([0; 32], |(_, frame)| head_digest(frame)),
             roots: Some(roots),
         };
         value.require_shape()?;
@@ -235,7 +234,7 @@ impl DecisionHead {
                         .previous
                         .is_some_and(|entry| entry.as_bytes() == &previous.entry) =>
             {
-                blake3::derive_key(HEAD_DIGEST_DOMAIN, frame)
+                head_digest(frame)
             }
             None if self.sequence == 1 && position.previous.is_none() => [0; 32],
             _ => return Err(denied()),
@@ -249,6 +248,10 @@ impl DecisionHead {
 
 fn valid_head_size(frame: &[u8]) -> bool {
     matches!(frame.len(), LEGACY_HEAD_BYTES | HEAD_BYTES)
+}
+
+pub(super) fn head_digest(frame: &[u8]) -> [u8; 32] {
+    blake3::derive_key(HEAD_DIGEST_DOMAIN, frame)
 }
 
 /// Freeze the encrypted outputs in one authenticated transaction. A
@@ -412,17 +415,7 @@ impl<'a> DecisionSelection<'a> {
         &self,
         frames: [Option<&[u8]>; 3],
     ) -> Result<(), AppError> {
-        let domains = [
-            INTENT_DIGEST_DOMAIN,
-            ATTEMPT_DIGEST_DOMAIN,
-            RAW_DIGEST_DOMAIN,
-        ];
-        for ((frame, domain), expected) in frames.into_iter().zip(domains).zip(self.controls) {
-            if frame.is_some_and(|frame| blake3::derive_key(domain, frame) != expected) {
-                return Err(denied());
-            }
-        }
-        Ok(())
+        require_remaining_controls(self.controls, frames)
     }
 
     /// Reprove the exact outputs against authenticated pinned data. The
@@ -465,6 +458,23 @@ pub(super) fn control_digests([intent, attempt, raw]: [&[u8]; 3]) -> [[u8; 32]; 
         blake3::derive_key(ATTEMPT_DIGEST_DOMAIN, attempt),
         blake3::derive_key(RAW_DIGEST_DOMAIN, raw),
     ]
+}
+
+fn require_remaining_controls(
+    controls: [[u8; 32]; 3],
+    frames: [Option<&[u8]>; 3],
+) -> Result<(), AppError> {
+    let domains = [
+        INTENT_DIGEST_DOMAIN,
+        ATTEMPT_DIGEST_DOMAIN,
+        RAW_DIGEST_DOMAIN,
+    ];
+    for ((frame, domain), expected) in frames.into_iter().zip(domains).zip(controls) {
+        if frame.is_some_and(|frame| blake3::derive_key(domain, frame) != expected) {
+            return Err(denied());
+        }
+    }
+    Ok(())
 }
 
 fn read_field<'a>(decoder: &mut Decoder<'a>) -> Result<&'a [u8], AppError> {

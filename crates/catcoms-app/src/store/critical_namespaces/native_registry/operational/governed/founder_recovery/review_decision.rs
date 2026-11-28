@@ -1,7 +1,10 @@
-//! Prepare the first private review signature under the actual recovered
+//! Prepare a private review signature under the actual recovered
 //! founder. Covering Raw here grants no selected decision or delivery.
 use super::*;
-use crate::store::persistence::governance_layout::joined::review_decision::ReviewSigningSpec;
+use crate::store::persistence::governance_layout::joined::review_decision::{
+    DecisionControl, PreparedIndexedReviewSource, PreparedReviewBase, ReviewSigningSpec,
+    SelectedReviewDecision,
+};
 use crate::store::NativeTextInitialReviewRequest;
 use catcoms_replication::chat::{
     owner_bodies::{
@@ -29,7 +32,7 @@ impl NativeTextColdFounderSource {
             })
     }
 
-    pub(in crate::store) fn finish_initial_review(
+    pub(in crate::store) fn finish_founder_review(
         &mut self,
         (request, select): (NativeTextInitialReviewRequest, bool),
         (native, cut, ends): (
@@ -78,6 +81,7 @@ impl NativeTextColdFounderSource {
                         }))
                     };
                 if select {
+                    store.finish_selected_review_append(&pin, |position| check(Some(position)))?;
                     if let Some(saved) =
                         store.finish_selected_initial_review(&pin, &request, |position| {
                             check(Some(position))
@@ -85,6 +89,14 @@ impl NativeTextColdFounderSource {
                     {
                         return Ok(saved);
                     }
+                }
+                let mut base = if select {
+                    store.prepare_review_base(&pin, &request, &mut check)?
+                } else {
+                    PreparedReviewBase::First
+                };
+                if let PreparedReviewBase::Saved(saved) = base {
+                    return Ok(saved);
                 }
                 let mut original =
                     store.prepare_held_review_original(scope, request.case, || check(None))?;
@@ -114,7 +126,7 @@ impl NativeTextColdFounderSource {
                             target: target.clone(),
                             intent: request.intent,
                             decision: request.decision,
-                            previous: None,
+                            previous: request.previous,
                         })
                         .map_err(|_| refused())?,
                         ExactReviewOriginal {
@@ -127,18 +139,27 @@ impl NativeTextColdFounderSource {
                     decision
                         .require_evidence_data(&evidence)
                         .map_err(|_| refused())?;
+                    let prior_case = match &base {
+                        PreparedReviewBase::Next(prior) => prior.case_data(),
+                        _ => None,
+                    };
                     decision
-                        .verify_new_transition_from(None)
+                        .verify_new_transition_from(prior_case)
                         .map_err(|_| refused())?;
                     let replay = verifier.replay_data();
-                    let position = ReviewStreamPosition {
-                        sequence: 1,
-                        previous: None,
-                        membership_header: replay.header().id(),
-                        membership_epoch: replay.mls_epoch_data(),
+                    let membership = (replay.header().id(), replay.mls_epoch_data());
+                    let position = match &base {
+                        PreparedReviewBase::Next(prior) => prior.next_position(membership)?,
+                        _ => ReviewStreamPosition {
+                            sequence: 1,
+                            previous: None,
+                            membership_header: membership.0,
+                            membership_epoch: membership.1,
+                        },
                     };
                     store.with_absent_ordinary_review_target(scope, request.case, || {
-                        store.with_review_decision_control(|mount, control| {
+                        let mut work = |mount: &SelectedReviewDecision, control: &mut DecisionControl,
+                                    prior: Option<&mut PreparedIndexedReviewSource>| {
                             let spec = ReviewSigningSpec {
                                 pin: &pin,
                                 position,
@@ -166,7 +187,12 @@ impl NativeTextColdFounderSource {
                                 },
                                 rng,
                             )?;
-                            if select {
+                            if let Some(prior) = prior {
+                                control.select_later(
+                                    (store, mount), (spec, &entry), prior,
+                                    |position| recheck(Some(position)), rng,
+                                )?;
+                            } else if select {
                                 control.select_first(
                                     (store, mount),
                                     (spec, &entry),
@@ -175,11 +201,22 @@ impl NativeTextColdFounderSource {
                                 )?;
                             }
                             Ok(entry)
-                        })
+                        };
+                        match &mut base {
+                            PreparedReviewBase::Next(prior) => store
+                                .with_indexed_review_decision(prior, |mount, control, prior| {
+                                    work(mount, control, Some(prior))
+                                }),
+                            _ => store.with_review_decision_control(|mount, control| {
+                                work(mount, control, None)
+                            }),
+                        }
                     })
                 })?;
                 drop(original);
+                drop(base);
                 if select {
+                    store.finish_selected_review_append(&pin, |position| check(Some(position)))?;
                     if let Some(saved) =
                         store.finish_selected_initial_review(&pin, &request, |position| {
                             check(Some(position))

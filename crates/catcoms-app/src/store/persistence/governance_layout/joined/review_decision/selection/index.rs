@@ -4,7 +4,8 @@ use super::*;
 use crate::store::persistence::v2_text::{
     private_index::{
         encode_private_leaf_data, PrivateIndexContextData, PrivateIndexKindData,
-        PrivateIndexLeafRowData, PrivateIndexPathData, PrivateIndexValueData, ReviewIndexValueData,
+        PrivateIndexLeafRowData, PrivateIndexNodeFrame, PrivateIndexPathData,
+        PrivateIndexValueData, ReviewIndexValueData,
     },
     TextContextIdData,
 };
@@ -12,7 +13,12 @@ use catcoms_replication::chat::{
     cold_index::{NodePlacementData, NodeRefData, NodeSummaryData},
     owner_bodies::ReviewCaseId,
 };
-use catcoms_storage::private_chat_page::{PreparedPrivateChatPage, PrivateChatPageId};
+use catcoms_storage::private_chat_page::{
+    open_private_chat_page, PreparedPrivateChatPage, PrivateChatPageId,
+};
+
+pub(super) mod append;
+pub(super) mod update;
 
 const INDEX_KEY: &str = "catcoms/private-chat-v2-review-journal-index-key/v1";
 const INDEX_CONTEXT: &str = "catcoms/private-chat-v2-review-journal-index-context/v1";
@@ -28,7 +34,7 @@ pub(in super::super) struct DecisionIndexPage {
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum DecisionIndexQuery {
+pub(in super::super) enum DecisionIndexQuery {
     Intent([u8; 16]),
     Case(ReviewCaseId),
 }
@@ -105,7 +111,10 @@ impl DecisionIndexes {
         Ok(())
     }
 
-    fn row(record: &RetainedDecisionRecord<'_>, sealed_record: &[u8]) -> ReviewIndexValueData {
+    pub(in super::super) fn row(
+        record: &RetainedDecisionRecord<'_>,
+        sealed_record: &[u8],
+    ) -> ReviewIndexValueData {
         let entry = record.record.entry_data();
         let decision = record.record.decision_data();
         ReviewIndexValueData {
@@ -154,14 +163,27 @@ impl DecisionIndexes {
         &self,
         root: NodeRefData,
         query: DecisionIndexQuery,
-        mut read: impl FnMut(PrivateChatPageId) -> Result<Zeroizing<Vec<u8>>, AppError>,
+        read: impl FnMut(PrivateChatPageId) -> Result<Zeroizing<Vec<u8>>, AppError>,
     ) -> Result<Option<ReviewIndexValueData>, AppError> {
-        let (context, key) = query.coordinates(self.context);
+        let path = self.open_path(root, query.coordinates(self.context), read)?;
+        Self::row_at(&path)
+    }
+
+    fn open_path(
+        &self,
+        root: NodeRefData,
+        (context, key): (PrivateIndexContextData, [u8; 32]),
+        mut read: impl FnMut(PrivateChatPageId) -> Result<Zeroizing<Vec<u8>>, AppError>,
+    ) -> Result<PrivateIndexPathData, AppError> {
         let mut path = PrivateIndexPathData::new_data(context, root, key).map_err(|_| denied())?;
         while let Some(page) = path.next_page_data().map_err(|_| denied())? {
             path.accept_frame_data(&self.key, &read(page)?)
                 .map_err(|_| denied())?;
         }
+        Ok(path)
+    }
+
+    fn row_at(path: &PrivateIndexPathData) -> Result<Option<ReviewIndexValueData>, AppError> {
         match path.row_data().map_err(|_| denied())? {
             Some(PrivateIndexLeafRowData {
                 value: PrivateIndexValueData::Review(value),
@@ -170,6 +192,52 @@ impl DecisionIndexes {
             Some(_) => Err(denied()),
             None => Ok(None),
         }
+    }
+
+    /// An immutable node can only occur on the selected path for its
+    /// authenticated minimum. Insertion and replacement retain that key.
+    pub(super) fn require_unreachable(
+        &self,
+        root: NodeRefData,
+        kind: PrivateIndexKindData,
+        old: NodeRefData,
+        read: impl FnMut(PrivateChatPageId) -> Result<Zeroizing<Vec<u8>>, AppError>,
+    ) -> Result<(), AppError> {
+        let context = PrivateIndexContextData {
+            cid: self.context,
+            kind,
+        };
+        let path = self.open_path(root, (context, old.summary.min), read)?;
+        if path
+            .original_frame_sizes_data()
+            .any(|(node, _)| node.page == old.page)
+        {
+            return Err(denied());
+        }
+        Ok(())
+    }
+
+    pub(super) fn require_old_page(
+        &self,
+        kind: PrivateIndexKindData,
+        placement: NodePlacementData,
+        old: NodeRefData,
+        bytes: &[u8],
+    ) -> Result<(), AppError> {
+        if bytes.len() > MAX_INDEX_FRAME_BYTES {
+            return Err(denied());
+        }
+        let plain = open_private_chat_page(&self.key, old.page, bytes).map_err(|_| denied())?;
+        let context = PrivateIndexContextData {
+            cid: self.context,
+            kind,
+        };
+        let node =
+            PrivateIndexNodeFrame::decode(&plain, context, placement).map_err(|_| denied())?;
+        if node.summary() != old.summary {
+            return Err(denied());
+        }
+        Ok(())
     }
 }
 

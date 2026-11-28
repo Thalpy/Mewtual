@@ -11,7 +11,9 @@ mod control;
 mod selection;
 #[cfg(test)]
 pub(in crate::store) use control::{with_review_control_fault, ReviewControlFault};
-pub(in crate::store) use control::{DecisionControl, ReviewSigningSpec};
+pub(in crate::store) use control::{
+    DecisionControl, PreparedIndexedReviewSource, PreparedReviewBase, ReviewSigningSpec,
+};
 
 pub(super) const DIRECTORY_NAME: &str = "chat-v2-review-decisions";
 pub(super) const MARKER_NAME: &str = "chat-critical-namespaces.review-decision.marker";
@@ -167,7 +169,7 @@ impl ServerStore {
             .try_lock()
             .map_err(|_| denied())?;
         let journal = journal.as_mut().ok_or_else(denied)?;
-        let mut control = DecisionControl::capture(self, journal)?;
+        let mut control = DecisionControl::capture(self, journal, None)?;
         let result = use_control(journal, &mut control);
         journal.warm = control.retained_warm();
         result

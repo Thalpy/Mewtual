@@ -2299,11 +2299,15 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     let mut ledger = recovered_row()
                         .prepare_member_ledger(&selection, channel, fresh.clone())
                         .unwrap();
+                    let mut selected = Vec::with_capacity(2);
+                    for (token, text) in [
+                        (0xc0, "Only the surviving member saw this post"),
+                        (0xc1, "A separate post from the same removed member"),
+                    ] {
                     let message = catcoms_replication::chat::Body::Create {
-                        text: "Only the surviving member saw this post".into(),
-                        reply_to: None,
+                        text: text.into(), reply_to: None,
                     };
-                    let late_token = [0xc0; 32];
+                    let late_token = [token; 32];
                     let draft = || V2MemberSignRequest {
                         token: late_token, channel, body: &message, parents: &[], dependencies: &[],
                     };
@@ -2324,29 +2328,39 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         panic!("the retiring member saved the original while it was still current");
                     };
                     tokio::time::timeout(std::time::Duration::from_secs(25), async {
-                        loop {
+                        let receipt = loop {
                             let prepared = third_row()
                                 .prepare_member_publication(&third_selection, fresh.clone(), &mut third_rng)
                                 .unwrap().unwrap();
                             match prepared.submit().await {
-                                Ok(Some(_)) => break,
+                                Ok(Some(receipt)) => break receipt,
                                 Err(catcoms_sync::SyncError::Publication(catcoms_rt::PublishOnceError::NoPeers)) => {
                                     catcoms_rt::SystemClock.sleep(std::time::Duration::from_millis(20)).await;
                                 }
                                 unexpected => panic!("the exact signed packet must reach the surviving peer: {unexpected:?}"),
                             }
-                        }
-                        let Some(NativeChatMemberGossipEvent::Frame(frame)) = incoming.next().await else {
-                            panic!("the survivor needs the actual signed packet");
                         };
-                        let (original, status) = recovered_row().receive_member_frame(&mut ledger, &frame, &fresh)
+                        loop {
+                            let Some(NativeChatMemberGossipEvent::Frame(frame)) = incoming.next().await else {
+                                panic!("the survivor needs the actual signed packet");
+                            };
+                            let (original, status) = recovered_row().receive_member_frame(&mut ledger, &frame, &fresh)
+                                .unwrap();
+                            if selected.contains(&original.action_id_data()) {
+                                continue;
+                            }
+                            assert_eq!(original.action_id_data(), action);
+                            assert_eq!(status, V2OrdinaryReceiveStatus::Retained(ActionState::Valid));
+                            assert!(recovered_row().archive_received_member(&ledger, &original, &fresh, &mut history_rng)
+                                .unwrap().is_some());
+                            break;
+                        }
+                        third_row().checkpoint_member_publication(receipt, &fresh, &mut third_rng)
                             .unwrap();
-                        assert_eq!(original.action_id_data(), action);
-                        assert_eq!(status, V2OrdinaryReceiveStatus::Retained(ActionState::Valid));
-                        assert!(recovered_row().archive_received_member(&ledger, &original, &fresh, &mut history_rng)
-                            .unwrap().is_some());
                     }).await.expect("the holder selects a post the founder did not receive");
-                    Some(action)
+                    selected.push(action);
+                    }
+                    Some(<[ActionId; 2]>::try_from(selected).unwrap())
                 } else {
                     None
                 };
@@ -2642,7 +2656,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                 let (_cancel, signal) = tokio::sync::watch::channel(true);
                 let closed = RequestCancellation::new(signal, None);
                 assert!(cold.governed_roster(&closed).is_err());
-                if let Some(action) = late {
+                if let Some([action, other_action]) = late {
                     use catcoms_sync::owner_v2::V2RemovedReviewQuery;
                     use crate::store::NativeTextFounderReviewResult;
                     cold.require_review_anchor_for_test((third_head, third_epoch), &fresh).unwrap();
@@ -2686,13 +2700,17 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     let NativeTextFounderReviewResult::Page(page) = turn(V2RemovedReviewQuery::Page(None)).await
                     else { panic!("the approved survivor must provide its review page"); };
                     let (actions, offer, next) = page.current_data().unwrap();
-                    assert_eq!(actions, &[action]);
+                    assert_eq!(actions.len(), 2);
+                    assert!(actions.contains(&action) && actions.contains(&other_action));
                     assert!(next.is_none());
                     let query = V2RemovedReviewQuery::Original { offer, action };
                     assert!(matches!(turn(query).await, NativeTextFounderReviewResult::Held(held) if held == action));
                     assert!(sweep.count_result_once(action).unwrap());
                     assert!(matches!(turn(query).await, NativeTextFounderReviewResult::Held(held) if held == action));
                     assert!(!sweep.count_result_once(action).unwrap());
+                    let other = V2RemovedReviewQuery::Original { offer, action: other_action };
+                    assert!(matches!(turn(other).await, NativeTextFounderReviewResult::Held(held) if held == other_action));
+                    assert!(sweep.count_result_once(other_action).unwrap());
                     drop(turn);
                     assert!(cold.archived_message_projection(channel, action, &fresh, &mut history_rng).unwrap().is_none());
                     drop((sweep, provider));
@@ -2705,13 +2723,13 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
                         founder_dir.path(), SECRET, &mut history_rng, current_policy(),
                     ).unwrap().prepare_recovered_founder().map_err(|(_, error)| error).unwrap();
-                    let audit = cold.selected_held_review_window(channel, None, 2, &fresh).unwrap();
+                    let audit = cold.selected_held_review_window(channel, None, 3, &fresh).unwrap();
                     assert!(audit.continuation().is_none());
-                    let case = audit.with_records(|records, unavailable| {
+                    let (case, other_case) = audit.with_records(|records, unavailable| {
                         assert_eq!(unavailable, 0);
-                        let [record] = records.unwrap() else {
-                            panic!("the audit sees the one exact covered hold after reopen");
-                        };
+                        let records = records.unwrap();
+                        assert_eq!(records.len(), 2);
+                        let record = records.iter().find(|record| record.signed.id() == action).unwrap();
                         assert_eq!(record.signed.id(), action);
                         assert_eq!(record.admission, third_own);
                         assert_eq!(record.removal, (removed_head, removed_epoch));
@@ -2720,12 +2738,14 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                             Body::Create { text, reply_to: None }
                                 if text == "Only the surviving member saw this post"
                         ));
-                        crate::store::persistence::v2_review_hold::HeldCase {
+                        let coordinates = |record: &crate::store::NativeTextHeldCase| crate::store::persistence::v2_review_hold::HeldCase {
                             id: record.case,
-                            action,
+                            action: record.signed.id(),
                             original: record.original,
                             removal: record.removal,
-                        }
+                        };
+                        let other = records.iter().find(|record| record.signed.id() == other_action).unwrap();
+                        (coordinates(record), coordinates(other))
                     }).unwrap();
                     drop(audit);
                     let directory = std::fs::read_dir(founder_dir.path().join("chat-v2-removed-holds"))
@@ -2761,16 +2781,17 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         (vault, sources, recovered_row)
                     };
                     let (vault, sources, recovered_row) = mount(cold);
-                    let review_request = |decision| NativeTextInitialReviewRequest::new(
+                    let exact_request = |intent, decision| NativeTextInitialReviewRequest::new(
                         channel,
                         (case.id, action, ExactReviewOriginal {
                             digest: case.original,
                             remove_header: case.removal.0,
                             remove_epoch: case.removal.1,
                         }),
-                        [0xb1; 16],
+                        intent,
                         decision,
                     );
+                    let review_request = |decision| exact_request([0xb1; 16], decision);
                     let prepare = || sources.capture_member(
                         &recovered_row, command(&vault, &founder_budget),
                         sources.policy.prepare_member().unwrap(),
@@ -2780,7 +2801,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     let raw_path = journal.join("key.raw");
                     for cut in [ReviewControlFault::BeforeAttempt, ReviewControlFault::BeforeIntentFileSync] {
                         let (stopped, cut_used) = with_review_control_fault(
-                            cut, || review(ReviewDecision::Approve),
+                            cut, || review(ReviewDecision::Reject),
                         );
                         assert!(stopped.is_err() && cut_used);
                         assert!(journal.join("intent.pending").is_file());
@@ -2788,18 +2809,18 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         assert!(!raw_path.exists());
                     }
                     let (stopped, cut_used) = with_review_control_fault(
-                        ReviewControlFault::BeforeFreshKey, || review(ReviewDecision::Approve),
+                        ReviewControlFault::BeforeFreshKey, || review(ReviewDecision::Reject),
                     );
                     assert!(stopped.is_err() && cut_used);
                     assert!(journal.join("key.attempt").is_file());
                     assert!(!raw_path.exists());
                     let (stopped, cut_used) = with_review_control_fault(
-                        ReviewControlFault::ShortRawWrite, || review(ReviewDecision::Approve),
+                        ReviewControlFault::ShortRawWrite, || review(ReviewDecision::Reject),
                     );
                     assert!(stopped.is_err() && cut_used);
                     let partial = std::fs::read(&raw_path).unwrap();
                     let (selected, entered_again) = with_review_control_fault(
-                        ReviewControlFault::BeforeFreshKey, || review(ReviewDecision::Approve),
+                        ReviewControlFault::BeforeFreshKey, || review(ReviewDecision::Reject),
                     );
                     assert!(!entered_again, "the retained exact Raw must not sign again");
                     let selected = selected.unwrap();
@@ -2809,11 +2830,11 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     let raw = std::fs::read(&raw_path).unwrap();
                     assert!(raw.starts_with(&partial) && partial.len() < raw.len());
                     let (stopped, cut_used) = with_review_control_fault(
-                        ReviewControlFault::BeforeRawFileSync, || review(ReviewDecision::Approve),
+                        ReviewControlFault::BeforeRawFileSync, || review(ReviewDecision::Reject),
                     );
                     assert!(stopped.is_err() && cut_used);
-                    assert_eq!(review(ReviewDecision::Approve).unwrap(), selected);
-                    assert!(review(ReviewDecision::Reject).is_err());
+                    assert_eq!(review(ReviewDecision::Reject).unwrap(), selected);
+                    assert!(review(ReviewDecision::Approve).is_err());
                     assert_eq!(std::fs::read(&raw_path).unwrap(), raw);
 
                     // Advance the same private MLS and selected governance
@@ -2881,7 +2902,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                             &recovered_row,
                             command(&vault, &founder_budget),
                             sources.policy.prepare_member().unwrap(),
-                        ).cover_initial_founder_review(review_request(ReviewDecision::Approve), &fresh),
+                        ).cover_initial_founder_review(review_request(ReviewDecision::Reject), &fresh),
                     );
                     assert!(!entered_again, "cold historical Raw cannot enter the signer");
                     assert_eq!(recovered.unwrap(), selected);
@@ -2890,7 +2911,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         &recovered_row,
                         command(&vault, &founder_budget),
                         sources.policy.prepare_member().unwrap(),
-                    ).select_initial_founder_review(review_request(ReviewDecision::Approve), &fresh);
+                    ).select_initial_founder_review(review_request(ReviewDecision::Reject), &fresh);
                     let head = journal.join("head.current");
                     let empty_head = std::fs::read(&head).unwrap();
                     let pending = journal.join("selection.pending");
@@ -2935,7 +2956,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         || sources.capture_member(
                             &recovered_row, command(&vault, &founder_budget),
                             sources.policy.prepare_member().unwrap(),
-                        ).select_initial_founder_review(review_request(ReviewDecision::Approve), &fresh),
+                        ).select_initial_founder_review(review_request(ReviewDecision::Reject), &fresh),
                     );
                     assert!(stopped.is_err() && cut_used);
                     assert!(!raw_path.exists());
@@ -2949,7 +2970,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         &recovered_row,
                         command(&vault, &founder_budget),
                         sources.policy.prepare_member().unwrap(),
-                    ).select_initial_founder_review(review_request(ReviewDecision::Approve), &fresh);
+                    ).select_initial_founder_review(review_request(ReviewDecision::Reject), &fresh);
                     for (cut, retired_file) in [
                         (ReviewControlFault::AfterRetiringAttempt, "key.attempt"),
                         (ReviewControlFault::AfterRetiringIntent, "intent.pending"),
@@ -2976,19 +2997,94 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         std::fs::write(path, original).unwrap();
                     }
                     assert_eq!(retry_selection().unwrap(), selected);
-                    let original_hold = std::fs::read_dir(&directory)
+                    let parked_holds = std::fs::read_dir(&directory)
                         .unwrap().map(|entry| entry.unwrap().path())
-                        .find(|path| path.extension().is_some_and(|ext| ext == "held")).unwrap();
-                    let parked_hold = original_hold.with_extension("parked");
-                    std::fs::rename(&original_hold, &parked_hold).unwrap();
+                        .filter(|path| path.extension().is_some_and(|ext| ext == "held"))
+                        .map(|path| {
+                            let parked = path.with_extension("parked");
+                            std::fs::rename(&path, &parked).unwrap();
+                            (path, parked)
+                        }).collect::<Vec<_>>();
+                    assert_eq!(parked_holds.len(), 2);
                     assert_eq!(retry_selection().unwrap(), selected,
                         "the covered outcome is independent of the old holding file");
                     assert!(sources.capture_member(
                         &recovered_row,
                         command(&vault, &founder_budget),
                         sources.policy.prepare_member().unwrap(),
-                    ).select_initial_founder_review(review_request(ReviewDecision::Reject), &fresh).is_err());
-                    std::fs::rename(&parked_hold, &original_hold).unwrap();
+                    ).select_initial_founder_review(review_request(ReviewDecision::Approve), &fresh).is_err());
+                    for (path, parked) in parked_holds {
+                        std::fs::rename(&parked, &path).unwrap();
+                    }
+                    let reopen_request = || exact_request([0xb4; 16], ReviewDecision::Reopen)
+                        .for_successor(selected.decision_id_data());
+                    let advance = |request| sources.capture_member(
+                        &recovered_row, command(&vault, &founder_budget),
+                        sources.policy.prepare_member().unwrap(),
+                    ).select_initial_founder_review(request, &fresh);
+                    assert!(advance(exact_request([0xb4; 16], ReviewDecision::Reopen)).is_err());
+                    let (stopped, used) = with_review_control_fault(
+                        ReviewControlFault::AfterSelectionWal, || advance(reopen_request()),
+                    );
+                    assert!(stopped.is_err() && used);
+                    assert_eq!(std::fs::read(&head).unwrap(), sealed_head);
+                    let (stopped, used) = with_review_control_fault(
+                        ReviewControlFault::AfterSelectionHeadRename, || advance(reopen_request()),
+                    );
+                    assert!(stopped.is_err() && used);
+                    assert!(pending.is_file());
+                    assert_ne!(std::fs::read(&head).unwrap(), sealed_head);
+                    retire(vault, sources, recovered_row).await;
+
+                    let settled = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+                        founder_dir.path(), SECRET, &mut history_rng, current_policy(),
+                    ).unwrap().prepare_recovered_founder().map_err(|(_, error)| error).unwrap();
+                    let (vault, sources, recovered_row) = mount(settled);
+                    let advance = |request| sources.capture_member(
+                        &recovered_row, command(&vault, &founder_budget),
+                        sources.policy.prepare_member().unwrap(),
+                    ).select_initial_founder_review(request, &fresh);
+                    let (stopped, used) = with_review_control_fault(
+                        ReviewControlFault::AfterRetiringIndexPage, || advance(reopen_request()),
+                    );
+                    assert!(stopped.is_err() && used);
+                    assert!(pending.is_file());
+                    let (reopened, entered) = with_review_control_fault(
+                        ReviewControlFault::BeforeFreshKey, || advance(reopen_request()),
+                    );
+                    assert!(!entered);
+                    let reopened = reopened.unwrap();
+                    assert_eq!(reopened.position_data().sequence, 2);
+                    assert_eq!(reopened.position_data().previous, Some(selected.id()));
+                    assert!(!pending.exists());
+                    let approved = advance(exact_request([0xb5; 16], ReviewDecision::Approve)
+                        .for_successor(reopened.decision_id_data())).unwrap();
+                    assert_eq!(approved.position_data().sequence, 3);
+                    assert_eq!(approved.position_data().previous, Some(reopened.id()));
+                    assert!(!pending.exists());
+                    assert_eq!(std::fs::read_dir(record.parent().unwrap()).unwrap()
+                        .filter(|entry| entry.as_ref().unwrap().path().extension().is_some_and(|ext| ext == "page"))
+                        .count(), 2);
+                    let (old, entered) = with_review_control_fault(
+                        ReviewControlFault::BeforeFreshKey, || advance(review_request(ReviewDecision::Reject)),
+                    );
+                    assert!(!entered);
+                    assert_eq!(old.unwrap(), selected);
+                    assert_eq!(std::fs::read(&record).unwrap(), sealed_record);
+                    let other = advance(NativeTextInitialReviewRequest::new(
+                        channel,
+                        (other_case.id, other_action, ExactReviewOriginal {
+                            digest: other_case.original,
+                            remove_header: other_case.removal.0,
+                            remove_epoch: other_case.removal.1,
+                        }),
+                        [0xb8; 16],
+                        ReviewDecision::Reject,
+                    )).unwrap();
+                    assert_eq!(other.position_data().sequence, 4);
+                    assert_eq!(other.position_data().previous, Some(approved.id()));
+                    assert!(advance(exact_request([0xb6; 16], ReviewDecision::Reject)
+                        .for_successor(approved.decision_id_data())).is_err());
                     retire(vault, sources, recovered_row).await;
                     // Lose every child of the original mounted journal,
                     // leaving its actual directory and catalog marker.
@@ -3007,7 +3103,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         || sources.capture_member(
                             &recovered_row, command(&vault, &founder_budget),
                             sources.policy.prepare_member().unwrap(),
-                        ).select_initial_founder_review(review_request(ReviewDecision::Reject), &fresh),
+                        ).select_initial_founder_review(exact_request([0xb7; 16], ReviewDecision::Reject), &fresh),
                     );
                     assert!(refusal.is_err() && !entered);
                     assert!(std::fs::read_dir(&journal).unwrap().next().is_none());

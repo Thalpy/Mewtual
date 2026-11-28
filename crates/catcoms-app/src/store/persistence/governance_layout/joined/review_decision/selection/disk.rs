@@ -11,6 +11,7 @@ use crate::store::persistence::v2_member_outbox::fs::{
 use catcoms_storage::kept::SessionId;
 use catcoms_storage::private_chat_page::PrivateChatPageId;
 
+pub(in super::super) mod indexed;
 mod selected;
 #[cfg(test)]
 mod tests;
@@ -20,7 +21,7 @@ pub(super) const RECORD_DIRECTORY: &str = "records";
 pub(super) const HEAD_CURRENT: &str = super::super::HEAD_NAME;
 pub(super) const HEAD_STAGE: &str = "head.stage";
 pub(in super::super) const SELECTION_WAL: &str = "selection.pending";
-pub(super) const SELECTION_SCRATCH: &str = "selection.scratch";
+pub(in super::super) const SELECTION_SCRATCH: &str = "selection.scratch";
 
 pub(in super::super) const NAMES: [&str; 5] = [
     RECORD_DIRECTORY,
@@ -91,6 +92,39 @@ impl HeldDecisionFile {
         self.require()
     }
 
+    pub(in super::super) fn try_clone(&mut self) -> Result<Self, AppError> {
+        self.require()?;
+        Ok(Self {
+            path: self.path.clone(),
+            file: (self.file.0.try_clone().map_err(io)?, self.file.1),
+            bytes: self.bytes.clone(),
+        })
+    }
+
+    pub(in super::super) fn same_original(&self, other: &Self) -> bool {
+        self.path == other.path && self.file.1 == other.file.1 && self.bytes == other.bytes
+    }
+
+    pub(in super::super) fn retire(mut self, directory: &HeldDirectory) -> Result<(), AppError> {
+        directory.require()?;
+        let name = self
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(denied)?;
+        if self.path != directory.child(name) {
+            return Err(denied());
+        }
+        self.require()?;
+        remove_listed(&self.path)?;
+        let path = self.path.clone();
+        // Close the original before inspecting a Windows delete-pending name.
+        drop(self);
+        absent(&path)?;
+        directory.sync()?;
+        absent(&path)
+    }
+
     fn cover(
         path: PathBuf,
         bytes: &[u8],
@@ -116,8 +150,25 @@ impl HeldDecisionFile {
     }
 }
 
-fn index_name(page: PrivateChatPageId) -> String {
+pub(in super::super) fn index_name(page: PrivateChatPageId) -> String {
     format!("{}.page", hex::encode(page.as_bytes()))
+}
+
+pub(in super::super) fn require_fresh_append_slots(
+    root: &HeldDirectory,
+    next_sequence: u64,
+) -> Result<(), AppError> {
+    absent(&root.child(SELECTION_SCRATCH))?;
+    require_unstarted_append(root, next_sequence)
+}
+
+fn require_unstarted_append(root: &HeldDirectory, next_sequence: u64) -> Result<(), AppError> {
+    absent(&root.child(SELECTION_WAL))?;
+    absent(&root.child(HEAD_STAGE))?;
+    let records = HeldDirectory::open(root.child(RECORD_DIRECTORY))?;
+    absent(&records.child(&format!("{next_sequence:016x}.record")))?;
+    records.require()?;
+    root.require()
 }
 
 /// Keep the incomplete first write in a private scratch name. Only a
@@ -127,13 +178,45 @@ fn index_name(page: PrivateChatPageId) -> String {
 pub(in super::super) fn cover_selection_wal(
     root: &HeldDirectory,
     initial: Option<&[u8]>,
+    verify: impl FnMut(Option<&[u8]>) -> Result<(), AppError>,
+    prepare: impl FnOnce() -> Result<Zeroizing<Vec<u8>>, AppError>,
+) -> Result<HeldDecisionFile, AppError> {
+    cover_wal(
+        root,
+        (MAX_SELECTION_BYTES, DecisionSelection::incomplete_scratch),
+        || require_unstarted_outputs(root, initial),
+        verify,
+        prepare,
+    )
+}
+
+pub(in super::super) fn cover_indexed_append(
+    root: &HeldDirectory,
+    next: u64,
+    verify: impl FnMut(Option<&[u8]>) -> Result<(), AppError>,
+    prepare: impl FnOnce() -> Result<Zeroizing<Vec<u8>>, AppError>,
+) -> Result<HeldDecisionFile, AppError> {
+    use super::append::{IndexedAppend, MAX_APPEND_BYTES};
+    cover_wal(
+        root,
+        (MAX_APPEND_BYTES, IndexedAppend::incomplete_scratch),
+        || require_unstarted_append(root, next),
+        verify,
+        prepare,
+    )
+}
+
+fn cover_wal(
+    root: &HeldDirectory,
+    (maximum, incomplete): (usize, fn(&[u8]) -> bool),
+    mut require_unstarted: impl FnMut() -> Result<(), AppError>,
     mut verify: impl FnMut(Option<&[u8]>) -> Result<(), AppError>,
     prepare: impl FnOnce() -> Result<Zeroizing<Vec<u8>>, AppError>,
 ) -> Result<HeldDecisionFile, AppError> {
     root.require()?;
     let pending_path = root.child(SELECTION_WAL);
     let scratch_path = root.child(SELECTION_SCRATCH);
-    if let Some(mut pending) = HeldDecisionFile::read(pending_path.clone(), MAX_SELECTION_BYTES)? {
+    if let Some(mut pending) = HeldDecisionFile::read(pending_path.clone(), maximum)? {
         absent(&scratch_path)?;
         verify(Some(&pending.bytes))?;
         pending.sync_complete()?;
@@ -144,15 +227,15 @@ pub(in super::super) fn cover_selection_wal(
     }
 
     let mut scratch = if observe(&scratch_path)? == Presence::Present {
-        let (file, identity, bytes) = read_bounded_held(&scratch_path, MAX_SELECTION_BYTES, true)?;
+        let (file, identity, bytes) = read_bounded_held(&scratch_path, maximum, true)?;
         let mut original = HeldDecisionFile {
             path: scratch_path.clone(),
             file: (file, identity),
             bytes,
         };
-        if DecisionSelection::incomplete_scratch(&original.bytes) {
+        if incomplete(&original.bytes) {
             verify(None)?;
-            require_unstarted_outputs(root, initial)?;
+            require_unstarted()?;
             absent(&pending_path)?;
             original.require()?;
             remove_listed(&scratch_path)?;
@@ -163,7 +246,7 @@ pub(in super::super) fn cover_selection_wal(
             None
         } else {
             verify(Some(&original.bytes))?;
-            require_unstarted_outputs(root, initial)?;
+            require_unstarted()?;
             original.sync_complete()?;
             Some(original)
         }
@@ -173,11 +256,11 @@ pub(in super::super) fn cover_selection_wal(
 
     if scratch.is_none() {
         verify(None)?;
-        require_unstarted_outputs(root, initial)?;
+        require_unstarted()?;
         absent(&pending_path)?;
         let bytes = prepare()?;
         verify(Some(&bytes))?;
-        require_unstarted_outputs(root, initial)?;
+        require_unstarted()?;
         let mut file = open_exact_write(&scratch_path, WriteMode::Create)?;
         #[cfg(test)]
         if take_fault(ReviewControlFault::ShortSelectionScratch) {
@@ -194,7 +277,7 @@ pub(in super::super) fn cover_selection_wal(
     let mut scratch = scratch.ok_or_else(denied)?;
     root.sync()?;
     verify(Some(&scratch.bytes))?;
-    require_unstarted_outputs(root, initial)?;
+    require_unstarted()?;
     absent(&pending_path)?;
     scratch.require()?;
     install_catalog_stage(&scratch_path, &pending_path).map_err(io)?;
