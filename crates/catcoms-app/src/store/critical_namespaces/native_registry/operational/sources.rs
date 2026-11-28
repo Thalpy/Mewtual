@@ -304,6 +304,9 @@ pub enum NativeTextCreationRefusal {
     Storage,
     DeviceOutcomeUnknown,
     NetworkOutcomeUnknown,
+    /// The original founder's optional review declaration may have moved
+    /// Current. Only cold authenticated recovery may finish it now.
+    ReviewCatalogReopen,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeTextCreationProgress {
@@ -347,20 +350,12 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationJob<T, R> {
     pub fn prepare_device(
         mut self,
     ) -> Result<NativeTextCreationProgress, NativeTextCreationRefusal> {
-        self.keys
-            .require_device()
-            .map_err(|_| NativeTextCreationRefusal::Unavailable)?;
-        if !self.command.scope.is_open() || !self.command.ui.is_current_cached() {
-            return Err(NativeTextCreationRefusal::Unavailable);
-        }
+        self.require_current()?;
         let body = self
             .loan
             .body
             .as_mut()
             .ok_or(NativeTextCreationRefusal::Unavailable)?;
-        if !body.work.is_live_cached() {
-            return Err(NativeTextCreationRefusal::Unavailable);
-        }
         // The concrete whole driver owns the SAME device after the input
         // handoff. Its presence cannot authorize another generation, nor may
         // an exact retry mistake that owned handoff for a lost Device result.
@@ -381,15 +376,7 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextCreationJob<T, R> {
             #[cfg(test)]
             tests::after_device_cache();
         }
-        if !self.command.scope.is_open()
-            || !self.command.ui.is_current_cached()
-            || !body.work.is_live_cached()
-        {
-            return Err(NativeTextCreationRefusal::Unavailable);
-        }
-        self.keys
-            .require_device()
-            .map_err(|_| NativeTextCreationRefusal::Unavailable)?;
+        self.require_current()?;
         self.loan.recorded = true;
         Ok(NativeTextCreationProgress::DevicePrepared)
     }

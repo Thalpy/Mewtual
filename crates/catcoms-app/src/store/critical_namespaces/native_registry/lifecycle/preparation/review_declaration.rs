@@ -103,6 +103,29 @@ pub(in crate::store) struct VerifiedFounderReviewParent {
 }
 
 impl VerifiedFounderReviewParent {
+    pub(in crate::store) fn require_warm_founder(
+        &self,
+        store: &ServerStore,
+        warm: &crate::store::persistence::governance_layout::joined::review_hold::WarmFounderReviewOrigin<'_>,
+    ) -> Result<(), AppError> {
+        let binding = &self.founder.binding;
+        if self.founder.status != warm.status
+            || (self.founder.invocation, self.founder.request) != warm.request
+            || binding.vault != warm.binding.vault
+            || binding.layout != warm.binding.layout
+            || binding.group != warm.binding.group
+            || binding.signer != warm.binding.signer
+            || binding.source != warm.binding.source
+            || binding.profile != warm.binding.profile
+            || binding.pin != warm.binding.pin
+        {
+            return Err(refused());
+        }
+        self.founder
+            .network
+            .require_same_original(store, warm.network)
+    }
+
     /// This proves unchanged founder leaves only. The declaration separately
     /// authenticates the exact Current/Stage/claim relationship before any IO.
     pub(in crate::store) fn capture(
@@ -149,7 +172,7 @@ impl VerifiedFounderReviewParent {
                 .archive
                 .pending
                 .pool
-                .try_reserve(ROOT_METADATA_FEE)?,
+                .try_reserve_classified(ROOT_METADATA_FEE, || AppError::ChatV2ArchiveBusy)?,
         )?;
         let source = store.read_saved_bootstrap_source_under_root(
             &root,

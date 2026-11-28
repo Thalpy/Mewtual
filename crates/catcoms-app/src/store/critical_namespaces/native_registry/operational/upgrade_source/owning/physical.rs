@@ -6,6 +6,9 @@ use crate::store::critical_namespaces::native_registry::lifecycle::{
     cell, founder, network, refresh, rename,
 };
 use crate::store::critical_namespaces::review_hold_namespace::declaration::ReviewDeclarationKind;
+use crate::store::persistence::governance_layout::joined::review_hold::{
+    WarmFounderReviewCurrent, WarmFounderReviewOrigin,
+};
 use std::sync::Mutex;
 pub(in crate::store::critical_namespaces::native_registry) use work::WorkDrain;
 use work::{Slot, SlotAck};
@@ -1246,6 +1249,83 @@ impl Physical {
 }
 
 impl SourceWork {
+    pub(in crate::store::critical_namespaces::native_registry) fn require_warm_founder_review_current(
+        &self,
+        current: &WarmFounderReviewCurrent,
+        complete: bool,
+    ) -> Result<(), AppError> {
+        let store = self.physical.current()?.checked_store()?;
+        if complete {
+            current.require_complete(store)
+        } else {
+            current.require(store)
+        }
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn require_warm_founder_review_selection(
+        &self,
+        current: Option<&WarmFounderReviewCurrent>,
+    ) -> Result<(), AppError> {
+        if let Some(current) = current {
+            return self.require_warm_founder_review_current(current, true);
+        }
+        self.physical.handler.require()?;
+        let store = self.physical.current()?.checked_store()?;
+        if self.physical.handler.uses_joined_pin_layout()
+            && store
+                .founder_review_catalog_step(ReviewDeclarationKind::Hold)?
+                .is_some()
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn cover_warm_founder_review(
+        &self,
+        kind: ReviewDeclarationKind,
+        origin: &WarmFounderReviewOrigin<'_>,
+        admitted: &mut bool,
+        latest: &mut Option<WarmFounderReviewCurrent>,
+        require_current: impl FnOnce() -> Result<(), AppError>,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<(), AppError> {
+        // Old non-joined profiles cannot declare these namespaces.
+        if !self.physical.handler.uses_joined_pin_layout() {
+            self.physical.handler.require()?;
+            return require_current();
+        }
+        let metadata = self.metadata().ok_or_else(|| {
+            if self.is_live_cached() {
+                AppError::ChatV2RegistryBusy
+            } else {
+                refused()
+            }
+        })?;
+        let cell = metadata
+            .physical
+            .cell
+            .try_lock()
+            .map_err(|error| match error {
+                std::sync::TryLockError::WouldBlock => AppError::ChatV2RegistryBusy,
+                std::sync::TryLockError::Poisoned(_) => refused(),
+            })?;
+        cell.require_idle()?;
+        metadata.require_joined_store()?;
+        let store = metadata.physical.current()?.checked_store()?;
+        store.cover_warm_founder_review(
+            kind,
+            origin,
+            admitted,
+            latest,
+            || {
+                metadata.require_joined_store()?;
+                require_current()
+            },
+            rng,
+        )
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn recovered_founder_resources(
         &self,
         bytes: usize,

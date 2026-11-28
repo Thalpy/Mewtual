@@ -117,20 +117,45 @@ pub(in crate::store) struct SelectedReviewDecision {
 }
 
 impl SelectedReviewDecision {
+    fn mount_bytes(store: &ServerStore) -> Result<usize, AppError> {
+        let directory = fixed(store, false, DIRECTORY_NAME)?;
+        directory
+            .as_os_str()
+            .len()
+            .checked_add(16 * 1024)
+            .and_then(|bytes| bytes.checked_add(observation::REVISION_BYTES))
+            .ok_or_else(denied)
+    }
+
+    pub(super) fn reserve_mount(store: &ServerStore) -> Result<CatalogReadReservation, AppError> {
+        let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        policy
+            .current
+            .archive
+            .pending
+            .pool
+            .try_reserve_classified(Self::mount_bytes(store)?, || AppError::ChatV2ArchiveBusy)
+    }
+
     pub(super) fn capture(
         store: &ServerStore,
         key: &[u8; 32],
         descriptor: &[u8],
     ) -> Result<Self, AppError> {
+        Self::capture_prepaid(store, key, descriptor, Self::reserve_mount(store)?)
+    }
+
+    pub(super) fn capture_prepaid(
+        store: &ServerStore,
+        key: &[u8; 32],
+        descriptor: &[u8],
+        fee: CatalogReadReservation,
+    ) -> Result<Self, AppError> {
         let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
-        let directory = fixed(store, false, DIRECTORY_NAME)?;
-        let bytes = directory
-            .as_os_str()
-            .len()
-            .checked_add(16 * 1024)
-            .and_then(|bytes| bytes.checked_add(observation::REVISION_BYTES))
-            .ok_or_else(denied)?;
-        let fee = policy.current.archive.pending.pool.try_reserve(bytes)?;
+        fee.validate(
+            &policy.current.archive.pending.pool,
+            Self::mount_bytes(store)?,
+        )?;
         let expected =
             critical_namespaces::review_decision_namespace::marker_data(key, descriptor)?;
         let marker =
@@ -140,7 +165,7 @@ impl SelectedReviewDecision {
         }
         let value = Self {
             marker,
-            directory: HeldDirectory::open(directory)?,
+            directory: HeldDirectory::open(fixed(store, false, DIRECTORY_NAME)?)?,
             mount: store.capture_physical_mount_negative(),
             warm: None,
             publication: observation::ReviewDecisionRevision::new(),

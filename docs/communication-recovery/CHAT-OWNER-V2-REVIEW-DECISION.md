@@ -106,8 +106,12 @@ founder's ID10 catalog. It preserves the occupied descriptors and uses a new
 keyed marker and a domain-specific declaration seed. Cold startup proves
 the covered claim, exact original hold and authenticated empty head.
 Recovered founder startup provisions the hold and decision namespaces in
-order and reopens each selected catalog. Newly created founders still need
-first-session provisioning. An older ID10-only build refuses once ID11 is
+order and reopens each selected catalog. Fresh native Found selects both
+under the original warm runtime, retaining the exact Current file and
+both original mounts through row selection. It reserves the entire
+preparation before writing each declaration. Closing during an admitted
+write still allows its exact storage transaction to finish. Fresh founder
+moderation and serving still need the same-session authority path. An older ID10-only build refuses once ID11 is
 selected. The original
 recovered founder can cover the first signature under the App's exact
 Intent, Attempt and Raw files. It rechecks the original hold, current

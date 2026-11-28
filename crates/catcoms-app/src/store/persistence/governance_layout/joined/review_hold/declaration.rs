@@ -8,6 +8,64 @@ use crate::store::critical_namespaces::{
 };
 use crate::store::persistence::v2_member_outbox::fs::{observe, WriteMode};
 
+#[cfg(test)]
+pub(super) mod warm_fault;
+
+/// Exact live owner data already checked by the creation loan. The
+/// declaration independently matches the actual selected native row and
+/// both the saved bootstrap source and this continuously held network.
+pub(in crate::store) struct WarmFounderReviewOrigin<'a> {
+    pub(in crate::store) status: crate::store::NativeCreationStatusData,
+    pub(in crate::store) request: ([u8; 32], [u8; 32]),
+    pub(in crate::store) binding: &'a crate::store::FreshV2TextFounderBinding,
+    pub(in crate::store) network:
+        &'a crate::store::persistence::native_registry::network::NetworkDependency,
+}
+
+/// Exact catalog selected by this still-unpublished founder's declaration.
+/// Neither matching encrypted bytes on another inode nor an older valid
+/// descriptor can replace the renamed Stage's original physical owner.
+pub(in crate::store) struct WarmFounderReviewCurrent {
+    kind: ReviewDeclarationKind,
+    file: CreatedStage,
+    frame: Zeroizing<Vec<u8>>,
+    digest: [u8; 32],
+    mount: PhysicalMountNegative,
+    _fee: CatalogReadReservation,
+}
+
+impl WarmFounderReviewCurrent {
+    fn compare_current(&self, store: &ServerStore) -> Result<(), AppError> {
+        exact_retained(
+            &fixed(store, false, critical_namespaces::Slot::Current.name())?,
+            &self.file,
+            &self.frame,
+        )
+    }
+
+    pub(in crate::store) fn require(&self, store: &ServerStore) -> Result<(), AppError> {
+        store.require_original_physical_mount(&self.mount)?;
+        self.compare_current(store)?;
+        // The latest ID11 selection conserves ID10. Hold both selected
+        // mounts through retry and row admission, using only the latest file.
+        store.require_warm_review_mount(ReviewDeclarationKind::Hold)?;
+        if self.kind == ReviewDeclarationKind::Decision {
+            store.require_warm_review_mount(ReviewDeclarationKind::Decision)?;
+        }
+        if store.founder_review_catalog_step(self.kind)? != Some((self.digest, true)) {
+            return Err(denied());
+        }
+        self.compare_current(store)
+    }
+
+    pub(in crate::store) fn require_complete(&self, store: &ServerStore) -> Result<(), AppError> {
+        if self.kind != ReviewDeclarationKind::Decision {
+            return Err(denied());
+        }
+        self.require(store)
+    }
+}
+
 struct DeclarationParent {
     founder: VerifiedFounderReviewParent,
     pins: OpenedArchiveObject,
@@ -206,6 +264,91 @@ pub(in crate::store) struct ReviewHoldDeclaration {
 }
 
 impl ServerStore {
+    pub(in crate::store) fn cover_warm_founder_review(
+        &self,
+        kind: ReviewDeclarationKind,
+        origin: &WarmFounderReviewOrigin<'_>,
+        admitted: &mut bool,
+        latest: &mut Option<WarmFounderReviewCurrent>,
+        require_current: impl FnOnce() -> Result<(), AppError>,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<(), AppError> {
+        if *admitted || self.has_rejoin_evidence()? {
+            return Err(denied());
+        }
+        review_receive::require_absent(self)?;
+        if let Some(current) = latest.as_ref() {
+            current.require(self)?;
+        }
+        let Some((expected, selected)) = self.founder_review_catalog_step(kind)? else {
+            return Ok(());
+        };
+        if selected {
+            return latest
+                .as_ref()
+                .filter(|current| current.digest == expected)
+                .map(|_| ())
+                .ok_or_else(denied);
+        }
+        if kind == ReviewDeclarationKind::Decision && latest.is_none() {
+            return Err(denied());
+        }
+        let declaration = self.prepare_founder_review_declaration(kind, rng)?;
+        if *blake3::hash(&declaration.original.1).as_bytes() != expected {
+            return Err(denied());
+        }
+        if let Some(current) = latest.as_ref() {
+            // Matching catalog bytes alone cannot authorize adoption of a
+            // replaced ID10 frame between the two declaration captures.
+            if current.file.identity != Some(session_id(&declaration.original.0).map_err(io)?)
+                || current.frame.as_slice() != declaration.original.1.as_slice()
+            {
+                return Err(denied());
+            }
+        }
+        declaration
+            .parent
+            .founder
+            .require_warm_founder(self, origin)?;
+        let next = declaration.select_and_mount_warm(self, |store| {
+            if store.founder_review_catalog_step(kind)? != Some((expected, false)) {
+                return Err(denied());
+            }
+            require_current()?;
+            *admitted = true;
+            Ok(())
+        })?;
+        *latest = Some(next);
+        *admitted = false;
+        Ok(())
+    }
+
+    fn require_warm_review_mount(&self, kind: ReviewDeclarationKind) -> Result<(), AppError> {
+        absent(&fixed(self, false, governance::GOVERNANCE_SEED)?)?;
+        absent(&fixed(
+            self,
+            false,
+            critical_namespaces::Slot::Stage.name(),
+        )?)?;
+        require_no_scratch(self)?;
+        match kind {
+            ReviewDeclarationKind::Hold => self
+                .review_hold_mount
+                .try_lock()
+                .map_err(|_| denied())?
+                .as_ref()
+                .ok_or_else(denied)?
+                .require(self),
+            ReviewDeclarationKind::Decision => self
+                .review_decision_mount
+                .try_lock()
+                .map_err(|_| denied())?
+                .as_ref()
+                .ok_or_else(denied)?
+                .require(self),
+        }
+    }
+
     /// The native caller retains the unpublished founder vault for the
     /// whole declaration. Prepare pays and rechecks all source files
     /// before making a candidate or creating the predecessor-visible claim.
@@ -222,7 +365,9 @@ impl ServerStore {
             .archive
             .pending
             .pool
-            .try_reserve(governance::codec::DECLARATION_FEE)?;
+            .try_reserve_classified(governance::codec::DECLARATION_FEE, || {
+                AppError::ChatV2ArchiveBusy
+            })?;
         let inventory = self.read_governance_inventory(&fee)?;
         if inventory.seed.is_some() || inventory.stage.is_some() {
             return Err(denied());
@@ -273,7 +418,7 @@ impl ReviewHoldDeclaration {
     pub(in crate::store) fn stage_for_test(&mut self, store: &ServerStore) -> Result<(), AppError> {
         let claim = fixed(store, false, governance::GOVERNANCE_SEED)?;
         let stage = fixed(store, false, critical_namespaces::Slot::Stage.name())?;
-        self.prepare_outputs(store, &claim, &stage)
+        self.prepare_outputs(store, &claim, &stage, |_| Ok(()))
     }
 
     fn require_parent(&self, store: &ServerStore) -> Result<(), AppError> {
@@ -358,8 +503,10 @@ impl ReviewHoldDeclaration {
         store: &ServerStore,
         claim: &Path,
         stage: &Path,
+        admit_first_write: impl FnOnce(&ServerStore) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
         self.require_parent(store)?;
+        admit_first_write(store)?;
         self.cover_claim(store, claim)?;
         self.require_parent(store)?;
         if self.directory.is_none() {
@@ -405,6 +552,8 @@ impl ReviewHoldDeclaration {
         self.require_parent(store)?;
         self.require_claim(claim)?;
         stage_output(store, stage, &mut self.stage, &self.prepared.candidate)?;
+        #[cfg(test)]
+        warm_fault::cut(self.kind, warm_fault::WarmReviewCut::Stage)?;
         self.require_outputs(store, stage)
     }
 
@@ -412,6 +561,14 @@ impl ReviewHoldDeclaration {
     /// covered again before rename. A retry after rename proves the same
     /// inode as Current, then finishes only the covering and claim retirement.
     pub(in crate::store) fn select(&mut self, store: &ServerStore) -> Result<(), AppError> {
+        self.select_with_admission(store, |_| Ok(()))
+    }
+
+    fn select_with_admission(
+        &mut self,
+        store: &ServerStore,
+        admit_first_write: impl FnOnce(&ServerStore) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
         let claim = fixed(store, false, governance::GOVERNANCE_SEED)?;
         let stage = fixed(store, false, critical_namespaces::Slot::Stage.name())?;
         let current = fixed(store, false, critical_namespaces::Slot::Current.name())?;
@@ -421,11 +578,13 @@ impl ReviewHoldDeclaration {
             .and_then(|stage| stage.identity)
             .is_some_and(|id| matches!(session_at(&current, id), SessionAt::Ours));
         if !selected {
-            self.prepare_outputs(store, &claim, &stage)?;
+            self.prepare_outputs(store, &claim, &stage, admit_first_write)?;
             self.require_parent(store)?;
             self.require_claim(&claim)?;
             self.require_outputs(store, &stage)?;
             install_catalog_stage(&stage, &current).map_err(io)?;
+            #[cfg(test)]
+            warm_fault::cut(self.kind, warm_fault::WarmReviewCut::Selected)?;
         }
         absent(&stage)?;
         require_no_scratch(store)?;
@@ -452,6 +611,149 @@ impl ReviewHoldDeclaration {
         self.require_outputs(store, &current)?;
         self.parent.require_preserved(store)
     }
+
+    fn select_and_mount_warm(
+        mut self,
+        store: &ServerStore,
+        admit_first_write: impl FnOnce(&ServerStore) -> Result<(), AppError>,
+    ) -> Result<WarmFounderReviewCurrent, AppError> {
+        let key = Zeroizing::new(store.keys.db_key()?);
+        let next = store.prepare_warm_review_catalog_summary(&key, &self.prepared.candidate)?;
+        let digest = next.framed;
+        let descriptor: [u8; 32] = {
+            let plain = Zeroizing::new(unseal(&key, &unframe(&self.prepared.candidate)?)?);
+            let parsed = store.parse_joined_catalog_descriptors(&plain)?;
+            match self.kind {
+                ReviewDeclarationKind::Hold => parsed.review_hold,
+                ReviewDeclarationKind::Decision => parsed.review_decision,
+            }
+            .ok_or_else(denied)?
+            .try_into()
+            .map_err(|_| denied())?
+        };
+        #[cfg(test)]
+        warm_fault::cut(self.kind, warm_fault::WarmReviewCut::Preflight)?;
+        let fee = match self.kind {
+            ReviewDeclarationKind::Hold => SelectedReviewHold::reserve_mount(store),
+            ReviewDeclarationKind::Decision => {
+                review_decision::SelectedReviewDecision::reserve_mount(store)
+            }
+        }?;
+        let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        // Pay for the selected frame's retained capacity and the matching
+        // reads before entering. Do not retain the large declaration invoice.
+        let keep_bytes = self
+            .prepared
+            .candidate
+            .capacity()
+            .checked_add(32 * 1024)
+            .ok_or_else(denied)?;
+        let keep = policy
+            .current
+            .archive
+            .pending
+            .pool
+            .try_reserve_classified(keep_bytes, || AppError::ChatV2ArchiveBusy)?;
+        let mount_negative = store.capture_physical_mount_negative();
+        // The retained declaration already pays for the bounded catalog
+        // copies. Reserve the exact future role before the first write.
+        self.select_with_admission(store, admit_first_write)?;
+        let current = fixed(store, false, critical_namespaces::Slot::Current.name())?;
+        let marker_id = self
+            .marker
+            .as_ref()
+            .and_then(|marker| marker.identity)
+            .ok_or_else(denied)?;
+        let directory = self.directory.as_ref().ok_or_else(denied)?;
+        let expected = *blake3::hash(&self.original.1).as_bytes();
+        let file;
+        match self.kind {
+            ReviewDeclarationKind::Hold => {
+                let mount = SelectedReviewHold::capture_prepaid(store, &key, &descriptor, fee)?;
+                self.require_adoption(
+                    store,
+                    &current,
+                    (marker_id, directory),
+                    (&mount.marker, &mount.directory),
+                )?;
+                let mut catalog = store.pending_join_catalog.lock().map_err(|_| denied())?;
+                let catalog = require_original_mounted_catalog(&mut catalog, expected)?;
+                let mut held = store.review_hold_mount.lock().map_err(|_| denied())?;
+                if held.is_some() {
+                    return Err(denied());
+                }
+                self.require_outputs(store, &current)?;
+                store.require_original_physical_mount(&mount_negative)?;
+                file = self.stage.take().ok_or_else(denied)?;
+                catalog.current = next;
+                *held = Some(mount);
+            }
+            ReviewDeclarationKind::Decision => {
+                let mount = review_decision::SelectedReviewDecision::capture_prepaid(
+                    store,
+                    &key,
+                    &descriptor,
+                    fee,
+                )?;
+                self.require_adoption(
+                    store,
+                    &current,
+                    (marker_id, directory),
+                    (&mount.marker, &mount.directory),
+                )?;
+                let mut catalog = store.pending_join_catalog.lock().map_err(|_| denied())?;
+                let catalog = require_original_mounted_catalog(&mut catalog, expected)?;
+                let mut decision = store.review_decision_mount.lock().map_err(|_| denied())?;
+                if decision.is_some() {
+                    return Err(denied());
+                }
+                self.require_outputs(store, &current)?;
+                store.require_original_physical_mount(&mount_negative)?;
+                file = self.stage.take().ok_or_else(denied)?;
+                catalog.current = next;
+                *decision = Some(mount);
+            }
+        }
+        Ok(WarmFounderReviewCurrent {
+            kind: self.kind,
+            file,
+            frame: self.prepared.candidate,
+            digest,
+            mount: mount_negative,
+            _fee: keep,
+        })
+    }
+
+    fn require_adoption(
+        &self,
+        store: &ServerStore,
+        current: &Path,
+        (marker, directory): (SessionId, &HeldDirectory),
+        (actual_marker, actual_directory): (&OpenedArchiveObject, &HeldDirectory),
+    ) -> Result<(), AppError> {
+        if session_id(&actual_marker.0).map_err(io)? != marker
+            || actual_marker.1.as_slice() != self.prepared.marker
+            || !actual_directory.same_original(directory)
+        {
+            return Err(denied());
+        }
+        self.require_outputs(store, current)?;
+        self.parent.require_preserved(store)
+    }
+}
+
+fn require_original_mounted_catalog(
+    catalog: &mut Option<critical_namespaces::pending_join::Mounted>,
+    expected: [u8; 32],
+) -> Result<&mut critical_namespaces::pending_join::Mounted, AppError> {
+    let catalog = catalog.as_mut().ok_or_else(denied)?;
+    if catalog.current.framed != expected
+        || catalog.pending.is_some()
+        || catalog.networks.iter().any(Option::is_some)
+    {
+        return Err(denied());
+    }
+    Ok(catalog)
 }
 
 pub(in crate::store::persistence::governance_layout::joined) fn require_no_scratch(

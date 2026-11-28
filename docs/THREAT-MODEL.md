@@ -4405,7 +4405,11 @@ Pending, pin, Welcome, Outcome and native registry. Storage admitted
 before a lock can finish without making the old native reply current.
 The private warm native handler recognizes the exact review successors
 of its original shared-history layout. This parsing capability gives no
-rejoin or cold declaration recovery authority.
+rejoin or cold declaration recovery authority. Fresh Found retains the
+original current file after each declaration. The protected row selector
+requires both review mounts and the exact selected file before and after
+reading the native row. A close between declarations prevents the stale
+request from starting the next one.
 
 A main-window decision command takes exact held-case coordinates and an
 intent. It uses the recovered founder's own key and signed Case index.

@@ -4646,7 +4646,8 @@ async fn native_text_unconfirmed_delete_invalidates_the_visible_founder_message(
 
 async fn native_text_connected_join(block_delete_archive: bool) {
     let root = tempfile::tempdir().unwrap();
-    let (founder, founder_window, founder_queue) = app(root.path().join("founder"), None, true);
+    let founder_path = root.path().join("founder");
+    let (founder, founder_window, founder_queue) = app(founder_path.clone(), None, true);
     let joiner_path = root.path().join("joiner");
     let (joiner, joiner_window, joiner_queue) = app(joiner_path.clone(), None, true);
     unlock_current(&founder, &founder_window, &founder_queue).await;
@@ -4654,6 +4655,11 @@ async fn native_text_connected_join(block_delete_archive: bool) {
     let found = found_request(&founder_window, 1, "Founder group");
     run(&founder_queue).await;
     let found = found_value(found.await.unwrap());
+    assert!(
+        founder_path.join("chat-v2-removed-holds").is_dir()
+            && founder_path.join("chat-v2-review-decisions").is_dir(),
+        "first native Found publishes only after its exact original review mounts"
+    );
     let listing = resume_request(&founder_window);
     run(&founder_queue).await;
     let listing = found_value(listing.await.unwrap());

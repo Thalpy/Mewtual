@@ -58,7 +58,12 @@ impl SelectedSharedHistory {
         key: &[u8; 32],
     ) -> Result<Self, AppError> {
         let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
-        let fee = policy.current.archive.pending.pool.try_reserve(16 * 1024)?;
+        let fee = policy
+            .current
+            .archive
+            .pending
+            .pool
+            .try_reserve_classified(16 * 1024, || AppError::ChatV2ArchiveBusy)?;
         let path = fixed(store, false, MARKER_NAME)?;
         let directory = HeldDirectory::open(fixed(store, false, DIRECTORY_NAME)?)?;
         let marker = read(&path, history::MARKER_BYTES)?.ok_or_else(denied)?;

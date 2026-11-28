@@ -20,7 +20,10 @@ use crate::store::persistence::v2_shared_history::{disk::DISK_FEE, SharedHistory
 use catcoms_replication::chat::{
     SignedAction, V2GeneralPrefixVerifier, V2RemovedCreateEvidence, V2RemovedCreateRecord,
 };
+#[cfg(test)]
+pub(in crate::store) use declaration::warm_fault::{with_warm_review_hook, WarmReviewCut};
 pub(super) use declaration::{recover, require_no_scratch};
+pub(in crate::store) use declaration::{WarmFounderReviewCurrent, WarmFounderReviewOrigin};
 use std::{collections::BTreeMap, sync::Mutex};
 
 const MAX_SCOPES: usize = 8;
@@ -40,22 +43,47 @@ pub(in crate::store) struct SelectedReviewHold {
 }
 
 impl SelectedReviewHold {
-    pub(super) fn capture(
-        store: &ServerStore,
-        key: &[u8; 32],
-        descriptor: &[u8],
-    ) -> Result<Self, AppError> {
-        let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+    fn mount_bytes(store: &ServerStore) -> Result<usize, AppError> {
         // Keep the hold root, up to eight scoped names, the optional
         // witness directory and this operation's path copies paid.
-        let paths = fixed(store, false, DIRECTORY_NAME)?
+        fixed(store, false, DIRECTORY_NAME)?
             .as_os_str()
             .len()
             .checked_add(80)
             .and_then(|bytes| bytes.checked_mul(2 * (MAX_SCOPES + 4)))
             .and_then(|bytes| bytes.checked_add(16 * 1024))
-            .ok_or_else(denied)?;
-        let fee = policy.current.archive.pending.pool.try_reserve(paths)?;
+            .ok_or_else(denied)
+    }
+
+    fn reserve_mount(store: &ServerStore) -> Result<CatalogReadReservation, AppError> {
+        let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        policy
+            .current
+            .archive
+            .pending
+            .pool
+            .try_reserve_classified(Self::mount_bytes(store)?, || AppError::ChatV2ArchiveBusy)
+    }
+
+    pub(super) fn capture(
+        store: &ServerStore,
+        key: &[u8; 32],
+        descriptor: &[u8],
+    ) -> Result<Self, AppError> {
+        Self::capture_prepaid(store, key, descriptor, Self::reserve_mount(store)?)
+    }
+
+    fn capture_prepaid(
+        store: &ServerStore,
+        key: &[u8; 32],
+        descriptor: &[u8],
+        fee: CatalogReadReservation,
+    ) -> Result<Self, AppError> {
+        let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
+        fee.validate(
+            &policy.current.archive.pending.pool,
+            Self::mount_bytes(store)?,
+        )?;
         let marker = read(
             &fixed(store, false, MARKER_NAME)?,
             review_hold_namespace::MARKER_LEN,

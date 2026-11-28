@@ -87,8 +87,10 @@ pub(super) fn capture_declaring_founder(
 ) -> Result<ColdFounderSelection, AppError> {
     let row = checked_founder_row(index)?.ok_or_else(refused)?;
     let expected = expected(index, row)?;
-    let fee =
-        Arc::new(pool.try_reserve(crate::store::persistence::native_registry::network::COLD_FEE)?);
+    let fee = Arc::new(pool.try_reserve_classified(
+        crate::store::persistence::native_registry::network::COLD_FEE,
+        || AppError::ChatV2RegistryBusy,
+    )?);
     let network = NetworkDependency::capture_cold(store, expected, None, fee)?;
     validate_founder_network(store, index, row, &network)
 }

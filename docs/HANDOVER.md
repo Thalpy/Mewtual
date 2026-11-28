@@ -54,8 +54,13 @@ A generic failure keeps that request for retry. Native can confirm that
 an already superseded request never reached admission, which lets the
 dialog clear the retry and show the current decision.
 
-First-session founder setup, cold route restoration, existing ID9
-migration and combined acceptance remain open. The desktop Chat V2
+A fresh native Found also covers the hold and decision catalogs before
+it publishes the original founder row. It keeps the same live TCP actor
+and rejects an older or replaced Current. Pre-write pressure can retry
+the original request. An interrupted write can need a cold reopen.
+
+First-session founder review authority, cold route restoration, existing
+ID9 migration and combined acceptance remain open. The desktop Chat V2
 switch remains off.
 
 The ordinary received archive still enforces a 2,048-record limit and

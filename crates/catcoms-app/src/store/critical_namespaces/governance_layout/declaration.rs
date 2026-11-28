@@ -35,6 +35,56 @@ fn summary(
 }
 
 impl ServerStore {
+    /// Classify the bound warm catalog without adopting any physical object.
+    pub(in crate::store) fn founder_review_catalog_step(
+        &self,
+        kind: super::review_hold_namespace::declaration::ReviewDeclarationKind,
+    ) -> Result<Option<([u8; 32], bool)>, AppError> {
+        use super::review_hold_namespace::declaration::ReviewDeclarationKind;
+        let slot = self
+            .pending_join_catalog
+            .try_lock()
+            .map_err(|error| match error {
+                std::sync::TryLockError::WouldBlock => AppError::ChatV2RegistryBusy,
+                std::sync::TryLockError::Poisoned(_) => refused(),
+            })?;
+        let mounted = slot.as_ref().ok_or_else(refused)?;
+        let current = &mounted.current;
+        if mounted.pending.is_some()
+            || mounted.networks.iter().any(Option::is_some)
+            || current.rejoin_payload_digest.is_some()
+            || current.review_receive_payload_digest.is_some()
+        {
+            return Err(refused());
+        }
+        if current.shared_history_payload_digest.is_none() {
+            return Ok(None);
+        }
+        let hold = current.review_hold_payload_digest.is_some();
+        let decision = current.review_decision_payload_digest.is_some();
+        if (decision || kind == ReviewDeclarationKind::Decision) && !hold {
+            return Err(refused());
+        }
+        Ok(Some((
+            current.framed,
+            match kind {
+                ReviewDeclarationKind::Hold => hold,
+                ReviewDeclarationKind::Decision => decision,
+            },
+        )))
+    }
+
+    /// Parse the original declaration's exact bounded candidate under this
+    /// mount's configured grammar. The caller owns the read invoice and
+    /// must still prove same-inode selection before adopting the summary.
+    pub(in crate::store) fn prepare_warm_review_catalog_summary(
+        &self,
+        key: &[u8; 32],
+        candidate: &[u8],
+    ) -> Result<pending_join_codec::Summary, AppError> {
+        summary(self, key, candidate)
+    }
+
     /// The authenticated original Current already declares the journal.
     /// A damaged optional mount may not acquire a new declaration.
     pub(in crate::store) fn has_declared_review_decision(&self) -> Result<bool, AppError> {
