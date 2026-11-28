@@ -21,6 +21,7 @@ test("native chat displays an authenticated live projection with provisional sta
   document.body.append(target);
   const app = mount(NativeSavedChat, { target, props: {
     rows: [], received: [{ action: "9a".repeat(32), text: "A received message", certainty: "provisional" }],
+    archive: { items: [], note: null, loading: false, more: false },
     loading: false, loaded: true, failure: null, more: false, text: "", busy: false,
     send: () => {}, refresh: () => {}, loadMore: () => {}, change: () => {},
   } });
@@ -28,6 +29,7 @@ test("native chat displays an authenticated live projection with provisional sta
   assert.match(target.textContent ?? "", /A received message/);
   assert.match(target.textContent ?? "", /Received · Provisional/);
   assert.doesNotMatch(target.textContent ?? "", /Nothing saved here yet|Saved here/);
+  assert.equal(target.querySelector("section[aria-label='Saved received messages']"), null);
   await unmount(app);
   target.remove();
 });

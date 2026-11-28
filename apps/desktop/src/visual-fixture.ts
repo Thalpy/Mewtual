@@ -874,7 +874,10 @@ export function installVisualFixture(name: string): void {
       // fonts and the next task so Svelte can flush its pending microtasks. Do not use
       // requestAnimationFrame here: screenshot browsers intentionally run in the background and
       // Chromium may throttle background frames indefinitely.
-      if (command === "get_moderation" || (nativeText && (command === "get_message_page" || (nativeMode === "empty" && command === "resume_session")))) {
+      const nativeViewLoaded = nativeText && (nativeMode === "empty"
+        ? command === "resume_session"
+        : command === "get_message_page" && "archivedAction" in args);
+      if (command === "get_moderation" || nativeViewLoaded) {
         void document.fonts.ready.then(() => {
           setTimeout(() => {
             document.documentElement.dataset.visualReady = name;

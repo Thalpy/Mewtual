@@ -255,35 +255,188 @@ test("real App reads saved received bodies and suppresses them after a live chan
   const index = { backend: "text-v2", scope: "received-archive-index", available: true, ids: [row.action], more: false };
   const item = { action: row.action, text: "Received before restart", certainty: "provisional" };
   const saved = { backend: "text-v2", scope: "received-archive", item };
-  app.nativeHistory(index, saved);
+  app.nativeArchivePages(index, saved);
   await app.nativeArchiveRefresh();
   assert.deepEqual(app.archive().items, [item]);
-  assert.deepEqual(app.state().nativeHistoryCalls, [
+  assert.deepEqual(app.nativeArchiveCalls(), [
     { server: 7, channel: "9", expectedContext: context, archiveAfter: null, limit: 8 },
     { server: 7, channel: "9", expectedContext: context, archivedAction: row.action },
   ]);
 
   const pending = deferred<unknown>();
-  app.nativeHistory(index, pending.promise, { backend: "text-v2", scope: "received-live", item: null });
+  app.nativeArchivePages(index, pending.promise);
+  app.nativeHistory({ backend: "text-v2", scope: "received-live", item: null });
   const read = app.nativeArchiveRefresh();
   await settle();
   await app.receiveNotice({ server: 7, channel: "9", context, action: row.action });
   pending.resolve(saved);
   await read;
   assert.deepEqual(app.archive().items, []);
-  app.nativeHistory(index, new Error("A received change is waiting to be saved."));
+  app.nativeArchivePages(index, new Error("A received change is waiting to be saved."));
   await app.nativeArchiveRefresh();
   assert.deepEqual(app.archive().items, []);
   assert.match(app.archive().note, /could not be loaded/);
 
   const retired = deferred<unknown>();
-  app.nativeHistory(index, retired.promise);
+  app.nativeArchivePages(index, retired.promise);
   const old = app.nativeArchiveRefresh();
   await settle();
   app.retireFoundUiForReauth();
   retired.resolve(saved);
   await old;
   assert.equal(app.archive(), null);
+  app.done();
+});
+
+test("the requested first archive page waits for an active send to retire", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  app.type("Message in the previous conversation");
+  const submitting = deferred<unknown>();
+  app.answer(async () => submitting.promise);
+  const send = app.send();
+  await settle();
+  assert.equal(app.state().submissions.length, 1);
+  const replacement = "06".repeat(32);
+  const item = { action: row.action, text: "Recovered in the new conversation", certainty: "provisional" };
+  app.nativeConversation(8, "10", replacement);
+  app.nativeArchivePages(
+    { backend: "text-v2", scope: "received-archive-index", available: true, ids: [row.action], more: false },
+    { backend: "text-v2", scope: "received-archive", item },
+  );
+  app.requestNativeArchive();
+  await app.loadRequestedNativeArchive();
+  assert.deepEqual(app.nativeArchiveCalls(), []);
+  submitting.resolve(saved(app.state().submissions[0].args));
+  await send;
+  await app.loadRequestedNativeArchive();
+  assert.deepEqual(app.archive().items, [item]);
+  await app.loadRequestedNativeArchive();
+  assert.equal(app.nativeArchiveCalls().length, 2);
+  assert.ok(app.nativeArchiveCalls().every((args: Record<string, unknown>) => args.server === 8 && args.expectedContext === replacement));
+  app.done();
+});
+
+test("an invalidation requests a fresh archive page and active removal retires its in-flight reply", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  const notice = { server: 7, channel: "9", context, action: null };
+  const index = { backend: "text-v2", scope: "received-archive-index", available: true, ids: [row.action], more: false };
+  const item = { action: row.action, text: "Old saved text", certainty: "provisional" };
+  const saved = { backend: "text-v2", scope: "received-archive", item };
+  const delayed = deferred<unknown>();
+  app.nativeArchivePages(index, delayed.promise);
+  app.requestNativeArchive();
+  const first = app.loadRequestedNativeArchive();
+  await settle();
+  await app.receiveNotice(notice);
+  app.nativeArchivePages(index, { ...saved, item: null });
+  await app.loadRequestedNativeArchive();
+  await app.receiveNotice(notice);
+  await app.loadRequestedNativeArchive();
+  assert.equal(app.nativeArchiveCalls().length, 2, "only the retiring archive read may own IPC");
+  delayed.resolve(saved);
+  await first;
+  await app.loadRequestedNativeArchive();
+  assert.deepEqual(app.archive().items, []);
+
+  const removed = deferred<unknown>();
+  await app.receiveNotice(notice);
+  app.nativeArchivePages(index, removed.promise);
+  const last = app.loadRequestedNativeArchive();
+  await settle();
+  app.receiveMembership({ server: 7, context, removed: true });
+  removed.resolve(saved);
+  await last;
+  assert.equal(app.archive(), null);
+  await app.nativeArchiveRefresh();
+  assert.equal(app.nativeArchiveCalls().length, 6);
+  app.done();
+});
+
+test("a guarded archive deletion retires an older live reply even if a later body stays Busy", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  const deleted = row.action;
+  const other = "11".repeat(32);
+  const old = { backend: "text-v2", scope: "received-live", item: { action: deleted, text: "Old live body", certainty: "provisional" } };
+  const keep = { action: other, text: "Different live body", certainty: "provisional" };
+  const notice = { server: 7, channel: "9", context };
+  app.nativeHistory(old, { ...old, item: keep });
+  await app.receiveNotice({ ...notice, action: deleted });
+  await app.receiveNotice({ ...notice, action: other });
+  const delayed = deferred<unknown>();
+  app.nativeHistory(delayed.promise);
+  const stale = app.receiveNotice({ ...notice, action: deleted });
+  await settle();
+  const busy = new Error("Chat history is busy. Try again.");
+  app.nativeArchivePages(
+    { backend: "text-v2", scope: "received-archive-index", available: true, ids: [deleted, other], more: false },
+    { backend: "text-v2", scope: "received-archive", item: null },
+    busy, busy, busy, busy,
+  );
+  await app.nativeArchiveRefresh();
+  delayed.resolve(old);
+  await stale;
+  assert.deepEqual(app.received(), [keep]);
+  assert.deepEqual(app.archive().items, []);
+  assert.equal(app.archive().after, null);
+  app.done();
+});
+
+test("an archive body that stays Busy preserves the cursor for an exact retry", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  const index = { backend: "text-v2", scope: "received-archive-index", available: true, ids: [row.action], more: false };
+  const busy = new Error("Chat history is busy. Try again.");
+  app.nativeArchivePages(index, busy, busy, busy, busy);
+  await app.nativeArchiveRefresh();
+  assert.equal(app.archive().after, null);
+  assert.match(app.archive().note, /could not be loaded/);
+  assert.equal(app.nativeArchiveCalls().length, 5);
+  const item = { action: row.action, text: "Retry uses the same cursor", certainty: "provisional" };
+  app.nativeArchivePages(index, { backend: "text-v2", scope: "received-archive", item });
+  await app.nativeArchiveRefresh();
+  assert.equal(app.nativeArchiveCalls()[5].archiveAfter, null);
+  assert.deepEqual(app.archive().items, [item]);
+  app.done();
+});
+
+test("an invalidation that cannot enter the full live queue schedules a fresh guarded page", async () => {
+  const app = pendingManagerApp({});
+  await app.hydrate();
+  app.nativeConversation(7, "9", context);
+  const notice = { server: 7, channel: "9", context };
+  const action = "ff".repeat(32);
+  const item = { action, text: "The selected saved body", certainty: "provisional" };
+  const index = { backend: "text-v2", scope: "received-archive-index", available: true, ids: [action], more: false };
+  const delayed = deferred<unknown>();
+  app.nativeArchivePages(index, delayed.promise);
+  const archive = app.nativeArchiveRefresh();
+  await settle();
+
+  const busy = deferred<unknown>();
+  app.nativeHistory(busy.promise);
+  const live = Array.from({ length: 64 }, (_, index) =>
+    app.receiveNotice({ ...notice, action: index.toString(16).padStart(2, "0").repeat(32) }),
+  );
+  await settle();
+  await app.receiveNotice({ ...notice, action });
+  assert.equal(app.archive(), null);
+  await app.loadRequestedNativeArchive();
+  assert.equal(app.nativeArchiveCalls().length, 2);
+
+  app.nativeArchivePages(index, { backend: "text-v2", scope: "received-archive", item });
+  delayed.resolve({ backend: "text-v2", scope: "received-archive", item: { ...item, text: "Older body" } });
+  busy.resolve({ backend: "text-v2", scope: "received-live", item: null });
+  await archive;
+  await Promise.all(live);
+  await app.loadRequestedNativeArchive();
+  assert.deepEqual(app.archive().items, [item]);
   app.done();
 });
 

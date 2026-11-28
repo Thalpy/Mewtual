@@ -89,12 +89,16 @@ export async function readNativeOwnMessage(
 }
 
 /** Fetch one bounded page, resolving each body under its own native guard. */
+export function isNativeHistoryBusy(failure: unknown): boolean {
+  return (failure instanceof Error ? failure.message : failure) === "Chat history is busy. Try again.";
+}
+
 export async function readNativeReceivedArchive(
   invoke: NativeInvoke,
   target: NativeHistoryTarget,
   current: () => boolean,
   after: string | null,
-): Promise<{ available: boolean; ids: string[]; more: boolean; items: NativeReceived[]; incomplete: boolean } | null> {
+): Promise<{ available: boolean; ids: string[]; more: boolean; items: NativeReceived[]; covered: string[]; incomplete: boolean; blocked: boolean } | null> {
   if (!current()) return null;
   const address = { server: target.server, channel: target.channel, expectedContext: target.context };
   const raw = await invoke("get_message_page", { ...address, archiveAfter: after, limit: 8 });
@@ -112,7 +116,9 @@ export async function readNativeReceivedArchive(
     previous = id;
   }
   const items: NativeReceived[] = [];
+  const covered: string[] = [];
   let incomplete = false;
+  let blocked = false;
   for (const id of ids) {
     if (!current()) return null;
     try {
@@ -120,12 +126,19 @@ export async function readNativeReceivedArchive(
       if (!current()) return null;
       const item = decodeNativeReceived(raw, id, "received-archive");
       if (item) items.push(item);
-    } catch {
+      covered.push(id);
+    } catch (failure) {
       if (!current()) return null;
+      if (isNativeHistoryBusy(failure)) {
+        // Keep earlier guarded results, including deletions. The caller
+        // leaves the cursor here so an exact retry can finish the page.
+        blocked = true;
+        break;
+      }
       incomplete = true;
     }
   }
-  return { available: root.available, ids, more: root.more, items, incomplete };
+  return { available: root.available, ids, more: root.more, items, covered, incomplete, blocked };
 }
 
 export function updateNativeReceived(rows: NativeReceived[], action: string, item: NativeReceived | null): NativeReceived[] {

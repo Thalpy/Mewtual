@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createVisualNativeTextFixture } from "./visual-native-text-fixture.ts";
 import { decodeRestoredChatSession } from "./native-text-session.ts";
-import { decodeNativeOriginalPage } from "./native-text-history.ts";
+import { decodeNativeOriginalPage, readNativeReceivedArchive } from "./native-text-history.ts";
 
-test("Native Text visual data uses the real decoders and never falls back to Legacy server reads", () => {
+test("Native Text visual data uses the real decoders and never falls back to Legacy server reads", async () => {
   const fixture = createVisualNativeTextFixture();
   const call = (name: string, args: Record<string, unknown> = {}) => { const result = fixture(name, args); assert.ok(result.handled); return result.value; };
   const session = decodeRestoredChatSession(call("resume_session"));
@@ -13,6 +13,14 @@ test("Native Text visual data uses the real decoders and never falls back to Leg
   const args = { server: row.server, channel: row.channel, expectedContext: row.context };
   const page = decodeNativeOriginalPage(call("get_message_page", { ...args, start: "0", endExclusive: null, limit: 8 }), "0", null, "1");
   assert.equal(page.items.length, 2);
+  const archive = await readNativeReceivedArchive(
+    async (command, args) => call(command, args),
+    { server: row.server, channel: row.channel, context: row.context },
+    () => true,
+    null,
+  );
+  assert.equal(archive?.items[0]?.text, "A message recovered after reconnecting.");
+  assert.deepEqual(archive?.covered, archive?.ids);
   assert.throws(() => fixture("get_members", { server: 1 }), /Legacy server command/);
   assert.throws(() => fixture("get_message_page", { ...args, expectedContext: "wrong" }), /Unknown Native/);
   const token = "d1".repeat(32);
