@@ -16,6 +16,8 @@ use std::io::Write;
 use tauri::ipc::InvokeResponseBody;
 use tokio::sync::OwnedMutexGuard;
 
+pub(super) mod held_posts;
+
 enum Preparation {
     Founder(NativeTextMemberPreparation<catcoms_net::MeshService, OsCryptoRng>),
     Joined(
@@ -49,6 +51,10 @@ enum ReadRequest {
     Audit {
         target: Option<ActionId>,
         after: Option<ActionId>,
+        limit: usize,
+    },
+    HeldPosts {
+        cursor: Option<[u8; 32]>,
         limit: usize,
     },
 }
@@ -109,6 +115,7 @@ fn parse(payload: &InvokeBody) -> Result<Read, &'static str> {
                     | "archiveAfter"
                     | "auditAction"
                     | "auditAfter"
+                    | "heldAfter"
                     | "trace"
             )
         })
@@ -155,6 +162,28 @@ fn parse(payload: &InvokeBody) -> Result<Read, &'static str> {
             .map(|n| n as usize)
             .ok_or("Invalid history page size.")
     };
+    if let Some(after) = object.get("heldAfter") {
+        if object.len() != 5 {
+            return Err("Invalid held-post request.");
+        }
+        let cursor = match after {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(value) => {
+                Some(membership::decode_exact_hex(value).map_err(|_| "Invalid held-post cursor.")?)
+            }
+            _ => return Err("Invalid held-post cursor."),
+        };
+        let limit = limit()?;
+        if limit > 2 {
+            return Err("Invalid history page size.");
+        }
+        return Ok(Read {
+            server,
+            channel,
+            context,
+            request: ReadRequest::HeldPosts { cursor, limit },
+        });
+    }
     if object.contains_key("auditAction") || object.contains_key("auditAfter") {
         if object.len() != 6 {
             return Err("Invalid audit request.");
@@ -344,6 +373,11 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             } => execute_audit(&state, &invocation, target, after, limit)
                 .await
                 .map(Response::Audit),
+            ReadRequest::HeldPosts { cursor, limit } => {
+                held_posts::execute(&state, &invocation, cursor, limit)
+                    .await
+                    .map(Response::HeldPosts)
+            }
         };
         #[cfg(test)]
         {
@@ -372,6 +406,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
                     resolver.resolve(InvokeResponseBody::Json(output.body.take().unwrap()))
                 }
                 Ok(Response::Audit(_)) => resolver.reject(STALE),
+                Ok(Response::HeldPosts(output)) => output.resolve(&state, resolver),
                 Err(error) => resolver.reject(&*error),
             }
         }
@@ -468,6 +503,7 @@ enum Response {
     Received(ReceivedOutput),
     ArchivePage(ArchivePageOutput),
     Audit(AuditOutput),
+    HeldPosts(held_posts::Output),
 }
 
 struct AuditOutput {
@@ -1141,6 +1177,38 @@ mod tests {
             ("limit", serde_json::json!(9)),
         ] {
             let mut request = valid.clone();
+            request[field] = invalid;
+            assert!(parse(&InvokeBody::Json(request)).is_err());
+        }
+    }
+
+    #[test]
+    fn held_posts_accept_only_their_own_small_page_and_cursor() {
+        let cursor = "ab".repeat(32);
+        let mut payload = serde_json::json!({
+            "server": 1, "channel": "2", "expectedContext": hex::encode([3; 32]),
+            "heldAfter": null, "limit": 2,
+        });
+        assert!(matches!(
+            parse(&InvokeBody::Json(payload.clone())).unwrap().request,
+            ReadRequest::HeldPosts {
+                cursor: None,
+                limit: 2
+            }
+        ));
+        payload["heldAfter"] = serde_json::json!(cursor);
+        assert!(
+            matches!(parse(&InvokeBody::Json(payload.clone())).unwrap().request,
+            ReadRequest::HeldPosts { cursor: Some(value), limit: 2 } if value == [0xab; 32])
+        );
+        for (field, invalid) in [
+            ("limit", serde_json::json!(3)),
+            ("heldAfter", serde_json::json!("AB".repeat(32))),
+            ("heldAfter", serde_json::json!("ab".repeat(31))),
+            ("auditAction", serde_json::Value::Null),
+            ("ownAction", serde_json::json!(cursor)),
+        ] {
+            let mut request = payload.clone();
             request[field] = invalid;
             assert!(parse(&InvokeBody::Json(request)).is_err());
         }

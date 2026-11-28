@@ -44,7 +44,7 @@ pub(in crate::store) const FOUNDER_RECEIVE_LEDGER_FEE: usize = 2 * FOUNDER_RECEI
     + V2GeneralPrefixVerifier::ordinary_authorization_temporary_layout_bytes()
     + 16 * 1024;
 const LOCAL_DEPENDENCY_READS: usize = 8;
-const HISTORY_DEPENDENCY_READS: usize = 128;
+pub(in crate::store) const HISTORY_DEPENDENCY_READS: usize = 128;
 const HISTORY_PENDING_IDS: usize = HISTORY_DEPENDENCY_READS + MAX_PARENTS;
 pub(in crate::store) const HISTORY_REPLAY_FEE: usize = HISTORY_PENDING_IDS
     * std::mem::size_of::<(ActionId, bool)>()

@@ -670,7 +670,7 @@ try {
       const result = await cdp.eval(nativeTextFlowExpression);
       failed |= !assertEqual("Native Text local save and entry: " + mode, result, mode === "empty"
         ? { localEntry:true, created:true, ownHistory:true, noLegacy:true, noUnavailableControls:true }
-        : { localScope:true, saved:true, sealedFirst:true, composerRetired:true, noLegacy:true, noUnavailableControls:true, noOverflow:true, ownerAudit:true });
+        : { localScope:true, saved:true, sealedFirst:true, composerRetired:true, noLegacy:true, noUnavailableControls:true, noOverflow:true, ownerAudit:true, heldAudit:true });
       if(mode==="1"){
         const remount=await cdp.eval(nativeTextRemountFlowExpression);
         failed |= !assertEqual("Native Text remount preserves the new journal and warm session",remount,

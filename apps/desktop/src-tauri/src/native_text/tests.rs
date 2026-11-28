@@ -1333,6 +1333,45 @@ async fn command_after_busy(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn held_review_does_not_adopt_an_unlock_after_router_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("vault");
+    let (app, main, queue) = app(path.clone(), None, true);
+    unlock_current(&app, &main, &queue).await;
+    let found = found_request(&main, 17, "Review source");
+    run(&queue).await;
+    let found = found_value(found.await.unwrap());
+    let old = invite_command(
+        &main,
+        "check_native_chat_removed_posts",
+        serde_json::json!({
+            "server": found["server"], "expectedContext": found["context"],
+            "expectedAdmission": "a1".repeat(32),
+            "contact": "a2".repeat(catcoms_sync::V2_MEMBER_CONTACT_BYTES),
+        }),
+    );
+    // Actual router admission succeeded. Nothing in the worker has run yet.
+    let task = run(&queue);
+    let sent = native_send_request(&main, &found, 46, "Send while a device check is queued");
+    run(&queue).await;
+    found_value(sent.await.unwrap());
+    let state = app.state::<AppState>();
+    let previous = state.ui_session_generation.load(Ordering::SeqCst);
+    lock_session_outcome_inner(&state, None).await;
+    unlock_current(&app, &main, &queue).await;
+    assert_ne!(state.ui_session_generation.load(Ordering::SeqCst), previous);
+    task.await;
+    let tauri::ipc::InvokeResponse::Err(error) = old.await.unwrap() else {
+        panic!("stale review invocation returned a result");
+    };
+    assert_eq!(error.0, serde_json::json!(listing::STALE));
+    let holds = path.join("chat-v2-removed-holds");
+    if holds.exists() {
+        assert!(std::fs::read_dir(holds).unwrap().next().is_none());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_text_membership_dispatch_uses_the_original_founder_row() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("vault");
@@ -3473,6 +3512,27 @@ async fn native_text_membership_removal_reopen(scenario: MembershipAfterRemove) 
     let review_cover =
         std::fs::read(&review_marker).expect("cold founder provisions review storage");
     assert_eq!(review_cover.len(), 32);
+    let mut held = serde_json::json!({
+        "server": found["server"], "channel": found["channel"], "expectedContext": found["context"],
+        "heldAfter": null, "limit": 2,
+    });
+    let empty = command_value_after_busy(
+        &main,
+        &queue,
+        "get_message_page",
+        history::BUSY,
+        held.clone(),
+    )
+    .await;
+    assert_eq!(
+        empty,
+        serde_json::json!({
+            "backend": "text-v2", "scope": "selected-held-posts", "items": [],
+            "next": null, "unavailable": 0,
+        })
+    );
+    held["heldAfter"] = serde_json::json!("93".repeat(32));
+    refused(command_after_busy(&main, &queue, "get_message_page", history::BUSY, held).await);
     if let Some(history) = &retained_history {
         check_retained_removal_history(&main, &queue, &found, history).await;
         check_reply_to_removed_author(&main, &queue, &found, &history.visible, 92).await;

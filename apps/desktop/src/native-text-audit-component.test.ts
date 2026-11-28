@@ -129,6 +129,16 @@ test("the Chat V2 owner audit renders saved edits as text and clears them when c
     await settle();
     assert.ok(dialog.open);
     assert.match(dialog.textContent ?? "", /A message recovered after reconnecting/);
+    button("Held posts").click();
+    await settle();
+    assert.match(dialog.textContent ?? "", /A late post held for review/);
+    assert.match(dialog.textContent ?? "", /Awaiting review/);
+    assert.deepEqual(calls.at(-1), {
+      server: 1, channel: "1", expectedContext: "a1".repeat(32), heldAfter: null, limit: 2,
+    });
+    button("Close").click();
+    await settle();
+    assert.doesNotMatch(dialog.textContent ?? "", /A late post held for review/);
   } finally {
     await unmount(instance);
     target.remove();

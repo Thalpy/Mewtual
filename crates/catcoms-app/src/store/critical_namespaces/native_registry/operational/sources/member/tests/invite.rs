@@ -137,6 +137,11 @@ fn mounted_native_remove_retires_the_exact_joined_row_and_preserves_the_survivor
     run_mounted_successor(MountedSuccessor::Remove);
 }
 
+#[test]
+fn mounted_founder_holds_a_removed_create_from_the_original_survivor_over_tcp() {
+    run_mounted_successor(MountedSuccessor::RemovedReview);
+}
+
 fn run_mounted_successor(successor: MountedSuccessor) {
     // These debug fixtures exercise three paid vaults and cold restore on one
     // caller thread. Match the removal fixture's stack for both scenarios.
@@ -159,6 +164,7 @@ enum MountedSuccessor {
     OfflineDelivery,
     MissedHistory,
     Remove,
+    RemovedReview,
     UnsettledCreate,
     ReceiveCapacity,
     JoinedLedgerReplay,
@@ -454,6 +460,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         (true, _) => 0xe770,
         (false, Some(MountedSuccessor::OfflineDelivery)) => 0xe780,
         (false, Some(MountedSuccessor::Remove)) => 0xe790,
+        (false, Some(MountedSuccessor::RemovedReview)) => 0xe830,
         (false, Some(MountedSuccessor::MissedHistory)) => 0xe7a0,
         (false, Some(MountedSuccessor::UnsettledCreate)) => 0xe7b0,
         (false, Some(MountedSuccessor::ReceiveCapacity)) => 0xe7d0,
@@ -2031,7 +2038,11 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
     let mut history_rng = catcoms_rt::OsCryptoRng;
     if let Some(successor) = successor {
         use catcoms_rt::TransportEvent;
-        let stale_contact = (successor != MountedSuccessor::Remove).then(|| {
+        let stale_contact = (!matches!(
+            successor,
+            MountedSuccessor::Remove | MountedSuccessor::RemovedReview
+        ))
+        .then(|| {
             recovered_row()
                 .sign_member_contact(&selection, &fresh)
                 .unwrap()
@@ -2255,8 +2266,11 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             saved
         );
         drop((lane, ingress));
-        if successor == MountedSuccessor::Remove {
-            let (removed_head, removed_epoch, original_eviction, covered) = Box::pin(async {
+        if matches!(
+            successor,
+            MountedSuccessor::Remove | MountedSuccessor::RemovedReview
+        ) {
+            let (removed_head, removed_epoch, original_eviction, covered, late) = Box::pin(async {
                 use catcoms_replication::chat::owner_header::OwnerBodyId;
                 let contact = recovered_row()
                     .sign_member_contact(&selection, &fresh)
@@ -2272,6 +2286,70 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     .connect(&scheduler)
                     .await
                     .unwrap();
+                let late = if successor == MountedSuccessor::RemovedReview {
+                    use crate::store::{MemberSaveJobReport, MemberSaveNativeAdmission};
+                    use catcoms_net::NativeChatMemberGossipEvent;
+                    use catcoms_replication::chat::{ActionState, V2OrdinaryReceiveStatus};
+                    let mut incoming = recovered_row()
+                        .prepare_member_ingress(&selection, channel, fresh.clone())
+                        .unwrap()
+                        .open()
+                        .await
+                        .unwrap();
+                    let mut ledger = recovered_row()
+                        .prepare_member_ledger(&selection, channel, fresh.clone())
+                        .unwrap();
+                    let message = catcoms_replication::chat::Body::Create {
+                        text: "Only the surviving member saw this post".into(),
+                        reply_to: None,
+                    };
+                    let late_token = [0xc0; 32];
+                    let draft = || V2MemberSignRequest {
+                        token: late_token, channel, body: &message, parents: &[], dependencies: &[],
+                    };
+                    assert_eq!(
+                        third_row().prepare_member_save(&third_selection, draft(), &fresh, &mut third_rng),
+                        Ok(V2MemberSaveOutcome::Ready),
+                    );
+                    let mut prepared = Some(third_row()
+                        .finish_member_admission(third_selection.clone(), late_token, &fresh)
+                        .unwrap());
+                    let save = NativeTextJoinedMemberFinalPreparation::try_admit_member_save(
+                        &mut prepared, &fresh, MemberSaveNativeAdmission::new((), fresh.clone()),
+                    ).unwrap();
+                    assert_eq!(save.run(), MemberSaveJobReport::SavedLocal);
+                    let V2MemberSaveOutcome::Saved { action, .. } = third_row()
+                        .prepare_member_save(&third_selection, draft(), &fresh, &mut third_rng).unwrap()
+                    else {
+                        panic!("the retiring member saved the original while it was still current");
+                    };
+                    tokio::time::timeout(std::time::Duration::from_secs(25), async {
+                        loop {
+                            let prepared = third_row()
+                                .prepare_member_publication(&third_selection, fresh.clone(), &mut third_rng)
+                                .unwrap().unwrap();
+                            match prepared.submit().await {
+                                Ok(Some(_)) => break,
+                                Err(catcoms_sync::SyncError::Publication(catcoms_rt::PublishOnceError::NoPeers)) => {
+                                    catcoms_rt::SystemClock.sleep(std::time::Duration::from_millis(20)).await;
+                                }
+                                unexpected => panic!("the exact signed packet must reach the surviving peer: {unexpected:?}"),
+                            }
+                        }
+                        let Some(NativeChatMemberGossipEvent::Frame(frame)) = incoming.next().await else {
+                            panic!("the survivor needs the actual signed packet");
+                        };
+                        let (original, status) = recovered_row().receive_member_frame(&mut ledger, &frame, &fresh)
+                            .unwrap();
+                        assert_eq!(original.action_id_data(), action);
+                        assert_eq!(status, V2OrdinaryReceiveStatus::Retained(ActionState::Valid));
+                        assert!(recovered_row().archive_received_member(&ledger, &original, &fresh, &mut history_rng)
+                            .unwrap().is_some());
+                    }).await.expect("the holder selects a post the founder did not receive");
+                    Some(action)
+                } else {
+                    None
+                };
                 let target = OwnerBodyId::from_bytes(*third_own.as_bytes());
                 let old_founder = OwnerBodyId::from_bytes(anchor.admission);
                 let roster = capture().governed_roster(&fresh).unwrap();
@@ -2471,7 +2549,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     })
                     .expect("the third original's immutable terminal continuation");
                 let covered = std::fs::read(&original_eviction).unwrap();
-                (removed_head, removed_epoch, original_eviction, covered)
+                (removed_head, removed_epoch, original_eviction, covered, late)
             })
             .await;
             drop(third_selection);
@@ -2507,14 +2585,35 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     assert!(old.complete_recovery(&fresh).is_err());
                 }
                 assert_eq!(std::fs::read(original_eviction).unwrap(), covered);
+                // Drain the previous listener before trying to reconnect the
+                // survivor to another actor with the same transport identity.
+                if late.is_some() {
+                    let mut retirement = owner.prepare_retirement().unwrap();
+                    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                        while retirement.try_retire().unwrap()
+                            == crate::store::NativeTextSourceRetirementStatus::Pending
+                        {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("the founder's previous TCP actor drained");
+                }
                 drop((row, owner, founder));
-                let cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+                let mut cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
                     founder_dir.path(),
                     SECRET,
                     &mut history_rng,
                     current_policy(),
                 )
                 .unwrap();
+                if late.is_some() {
+                    assert!(cold.select_review_storage_before_founder_startup(&mut history_rng).unwrap());
+                    drop(cold);
+                    cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+                        founder_dir.path(), SECRET, &mut history_rng, current_policy(),
+                    ).unwrap();
+                }
                 let mut cold = cold
                     .prepare_recovered_founder()
                     .map_err(|(_, error)| error)
@@ -2530,6 +2629,87 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     .members()
                     .iter()
                     .any(|member| member.founder && member.you));
+                if let Some(action) = late {
+                    use catcoms_sync::owner_v2::V2RemovedReviewQuery;
+                    use crate::store::NativeTextFounderReviewResult;
+                    cold.bind_original_tcp(&fresh).unwrap();
+                    let contact = recovered_row().sign_member_contact(&selection, &fresh).unwrap();
+                    let decoded = catcoms_sync::V2MemberContactData::decode(&contact).unwrap();
+                    let holder = catcoms_rt::PeerId::new(*blake3::hash(decoded.address_data().0).as_bytes());
+                    assert!(cold.start_removed_review(channel, third_own, contact, &fresh).is_err());
+                    recovered_row().prepare_reconnect(
+                        &selection, &invite, token, std::net::Ipv4Addr::LOCALHOST.into(), fresh.clone(),
+                    ).unwrap().connect(&scheduler).await.unwrap();
+                    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                        while !cold.connections_for_test().unwrap().iter().any(|route| route.peer == holder) {
+                            tokio::task::yield_now().await;
+                        }
+                    }).await.expect("the reopened founder sees the original survivor's authenticated TCP connection");
+                    assert!(recovered_row().maintain_archive_relay_catalogue(&selection, channel, &fresh).unwrap());
+                    let mut provider = recovered_row().attach_dependency_provider(&selection, fresh.clone()).unwrap();
+                    let sweep = cold.start_removed_review(channel, third_own, contact, &fresh).unwrap();
+                    let mut turn = async |query| {
+                        let exchange = cold.prepare_removed_review(sweep.clone(), query, &fresh, &mut history_rng)
+                            .unwrap();
+                        let serve = async {
+                            let request = provider.next().await.expect("the actual survivor receives the request");
+                            recovered_row().serve_dependency_request(&selection, channel, request, fresh.clone(), &mut rand_chacha::ChaCha20Rng::seed_from_u64(0x8281))
+                                .unwrap();
+                        };
+                        let (reply, ()) = tokio::time::timeout(
+                            std::time::Duration::from_secs(15),
+                            async { tokio::join!(exchange.request(), serve) },
+                        ).await.unwrap();
+                        cold.receive_removed_review(reply.unwrap(), &fresh, &mut history_rng).unwrap()
+                    };
+                    let NativeTextFounderReviewResult::Page(page) = turn(V2RemovedReviewQuery::Page(None)).await
+                    else { panic!("the approved survivor must provide its review page"); };
+                    let (actions, offer, next) = page.current_data().unwrap();
+                    assert_eq!(actions, &[action]);
+                    assert!(next.is_none());
+                    let query = V2RemovedReviewQuery::Original { offer, action };
+                    assert!(matches!(turn(query).await, NativeTextFounderReviewResult::Held(held) if held == action));
+                    assert!(sweep.count_result_once(action).unwrap());
+                    assert!(matches!(turn(query).await, NativeTextFounderReviewResult::Held(held) if held == action));
+                    assert!(!sweep.count_result_once(action).unwrap());
+                    drop(turn);
+                    assert!(cold.archived_message_projection(channel, action, &fresh, &mut history_rng).unwrap().is_none());
+                    drop((sweep, provider));
+                    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                        while !cold.try_retire().unwrap() {
+                            tokio::task::yield_now().await;
+                        }
+                    }).await.expect("the founder retires the original TCP actor before reopening the audit");
+                    drop(cold);
+                    cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+                        founder_dir.path(), SECRET, &mut history_rng, current_policy(),
+                    ).unwrap().prepare_recovered_founder().map_err(|(_, error)| error).unwrap();
+                    let audit = cold.selected_held_review_window(channel, None, 2, &fresh).unwrap();
+                    assert!(audit.continuation().is_none());
+                    audit.with_records(|records, unavailable| {
+                        assert_eq!(unavailable, 0);
+                        let [record] = records.unwrap() else {
+                            panic!("the audit sees the one exact covered hold after reopen");
+                        };
+                        assert_eq!(record.signed.id(), action);
+                        assert_eq!(record.admission, third_own);
+                        assert_eq!(record.removal, (removed_head, removed_epoch));
+                        assert!(matches!(
+                            &record.signed.spec().body,
+                            Body::Create { text, reply_to: None }
+                                if text == "Only the surviving member saw this post"
+                        ));
+                    }).unwrap();
+                    drop(audit);
+                    let directory = std::fs::read_dir(founder_dir.path().join("chat-v2-removed-holds"))
+                        .unwrap().next().unwrap().unwrap().path();
+                    let parked = directory.with_extension("parked");
+                    std::fs::rename(&directory, &parked).unwrap();
+                    std::fs::create_dir(&directory).unwrap();
+                    assert!(cold.selected_held_review_window(channel, None, 2, &fresh).is_err());
+                    std::fs::remove_dir(&directory).unwrap();
+                    std::fs::rename(&parked, &directory).unwrap();
+                }
                 let (_cancel, signal) = tokio::sync::watch::channel(true);
                 let closed = RequestCancellation::new(signal, None);
                 assert!(cold.governed_roster(&closed).is_err());
@@ -6240,10 +6420,29 @@ async fn review_hold_native_open_requires_a_real_founder_and_the_held_marker() {
                 creation: [74; 32],
                 channel: 75,
             };
-            let directory = store.review_hold_partition_for_test(scope).unwrap();
-            std::fs::rename(&directory, directory.with_extension("parked")).unwrap();
-            std::fs::create_dir(&directory).unwrap();
-            assert!(store.review_hold_partition_for_test(scope).is_err());
+            let directory = store
+                .review_hold_partition_for_test(scope, || Ok(()))
+                .unwrap();
+            // Windows cannot rename the parent while its child is held
+            // open. Replacing the child exercises the same cached branch
+            // and its recheck after the original parent sync.
+            let displaced = directory.with_extension("parked");
+            let mut snapped = false;
+            assert!(store
+                .review_hold_partition_for_test(scope, || {
+                    snapped = true;
+                    std::fs::rename(&directory, &displaced).unwrap();
+                    std::fs::create_dir(&directory).unwrap();
+                    Ok(())
+                })
+                .is_err());
+            assert!(
+                snapped,
+                "a cached partition still crosses the parent barrier"
+            );
+            assert!(store
+                .review_hold_partition_for_test(scope, || Ok(()))
+                .is_err());
             let parked = marker_path.with_extension("parked");
             std::fs::rename(&marker_path, &parked).unwrap();
             std::fs::write(&marker_path, marker).unwrap();

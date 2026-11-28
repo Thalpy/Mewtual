@@ -48,13 +48,32 @@ unavailable. ActionId cursors order each captured page independently of
 device timestamps. Refresh from the first page to include records whose
 IDs precede an earlier cursor.
 
+The same command offers a separate founder-held page using `heldAfter`
+(null for the first window) and a limit of 1 to 2. It returns the exact
+signed Create's display fields and Remove coordinates. `items: null`
+means storage is unavailable, and `unavailable` counts gaps in the
+window. A page may advance beyond a damaged record. A 32-byte
+continuation token expires five minutes after publication and binds
+the original session, row, channel and audit revision. The renderer
+restarts at the first window when a continuation becomes stale.
+
 The founder-only held-post storage entry accepts an exact original,
 the current verifier's removed-Create evidence and its host scope.
 It returns the same retained case for a verified semantic retry.
 An original already selected in ordinary history produces no hold.
 A damaged or unavailable ordinary archive leaves the attempt unresolved.
-The entry has no renderer or network command. The caller must supply
-the original checked source and already verified ancestry.
+The main-window command `check_native_chat_removed_posts` uses the
+exact `server`, `expectedContext`, `expectedAdmission` and signed
+`contact`. The channel comes from the captured native row. It needs
+the original recovered founder and an already connected signed contact
+from the current prefix. It returns `held`, `alreadyInHistory`,
+`unavailable` and `complete` for this bounded device check. Counts of
+verified outcomes are unique within a check. Completion covers the
+holder's offered pages in the original 60-second invocation. No
+post text or history receipt is returned. One independent slot
+bounds these checks without occupying the ordinary send or unlock
+slot during transport waits. The renderer has no caller for this
+command yet.
 
 Cold founder invitation issuance can report that the native registry is
 busy. Retrying the same row and invocation at that parent uses the original

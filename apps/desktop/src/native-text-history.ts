@@ -16,6 +16,12 @@ export type NativeAuditRecord = {
   presented_ms: string; parents: string[]; body: NativeOriginal["body"];
 };
 export type NativeAuditPage = { items: NativeAuditRecord[] | null; next: string | null };
+export type NativeHeldPost = {
+  caseId: string; action: string; signer: string; admission: string; originalDigest: string;
+  removalHeader: string; removalEpoch: string;
+  body: Extract<NativeOriginal["body"], { kind: "create" }>;
+};
+export type NativeHeldPage = { items: NativeHeldPost[] | null; next: string | null; unavailable: number };
 const fail = (): never => { throw new Error("Saved messages could not be read. Try again."); };
 const object = (value: unknown): Record<string, unknown> => { if (!value || typeof value !== "object" || Array.isArray(value)) return fail(); return value as Record<string, unknown>; };
 function fields(value: Record<string, unknown>, expected: string[]) { if (Object.keys(value).length !== expected.length || expected.some(key => !Object.hasOwn(value, key))) fail(); }
@@ -122,6 +128,47 @@ export async function readNativeAudit(
   });
   if (next !== null && (items.length !== 8 || next !== previous)) return fail();
   return { items, next };
+}
+
+export async function readNativeHeldPosts(
+  invoke: NativeInvoke,
+  target: NativeHistoryTarget,
+  after: string | null,
+  current: () => boolean,
+): Promise<NativeHeldPage | null> {
+  if (!current()) return null;
+  const raw = await invoke("get_message_page", {
+    server: target.server, channel: target.channel, expectedContext: target.context,
+    heldAfter: after, limit: 2,
+  });
+  if (!current()) return null;
+  const result = object(raw);
+  fields(result, ["backend", "scope", "next", "items", "unavailable"]);
+  if (result.backend !== "text-v2" || result.scope !== "selected-held-posts"
+    || typeof result.unavailable !== "number" || !Number.isInteger(result.unavailable)
+    || result.unavailable < 0 || result.unavailable > 512) return fail();
+  const next = result.next === null ? null : hex(result.next);
+  if (next !== null && next === after) return fail();
+  if (result.items === null) {
+    if (next !== null || result.unavailable !== 0) return fail();
+    return { items: null, next, unavailable: 0 };
+  }
+  if (!Array.isArray(result.items) || result.items.length > 2) return fail();
+  const seen = new Set<string>();
+  const items = result.items.map((raw): NativeHeldPost => {
+    const row = object(raw);
+    fields(row, ["caseId", "action", "signer", "admission", "originalDigest", "removalHeader", "removalEpoch", "body"]);
+    const caseId = hex(row.caseId);
+    const body = decodeBody(row.body);
+    const removalEpoch = decimal(row.removalEpoch);
+    if (body.kind !== "create" || removalEpoch === "0" || seen.has(caseId)) return fail();
+    seen.add(caseId);
+    return {
+      caseId, body, removalEpoch, action: hex(row.action), signer: hex(row.signer),
+      admission: hex(row.admission), originalDigest: hex(row.originalDigest), removalHeader: hex(row.removalHeader),
+    };
+  });
+  return { items, next, unavailable: result.unavailable };
 }
 
 export function decodeNativeOwnMessage(value: unknown, target: string): NativeOwnMessage {

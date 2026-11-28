@@ -13,6 +13,14 @@ use catcoms_storage::kept::SessionId;
 use catcoms_storage::VaultSessionGuard;
 use std::{collections::BTreeSet, fs::File, path::Path};
 
+mod audit;
+mod receipt;
+pub use audit::SelectedHeldCase;
+pub(in crate::store) use audit::{
+    HeldReviewQuery, HoldRootRead, PreparedHeldWindow, SelectedHeldWindow,
+};
+use receipt::Witnesses;
+
 const MAX_CASES: usize = 256;
 const MAX_NAMES: usize = 2 * MAX_CASES;
 const HOLD_SUFFIX: &str = ".held";
@@ -31,6 +39,7 @@ pub(in crate::store::persistence) struct HoldDisk {
     scope: HoldScope,
     pool: CriticalCatalogReadPool,
     key_binding: [u8; 32],
+    witnesses: Option<Witnesses>,
 }
 
 pub(in crate::store::persistence) struct HoldCandidate<'a> {
@@ -54,7 +63,17 @@ impl HoldDisk {
             scope,
             pool,
             key_binding,
+            witnesses: None,
         })
+    }
+
+    pub(in crate::store::persistence) fn with_selection_witnesses(
+        mut self,
+        directory: HeldDirectory,
+        marker: [u8; 32],
+    ) -> Self {
+        self.witnesses = Some(Witnesses::new(directory, marker));
+        self
     }
 
     fn key_binding(scope: &HoldScope, key: &[u8; 32]) -> [u8; 32] {
@@ -120,7 +139,10 @@ impl HoldDisk {
                 }
                 reprove(&data, verifier, rederive)?;
                 require_unknown(data.identity)?;
-                self.finish_selected(&held, destination.as_ref(), &saved.bytes)?;
+                let mut selected =
+                    self.finish_selected(&held, destination.as_ref(), &saved.bytes)?;
+                require_unknown(data.identity)?;
+                self.witness_selection(key, data.identity, (&held, &saved.bytes), &mut selected)?;
                 require_unknown(data.identity)?;
                 return Ok(data.identity);
             }
@@ -140,6 +162,7 @@ impl HoldDisk {
             finish_exact_write(&stage, &mut staged, &saved.frame.bytes)?;
             self.directory.sync()?;
             return self.cover_selected(
+                key,
                 (&held, destination.as_ref()),
                 (&stage, staged),
                 saved.data.identity,
@@ -159,11 +182,19 @@ impl HoldDisk {
         let mut staged = open_exact_write(&stage, WriteMode::Create)?;
         finish_exact_write(&stage, &mut staged, &frame)?;
         self.directory.sync()?;
-        self.cover_selected((&held, None), (&stage, staged), id, &frame, require_unknown)
+        self.cover_selected(
+            key,
+            (&held, None),
+            (&stage, staged),
+            id,
+            &frame,
+            require_unknown,
+        )
     }
 
     fn cover_selected(
         &self,
+        key: &[u8; 32],
         (held, original): (&Path, Option<&StoredFrame>),
         (stage, mut staged): (&Path, (File, SessionId)),
         identity: HeldCase,
@@ -177,10 +208,12 @@ impl HoldDisk {
         // the exact Stage before letting those bytes select the final name.
         self.directory.require()?;
         require_exact_held(stage, &mut staged, frame)?;
-        self.finish_selected(held, original, frame)?;
+        let mut selected = self.finish_selected(held, original, frame)?;
         // Keep the authenticated stage as part of the two-file case. It
         // can complete this exact selected copy after an interrupted write.
         require_exact_held(stage, &mut staged, frame)?;
+        check_unproven(identity)?;
+        self.witness_selection(key, identity, (held, frame), &mut selected)?;
         check_unproven(identity)?;
         self.directory.require()?;
         Ok(identity)
@@ -191,7 +224,7 @@ impl HoldDisk {
         path: &Path,
         original: Option<&StoredFrame>,
         frame: &[u8],
-    ) -> Result<(), AppError> {
+    ) -> Result<(File, SessionId), AppError> {
         self.directory.require()?;
         let mut held = if let Some(original) = original {
             let mut held = open_exact_write(path, WriteMode::Existing)?;
@@ -209,7 +242,27 @@ impl HoldDisk {
         finish_exact_write(path, &mut held, frame)?;
         self.directory.sync()?;
         require_exact_held(path, &mut held, frame)?;
-        self.directory.require()
+        self.directory.require()?;
+        Ok(held)
+    }
+
+    fn witness_selection(
+        &self,
+        key: &[u8; 32],
+        identity: HeldCase,
+        (path, frame): (&Path, &[u8]),
+        selected: &mut (File, SessionId),
+    ) -> Result<(), AppError> {
+        if let Some(witnesses) = &self.witnesses {
+            self.directory.require()?;
+            require_exact_held(path, selected, frame)?;
+            // An isolated optional receipt fault leaves a covered body
+            // available for exact retry. The audit reports a gap meanwhile.
+            let _witness = witnesses.cover(&self.scope, key, identity.id, frame);
+            require_exact_held(path, selected, frame)?;
+            self.directory.require()?;
+        }
+        Ok(())
     }
 
     fn read_frame(&self, path: &Path) -> Result<Option<StoredFrame>, AppError> {
@@ -250,16 +303,7 @@ impl HoldDisk {
         let mut cases = BTreeSet::new();
         for name in &names {
             let name = name.to_str().ok_or_else(refused)?;
-            let label = name
-                .strip_suffix(HOLD_SUFFIX)
-                .or_else(|| name.strip_suffix(STAGE_SUFFIX))
-                .filter(|label| {
-                    label.len() == 64
-                        && label
-                            .bytes()
-                            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
-                })
-                .ok_or_else(refused)?;
+            let (label, _) = audit::parse_leaf(name).ok_or_else(refused)?;
             bounded_file_length(&self.directory.child(name), MAX_FRAME)?;
             cases.insert(label);
         }

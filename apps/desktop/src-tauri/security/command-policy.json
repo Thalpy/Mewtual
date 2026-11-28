@@ -201,6 +201,7 @@
   { "command": "share_native_chat_contact", "risk": "membership-admin", "surfaces": ["main"] },
   { "command": "connect_native_chat_contact", "risk": "membership-admin", "surfaces": ["main"] },
   { "command": "forget_native_chat_contacts", "risk": "membership-admin", "surfaces": ["main"] },
+  { "command": "check_native_chat_removed_posts", "risk": "membership-admin", "surfaces": ["main"] },
   { "command": "revoke_device", "risk": "membership-admin", "surfaces": ["main"] },
   { "command": "send_message", "risk": "account-write", "surfaces": ["main"] },
   { "command": "edit_message", "risk": "account-write", "surfaces": ["main"] },

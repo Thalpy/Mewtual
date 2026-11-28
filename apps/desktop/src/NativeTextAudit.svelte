@@ -2,7 +2,8 @@
   import { onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import {
-    readNativeAudit, readNativeOriginalPage, type NativeAuditPage, type NativeOriginalPage,
+    readNativeAudit, readNativeHeldPosts, readNativeOriginalPage,
+    type NativeAuditPage, type NativeHeldPage, type NativeOriginalPage,
   } from "./native-text-history.ts";
 
   let { server, channel, context }: { server: number; channel: string; context: string } = $props();
@@ -12,8 +13,10 @@
   let listAfter: string | null = null;
   let page = $state<NativeAuditPage | null>(null);
   let localPage = $state<NativeOriginalPage | null>(null);
+  let heldPage = $state<NativeHeldPage | null>(null);
+  let heldAfter = $state<string | null>(null);
   let localCursor = $state<{ next: string; end: string | null }>({ next: "0", end: null });
-  let view = $state<"received" | "local">("received");
+  let view = $state<"received" | "local" | "held">("received");
   let loading = $state(false);
   let failure = $state("");
   let request = 0;
@@ -23,6 +26,7 @@
     const current = () => original === request && dialog.open;
     view = "received";
     localPage = null;
+    heldPage = null;
     target = action;
     after = cursor;
     page = null;
@@ -45,6 +49,7 @@
     localCursor = cursor;
     page = null;
     localPage = null;
+    heldPage = null;
     loading = true;
     failure = "";
     try {
@@ -57,10 +62,32 @@
     }
   }
 
+  async function loadHeld(cursor: string | null = null) {
+    const original = ++request;
+    const current = () => original === request && dialog.open;
+    view = "held";
+    heldAfter = cursor;
+    page = null;
+    localPage = null;
+    heldPage = null;
+    loading = true;
+    failure = "";
+    try {
+      const result = await readNativeHeldPosts(invoke, { server, channel, context }, cursor, current);
+      if (current()) heldPage = result;
+    } catch {
+      if (current()) failure = "Could not read held posts.";
+    } finally {
+      if (current()) loading = false;
+    }
+  }
+
   function clear() {
     request++;
     page = null;
     localPage = null;
+    heldPage = null;
+    heldAfter = null;
     loading = false;
     failure = "";
   }
@@ -84,6 +111,7 @@
   <div class="history-sources" role="group" aria-label="History source">
     <button type="button" class="ghost small" aria-pressed={view === "received"} onclick={() => void load(null, null)}>Received history</button>
     <button type="button" class="ghost small" aria-pressed={view === "local"} onclick={() => void loadLocal()}>Saved on this device</button>
+    <button type="button" class="ghost small" aria-pressed={view === "held"} onclick={() => void loadHeld()}>Held posts</button>
   </div>
   {#if view === "received" && target}
     <button type="button" class="ghost small" onclick={() => void load(null, listAfter)}>Back to messages</button>
@@ -94,9 +122,48 @@
     {:else if failure}
       <p role="status">{failure}</p>
       <button type="button" class="ghost small" onclick={() => {
-        if (view === "local") void loadLocal(localCursor);
+        if (view === "held") void loadHeld();
+        else if (view === "local") void loadLocal(localCursor);
         else void load(target, after);
       }}>Retry</button>
+    {:else if view === "held" && heldPage}
+      {#if heldPage.items === null}
+        <p>Held posts are unavailable on this device.</p>
+      {:else}
+        {#if heldPage.unavailable}
+          <p role="status">Some posts on this page could not be verified.</p>
+        {:else if heldPage.items.length === 0}
+          <p>No held posts on this page.</p>
+        {/if}
+        {#if heldPage.items.length}
+          <ul>
+            {#each heldPage.items as item (item.caseId)}
+              <li>
+                <strong>Awaiting review</strong>
+                <p class="message">{item.body.text}</p>
+                <details>
+                  <summary>Signed record details</summary>
+                  <dl>
+                    <dt>Device key</dt><dd>{item.signer}</dd>
+                    <dt>Membership record</dt><dd>{item.admission}</dd>
+                    <dt>Message action</dt><dd>{item.action}</dd>
+                    <dt>Original digest</dt><dd>{item.originalDigest}</dd>
+                    <dt>Removal record</dt><dd>{item.removalHeader}</dd>
+                    {#if item.body.reply_to}<dt>Reply to</dt><dd>{item.body.reply_to}</dd>{/if}
+                  </dl>
+                </details>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if heldPage.next}
+          {@const next = heldPage.next}
+          <button type="button" class="ghost small" onclick={() => void loadHeld(next)}>Next page</button>
+        {/if}
+        {#if heldAfter}
+          <button type="button" class="ghost small" onclick={() => void loadHeld()}>First page</button>
+        {/if}
+      {/if}
     {:else if view === "local" && localPage}
       {#if localPage.items.length === 0}
         <p>No originals saved on this device on this page.</p>

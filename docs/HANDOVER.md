@@ -1,5 +1,39 @@
 # Mewtual; Handover
 
+## View held posts in founder chat history
+
+The founder's Chat history dialog has a read-only Held posts view. It
+shows the exact signed originals that have a covered hold receipt and
+verified removal. Damaged or unwitnessed cases are reported as gaps.
+The scan describes surviving local files. If both files for a case
+are removed while the vault is offline, a surviving optional receipt
+alone cannot prove that the case is missing.
+Continuation tokens stay with the original vault, channel, native
+session and review revision. Native rechecks the original founder
+and row before releasing text.
+
+The App TCP fixture retrieves one withheld post through a survivor
+and reads it after a second founder restart. It verifies that ordinary
+chat cannot display the post and that audit refuses a replaced directory.
+The durable decision journal, application of approvals, first-session
+hold provisioning and final acceptance remain open.
+
+## Recover removed-member posts for founder review
+
+The reopened founder can check one explicitly chosen current member over
+its existing authenticated connection. The request names the original
+removed Admission. The holder offers only that Admission's archived
+Creates. The founder verifies each exact original against the selected
+Remove and checks its own history before holding the post. A duplicate
+keeps the first held original and an independently retained message
+stays in ordinary history.
+
+The three-vault TCP test closes the original founder connection, reopens
+the vault, and retrieves the same removed member's original twice through
+the surviving peer. It checks that the normal message view cannot read
+that post. The main-window command is wired behind the disabled Chat V2
+switch and returns the summary for one checked device.
+
 ## Encrypted storage for removed-member hold cases
 
 A verified founder vault can open a selected review namespace with the
@@ -19,8 +53,7 @@ leaves still agree, with no declaration outputs present.
 The storage entry keeps the ordinary archive locked across the clean
 absence check and hold selection. An independently selected original
 keeps its place in history. First-session founder provisioning,
-approved-holder delivery, signed decisions and the admin view remain
-open. Chat V2 remains disabled.
+signed decisions and the admin view remain open. Chat V2 remains disabled.
 
 An internal declaration can extend a recovered founder's selected hold
 catalog with an empty decision journal. The exact original hold marker,

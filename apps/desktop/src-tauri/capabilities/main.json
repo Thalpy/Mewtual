@@ -49,6 +49,7 @@
     "allow-stop-durable-chat",
     "allow-group-communication-mode",
     "allow-check-invite-routes",
+    "allow-check-native-chat-removed-posts",
     "allow-get-members",
     "allow-get-native-chat-members",
     "allow-get-profiles",

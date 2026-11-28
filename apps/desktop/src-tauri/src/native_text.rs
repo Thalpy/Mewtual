@@ -36,6 +36,7 @@ type Task = std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 pub(super) struct Registry {
     pub(super) selected: bool,
     inflight: Arc<Semaphore>,
+    removed_post_checks: Arc<Semaphore>,
     bootstrap: Arc<StdMutex<Option<boot::Bootstrap>>>,
     retired_authorized: Arc<AtomicU64>,
     retired_lock_requested: Arc<AtomicBool>,
@@ -47,6 +48,7 @@ pub(super) struct Registry {
     rejoin_network_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
     ui_budget: NativeUiInvocationBudget,
     history_budget: NativeTextHistoryResponseBudget,
+    held_review_cursor: StdMutex<Option<history::held_posts::Cursor>>,
     listing: listing::Policy,
     #[cfg(test)]
     listing_reply_edge: StdMutex<Option<Arc<tests::AdmissionBarrier>>>,
@@ -159,6 +161,7 @@ impl Default for Registry {
         Self {
             selected: false,
             inflight: Arc::new(Semaphore::new(1)),
+            removed_post_checks: Arc::new(Semaphore::new(1)),
             bootstrap: Arc::new(StdMutex::new(Some(boot::Bootstrap::Fresh))),
             retired_authorized: Arc::new(AtomicU64::new(0)),
             retired_lock_requested: Arc::new(AtomicBool::new(true)),
@@ -170,6 +173,7 @@ impl Default for Registry {
             rejoin_network_edge: StdMutex::new(None),
             ui_budget,
             history_budget,
+            held_review_cursor: StdMutex::new(None),
             listing: listing::Policy::default(),
             #[cfg(test)]
             listing_reply_edge: StdMutex::new(None),
