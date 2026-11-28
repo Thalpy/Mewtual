@@ -25,9 +25,11 @@ pub(super) use declaration::{recover, require_no_claim_stage};
 #[cfg(test)]
 pub(in crate::store) use fault::{with_receiver_fault, with_receiver_hook, ReceiverFault};
 pub(in crate::store) use journal::pinned_founder;
-pub use journal::{NativeTextReviewApprovalStatus, NativeTextReviewHeaderStatus};
+pub use journal::{
+    NativeTextReviewApprovalStatus, NativeTextReviewHeaderPollStatus, NativeTextReviewHeaderStatus,
+};
 pub(in crate::store) use plan::ApprovalSelection;
-pub(in crate::store) use read::SelectedReceivedApproval;
+pub(in crate::store) use read::{ReviewApprovalScan, ReviewHeaderPoll, SelectedReceivedApproval};
 #[cfg(test)]
 mod fault;
 
@@ -58,17 +60,32 @@ struct HeldManifest {
 }
 
 impl ServerStore {
-    pub(in crate::store) fn next_received_review_header(
+    pub(in crate::store) fn scan_selected_review_approvals(
         &self,
         binding: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
-        check_tip: bool,
-    ) -> Result<Option<u64>, AppError> {
+        cursor: Option<std::ops::RangeInclusive<u64>>,
+    ) -> Result<ReviewApprovalScan, AppError> {
         let mounted = self
             .review_receive_mount
             .try_lock()
             .map_err(review_lock_error)?;
         let Some(mounted) = mounted.as_ref() else {
-            return Ok(None);
+            return Ok((None, None));
+        };
+        mounted.scan_approval_candidates(self, binding, cursor)
+    }
+
+    pub(in crate::store) fn next_received_review_header(
+        &self,
+        binding: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
+        check_tip: bool,
+    ) -> Result<ReviewHeaderPoll, AppError> {
+        let mounted = self
+            .review_receive_mount
+            .try_lock()
+            .map_err(review_lock_error)?;
+        let Some(mounted) = mounted.as_ref() else {
+            return Ok(ReviewHeaderPoll::Unavailable);
         };
         mounted.next_header_poll(self, binding, check_tip)
     }

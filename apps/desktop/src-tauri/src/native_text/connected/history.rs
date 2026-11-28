@@ -4,12 +4,14 @@ use super::*;
 use catcoms_app::store::{
     NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,
     NativeTextJoinedDependencyExchange, NativeTextJoinedDependencyResponse,
-    NativeTextJoinedHistoryPage,
+    NativeTextJoinedHistoryPage, NativeTextReviewApprovalStatus, NativeTextReviewHeaderPollStatus,
+    NativeTextReviewHeaderStatus,
 };
-use catcoms_replication::chat::ActionId;
+use catcoms_replication::chat::{owner_bodies::ReviewStreamEntryId, ActionId};
 use catcoms_rt::TransportError;
 use catcoms_sync::V2_MEMBER_CONTACT_BYTES;
 use std::collections::VecDeque;
+use std::ops::RangeInclusive;
 use std::time::Duration;
 use tokio::task::JoinSet;
 
@@ -21,6 +23,7 @@ const RETRY_MS: u64 = 5_000;
 const RESCAN_MS: u64 = 30_000;
 const REVIEW_POLL_MS: u64 = 5_000;
 const REVIEW_CHECK_TIP_MS: u64 = 30_000;
+const APPROVAL_COMPLETIONS: usize = 64;
 const REPLAY_MS: u64 = 15_000;
 const MAX_ARCHIVE_SWEEP_PAGES: u16 = 256;
 const MAX_ARCHIVE_CONTINUATION_FAILURES: u8 = 3;
@@ -71,7 +74,43 @@ struct ReviewContact {
 
 enum InventoryResult {
     Ordinary(PeerSweep),
-    Review(Option<ReviewContact>),
+    Review {
+        contact: Option<ReviewContact>,
+        frozen: bool,
+    },
+}
+
+enum ReviewNotice {
+    Covered(ActionId),
+    Frozen,
+}
+
+#[derive(Default)]
+struct ApprovalSweep {
+    window: Option<RangeInclusive<u64>>,
+    completed: VecDeque<ReviewStreamEntryId>,
+    due: u64,
+    owe_ordinary: bool,
+}
+
+impl ApprovalSweep {
+    fn selected(
+        &mut self,
+        entry: ReviewStreamEntryId,
+        status: NativeTextReviewApprovalStatus,
+    ) -> Option<ActionId> {
+        use NativeTextReviewApprovalStatus::{Covered, Duplicate};
+        if matches!(status, Covered(_) | Duplicate(_)) {
+            if self.completed.len() == APPROVAL_COMPLETIONS {
+                self.completed.pop_front();
+            }
+            self.completed.push_back(entry);
+        }
+        match status {
+            Covered(action) => Some(action),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -330,6 +369,8 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
     let mut inventory_peer = None;
     let mut review_schedule = ReviewPollSchedule::new(SystemClock.monotonic_ms());
     let mut review_contact = None;
+    let mut review_frozen = false;
+    let mut approvals = ApprovalSweep::default();
     let mut peer_turn_finished = false;
     loop {
         let first_slice = replay
@@ -361,7 +402,17 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
             }
             match finished {
                 Ok(InventoryResult::Ordinary(sweep)) => peers.push_back(sweep),
-                Ok(InventoryResult::Review(contact)) => review_contact = contact,
+                Ok(InventoryResult::Review { contact, frozen }) if !review_frozen => {
+                    if frozen {
+                        review_frozen = true;
+                        review_contact = None;
+                        approvals = ApprovalSweep::default();
+                        source.notify_received(app, &state, None).await;
+                    } else {
+                        review_contact = contact;
+                    }
+                }
+                Ok(InventoryResult::Review { .. }) => {}
                 Err(_) => {}
             }
         }
@@ -451,7 +502,7 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
             }
         }
         let now = SystemClock.monotonic_ms();
-        if inventory.is_empty() {
+        if inventory.is_empty() && !review_frozen {
             let ordinary_due = peers
                 .iter()
                 .any(|sweep| sweep.due_turn(now, true) == Some(HistoryTurn::Discovery));
@@ -462,12 +513,40 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
                 // An exact history exchange can continue while this
                 // inventory request waits for the original founder.
                 inventory.spawn(async move {
-                    InventoryResult::Review(
-                        poll_review_header(&app.state::<AppState>(), &source, check_tip, cached)
-                            .await,
+                    let mut frozen = false;
+                    let contact = poll_review_header(
+                        &app.state::<AppState>(),
+                        &source,
+                        check_tip,
+                        cached,
+                        &mut frozen,
                     )
+                    .await;
+                    InventoryResult::Review { contact, frozen }
                 });
             }
+        }
+        let ordinary_due = peers
+            .iter()
+            .any(|sweep| sweep.due_turn(now, inventory.is_empty()).is_some());
+        if let Some(contact) = review_contact.as_ref().filter(|_| {
+            !review_frozen && now >= approvals.due && !(approvals.owe_ordinary && ordinary_due)
+        }) {
+            approvals.owe_ordinary = true;
+            let result = poll_review_approval(&state, source, contact.card, &mut approvals).await;
+            match result {
+                Some(ReviewNotice::Covered(action)) => {
+                    source.notify_received(app, &state, Some(action)).await;
+                }
+                Some(ReviewNotice::Frozen) => {
+                    review_frozen = true;
+                    review_contact = None;
+                    approvals = ApprovalSweep::default();
+                    source.notify_received(app, &state, None).await;
+                }
+                None => {}
+            }
+            continue;
         }
         let Some((index, kind)) = select_due_turn(
             peers
@@ -477,6 +556,7 @@ pub(super) async fn recover<R: tauri::Runtime>(app: &tauri::AppHandle<R>, source
         ) else {
             continue;
         };
+        approvals.owe_ordinary = false;
         // Local replay can wake early without increasing peer request cadence.
         peer_due = now.saturating_add(TURN.as_millis() as u64);
         let mut sweep = peers.remove(index).expect("selected due history peer");
@@ -507,23 +587,28 @@ async fn poll_review_header(
     source: &Arc<Source>,
     check_tip: bool,
     cached: Option<ReviewContact>,
+    frozen: &mut bool,
 ) -> Option<ReviewContact> {
-    let Some(membership) = with_row_until(
+    let observed = with_row_until(
         state,
         source,
         (Some(local_turn_deadline()), TURN),
         move |original, row, _, scope| {
-            original
-                .review_header_contact_scope(&row, check_tip, &scope)
-                .ok()
-                .flatten()
+            original.review_header_contact_scope(&row, check_tip, &scope)
         },
     )
-    .await
-    .flatten() else {
-        // A transient refusal does not invalidate the bytes for this
-        // original row or justify signing them again on the next turn.
-        return cached;
+    .await;
+    let membership = match observed {
+        Some(Ok(NativeTextReviewHeaderPollStatus::Ready(header, epoch))) => (header, epoch),
+        Some(Ok(NativeTextReviewHeaderPollStatus::Frozen)) => {
+            *frozen = true;
+            return None;
+        }
+        _ => {
+            // A transient refusal does not invalidate the bytes for this
+            // original row or justify signing them again on the next turn.
+            return cached;
+        }
     };
     let contact = match cached.filter(|contact| contact.membership == membership) {
         // Sync revalidates this card with the selected member prefix on
@@ -565,7 +650,7 @@ async fn poll_review_header(
     let Ok(Ok(response)) = tokio::time::timeout(REQUEST, exchange.receive()).await else {
         return Some(contact);
     };
-    let _ = with_row_until(
+    let selected = with_row_until(
         state,
         source,
         (Some(local_turn_deadline()), TURN),
@@ -574,7 +659,73 @@ async fn poll_review_header(
         },
     )
     .await;
-    Some(contact)
+    *frozen = matches!(
+        selected,
+        Some(Ok(Some(NativeTextReviewHeaderStatus::Frozen)))
+    );
+    (!*frozen).then_some(contact)
+}
+
+async fn poll_review_approval(
+    state: &AppState,
+    source: &Arc<Source>,
+    contact: [u8; V2_MEMBER_CONTACT_BYTES],
+    sweep: &mut ApprovalSweep,
+) -> Option<ReviewNotice> {
+    let window = sweep.window.clone();
+    let channel = source.channel();
+    let prepared = with_row_until(
+        state,
+        source,
+        (Some(local_turn_deadline()), TURN),
+        move |original, row, _, scope| {
+            original.prepare_next_review_approval(
+                &row,
+                (channel, window),
+                &contact,
+                scope,
+                &mut OsCryptoRng,
+            )
+        },
+    )
+    .await;
+    let mut delay = REVIEW_POLL_MS;
+    let result = async {
+        let (next, exchange) = prepared?.ok()?;
+        sweep.window = next;
+        if sweep.window.is_none() {
+            delay = RESCAN_MS;
+        }
+        // A gap, unavailable body or missing ordinary parent revisits its
+        // ordinal next pass. Later approved cases can still make progress.
+        let exchange = exchange?;
+        let entry = exchange.approval_entry_data()?;
+        if sweep.completed.contains(&entry) {
+            return None;
+        }
+        let response = tokio::time::timeout(REQUEST, exchange.receive())
+            .await
+            .ok()?
+            .ok()?;
+        let status = with_row_until(
+            state,
+            source,
+            (Some(local_turn_deadline()), TURN),
+            move |original, row, _, scope| {
+                original.select_review_delivery_approval(&row, response, &scope, &mut OsCryptoRng)
+            },
+        )
+        .await?
+        .ok()??;
+        if status == NativeTextReviewApprovalStatus::Frozen {
+            Some(ReviewNotice::Frozen)
+        } else {
+            sweep.selected(entry, status).map(ReviewNotice::Covered)
+        }
+    }
+    .await;
+    sweep.due = SystemClock.monotonic_ms().saturating_add(delay);
+    result
 }
 
 async fn reconcile_archive_change(
@@ -1175,6 +1326,25 @@ mod tests {
         assert_eq!(schedule.start(15_000, true), Some(false));
         schedule.finish(35_000);
         assert_eq!(schedule.start(40_000, false), Some(true));
+    }
+
+    #[test]
+    fn approval_sweep_completes_only_covered_or_duplicate_bodies() {
+        use NativeTextReviewApprovalStatus::{Covered, Duplicate, WaitingForReplyParent};
+        let mut sweep = ApprovalSweep::default();
+        let first = ReviewStreamEntryId::from_bytes_data([1; 32]).unwrap();
+        let deferred = ReviewStreamEntryId::from_bytes_data([2; 32]).unwrap();
+        let duplicate = ReviewStreamEntryId::from_bytes_data([3; 32]).unwrap();
+        let action = ActionId::from_bytes([9; 32]);
+        assert_eq!(sweep.selected(first, Covered(action)), Some(action));
+        assert_eq!(
+            sweep.selected(deferred, WaitingForReplyParent(action)),
+            None
+        );
+        assert_eq!(sweep.selected(duplicate, Duplicate(action)), None);
+        assert!(sweep.completed.contains(&first));
+        assert!(sweep.completed.contains(&duplicate));
+        assert!(!sweep.completed.contains(&deferred));
     }
 
     #[test]

@@ -145,7 +145,7 @@ pub use persistence::governance_layout::joined::rejoin::{
     NativeTextRejoinPrefixReceipt, NativeTextRejoinReceivedReceipt, NativeTextRejoinWelcomeStatus,
 };
 pub use persistence::governance_layout::joined::review_receive::{
-    NativeTextReviewApprovalStatus, NativeTextReviewHeaderStatus,
+    NativeTextReviewApprovalStatus, NativeTextReviewHeaderPollStatus, NativeTextReviewHeaderStatus,
 };
 pub use persistence::v2_member_transport::{
     NativeTextFounderAudit, NativeTextFounderDependencyExchange,

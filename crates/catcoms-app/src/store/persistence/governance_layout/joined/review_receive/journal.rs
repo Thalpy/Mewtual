@@ -38,6 +38,14 @@ pub enum NativeTextReviewHeaderStatus {
     Frozen,
 }
 
+/// Durable review state and the current coordinates for a recipient contact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeTextReviewHeaderPollStatus {
+    Unavailable,
+    Frozen,
+    Ready([u8; 32], u64),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeTextReviewApprovalStatus {
     Covered(ActionId),

@@ -3,8 +3,11 @@
 use super::dependencies::REPLY_FEE;
 use super::*;
 use crate::store::{
-    persistence::governance_layout::joined::review_receive::{pinned_founder, ApprovalSelection},
-    NativeTextInvitePacketData, NativeTextReviewApprovalStatus, NativeTextReviewHeaderStatus,
+    persistence::governance_layout::joined::review_receive::{
+        pinned_founder, ApprovalSelection, ReviewHeaderPoll,
+    },
+    NativeTextInvitePacketData, NativeTextReviewApprovalStatus, NativeTextReviewHeaderPollStatus,
+    NativeTextReviewHeaderStatus,
 };
 use catcoms_net::{
     NativeChatMemberDependencyExchange, NativeChatMemberDependencyObservation,
@@ -12,7 +15,7 @@ use catcoms_net::{
 };
 use catcoms_replication::chat::{
     join_bindings::GenesisAnchorBindingData,
-    owner_bodies::{ReviewStreamQuery, ReviewStreamRecord},
+    owner_bodies::{ReviewStreamEntryId, ReviewStreamQuery, ReviewStreamRecord},
     FounderGenesisAnchorData, V2ReviewedCreateCheck,
 };
 use catcoms_rt::TransportError;
@@ -20,6 +23,7 @@ use catcoms_sync::{
     owner_v2::{PreparedV2ReviewDelivery, V2MemberDependencyRoute, V2ReviewDeliveryData},
     V2MemberContactData, V2_MEMBER_CONTACT_BYTES,
 };
+use std::ops::RangeInclusive;
 
 type Refusal = V2MemberSaveRefusal;
 
@@ -101,6 +105,15 @@ catcoms_rt::redacted_debug! {
 }
 
 impl NativeTextJoinedReviewExchange {
+    /// Scheduling identity for an exact approval. It carries no receipt,
+    /// channel access or permission to fetch another body.
+    pub fn approval_entry_data(&self) -> Option<ReviewStreamEntryId> {
+        match self.context.request.query_data() {
+            ReviewStreamQuery::Approval { entry, .. } => Some(entry),
+            ReviewStreamQuery::Header(_) => None,
+        }
+    }
+
     pub async fn receive(self) -> Result<NativeTextJoinedReviewResponse, TransportError> {
         let Self { carrier, context } = self;
         let frame = context.request.wire_data();
@@ -164,26 +177,95 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 return Ok(None);
             };
             let (pin, _) = source.review_poll_membership()?;
-            let sequence = source
+            let poll = source
                 .store
                 .next_received_review_header(pin, check_tip)
                 .map_err(review_storage_refusal)?;
-            Ok(sequence.map(|sequence| {
-                (
-                    ReviewTarget {
-                        founder,
-                        invite: source.registration.invite,
-                        pin: pinned_founder(pin),
-                    },
-                    ReviewStreamQuery::Header(sequence),
-                )
-            }))
+            let ReviewHeaderPoll::Query(sequence) = poll else {
+                return Ok(None);
+            };
+            Ok(Some((
+                ReviewTarget {
+                    founder,
+                    invite: source.registration.invite,
+                    pin: pinned_founder(pin),
+                },
+                ReviewStreamQuery::Header(sequence),
+            )))
         })?;
         let Some((target, query)) = plan else {
             return Ok(None);
         };
         self.prepare_review_delivery_to(selection, target, (contact, query), caller, rng)
             .map(Some)
+    }
+
+    /// Prepare one exact approval request for the caller's already
+    /// authorized native row channel. The public header does not disclose
+    /// that channel. A body is available only for a matching request.
+    /// Start a pass with `None` and keep
+    /// the returned cursor before awaiting the exchange. No body reply,
+    /// an unavailable ancestor or a lost response leaves the header
+    /// available to retry on the next pass without holding this cursor.
+    pub fn prepare_next_review_approval(
+        self,
+        selection: &NativeTextJoinedRowSelection,
+        (channel, cursor): (u128, Option<RangeInclusive<u64>>),
+        contact: &[u8; V2_MEMBER_CONTACT_BYTES],
+        caller: RequestCancellation,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<
+        (
+            Option<RangeInclusive<u64>>,
+            Option<NativeTextJoinedReviewExchange>,
+        ),
+        Refusal,
+    > {
+        let (next, plan) = self.with_member_receiver(selection, &caller, |source| {
+            let Some(founder) = source.founder else {
+                return Ok((cursor, None));
+            };
+            let (binding, _) = source.review_poll_membership()?;
+            let (next, candidate) = source
+                .store
+                .scan_selected_review_approvals(binding, cursor)
+                .map_err(review_storage_refusal)?;
+            let Some((position, entry)) = candidate else {
+                return Ok((next, None));
+            };
+            if source
+                .node
+                .require_review_membership_anchor(
+                    source.prefix,
+                    (position.membership_header, position.membership_epoch),
+                )
+                .map_err(|_| Refusal::Stale)?
+                != binding
+            {
+                return Err(Refusal::Stale);
+            }
+            let target = ReviewTarget {
+                founder,
+                invite: source.registration.invite,
+                pin: pinned_founder(binding),
+            };
+            let query = ReviewStreamQuery::Approval {
+                sequence: position.sequence,
+                entry,
+                channel,
+            };
+            Ok((next, Some((target, query))))
+        })?;
+        let Some((target, query)) = plan else {
+            return Ok((next, None));
+        };
+        match self.prepare_review_delivery_to(selection, target, (contact, query), caller, rng) {
+            Ok(exchange) => Ok((next, Some(exchange))),
+            // Proven local pressure or no connected founder spends no wire
+            // attempt. Preserve this pass's cursor and revisit on wrap.
+            Err(Refusal::Busy | Refusal::Unavailable) => Ok((next, None)),
+            Err(error) => Err(error),
+        }
     }
 
     /// Check the durable position and connected original founder before
@@ -193,21 +275,30 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         selection: &NativeTextJoinedRowSelection,
         check_tip: bool,
         caller: &RequestCancellation,
-    ) -> Result<Option<([u8; 32], u64)>, Refusal> {
-        let lane = self.dependency_lane()?;
+    ) -> Result<NativeTextReviewHeaderPollStatus, Refusal> {
+        use NativeTextReviewHeaderPollStatus as Status;
+        let lane = self.dependency_lane().ok();
         self.with_member_receiver(selection, caller, |source| {
-            if !source
-                .founder
-                .is_some_and(|peer| lane.capture_inventory(peer).is_some())
-            {
-                return Ok(None);
-            }
             let (binding, position) = source.review_poll_membership()?;
-            let sequence = source
+            let poll = source
                 .store
                 .next_received_review_header(binding, check_tip)
                 .map_err(review_storage_refusal)?;
-            Ok(sequence.map(|_| (*position.0.as_bytes(), position.1)))
+            match poll {
+                ReviewHeaderPoll::Frozen => Ok(Status::Frozen),
+                ReviewHeaderPoll::Unavailable => Ok(Status::Unavailable),
+                ReviewHeaderPoll::Query(_) => {
+                    let connected = source
+                        .founder
+                        .and_then(|peer| lane.as_ref()?.capture_inventory(peer))
+                        .is_some();
+                    Ok(if connected {
+                        Status::Ready(*position.0.as_bytes(), position.1)
+                    } else {
+                        Status::Unavailable
+                    })
+                }
+            }
         })
     }
 

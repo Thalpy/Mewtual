@@ -3246,8 +3246,10 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         read_exchange(exchange, provider).await
                     };
                     let poll = async |check_tip, provider: &mut crate::store::NativeTextFounderDependencyProvider<rand_chacha::ChaCha20Rng>, rng: &mut OsCryptoRng| {
-                        assert!(survivor().review_header_contact_scope(&selection, check_tip, &fresh)
-                            .unwrap().is_some());
+                        assert!(matches!(
+                            survivor().review_header_contact_scope(&selection, check_tip, &fresh),
+                            Ok(crate::store::NativeTextReviewHeaderPollStatus::Ready(..))
+                        ));
                         let exchange = survivor().prepare_next_review_header(
                             &selection, (&contact, check_tip), fresh.clone(), rng,
                         ).unwrap().expect("the original row supplies a checked cursor and founder route");

@@ -76,20 +76,65 @@ impl ReviewLaneRead<'_> {
                 &mut read_header,
             )?
             .ok_or_else(denied)?;
-        let case = self
-            .indexes
-            .lookup(head.cases, Query::Case(step.case_data()), &mut read_page)?
-            .ok_or_else(denied)?;
-        if ordinal != case
-            || &original != supplied
-            || (sequence == head.sequence && supplied.id().as_bytes() != &head.entry)
-        {
+        if &original != supplied {
             return Err(denied());
         }
+        self.require_approval_case(head, ordinal, &original, &mut read_page)?;
         Ok(ApprovalSelection::Selected {
             row: ordinal,
             header: Box::new(original),
         })
+    }
+
+    /// Read a single existing ordinal for a background sweep. Its own
+    /// signature, exact selected ordinal and current case row must all
+    /// agree before it can nominate an approval fetch.
+    pub(super) fn approval_candidate(
+        &self,
+        pin: &FounderGenesisAnchorData,
+        sequence: u64,
+        mut read_page: impl FnMut(PrivateChatPageId) -> Result<Zeroizing<Vec<u8>>, AppError>,
+        mut read_header: impl FnMut([u8; 32]) -> Result<Zeroizing<Vec<u8>>, AppError>,
+    ) -> Result<Option<ReviewStreamEntry>, AppError> {
+        let head = self
+            .head
+            .filter(|head| !head.is_frozen() && (1..=head.sequence).contains(&sequence))
+            .ok_or_else(denied)?;
+        let (row, header) = self
+            .load(
+                pin,
+                head.ordinal,
+                Query::Ordinal(sequence),
+                &mut read_page,
+                &mut read_header,
+            )?
+            .ok_or_else(denied)?;
+        if sequence == head.sequence && row.entry != head.entry {
+            return Err(denied());
+        }
+        if header.case_step_data().ok_or_else(denied)?.choice_data() != ReviewDecision::Approve {
+            return Ok(None);
+        }
+        self.require_approval_case(head, row, &header, &mut read_page)?;
+        Ok(Some(header))
+    }
+
+    fn require_approval_case(
+        &self,
+        head: LaneHead,
+        ordinal: ReceivedReviewIndexValueData,
+        header: &ReviewStreamEntry,
+        read_page: impl FnMut(PrivateChatPageId) -> Result<Zeroizing<Vec<u8>>, AppError>,
+    ) -> Result<(), AppError> {
+        let case = self
+            .indexes
+            .lookup(head.cases, Query::Case(ordinal.case), read_page)?;
+        if case != Some(ordinal)
+            || (ordinal.sequence == head.sequence && header.id().as_bytes() != &head.entry)
+        {
+            return Err(denied());
+        }
+        Ok(())
     }
 
     pub(super) fn plan(
