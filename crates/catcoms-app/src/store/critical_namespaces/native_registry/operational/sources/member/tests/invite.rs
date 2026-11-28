@@ -6419,14 +6419,16 @@ async fn review_hold_native_open_requires_a_real_founder_and_the_held_marker() {
             let directory = store
                 .review_hold_partition_for_test(scope, || Ok(()))
                 .unwrap();
-            let root = directory.parent().unwrap();
-            let displaced = root.with_extension("uncertain-parent");
+            // Windows cannot rename the parent while its child is held
+            // open. Replacing the child exercises the same cached branch
+            // and its recheck after the original parent sync.
+            let displaced = directory.with_extension("parked");
             let mut snapped = false;
             assert!(store
                 .review_hold_partition_for_test(scope, || {
                     snapped = true;
-                    std::fs::rename(root, &displaced).unwrap();
-                    std::fs::create_dir(root).unwrap();
+                    std::fs::rename(&directory, &displaced).unwrap();
+                    std::fs::create_dir(&directory).unwrap();
                     Ok(())
                 })
                 .is_err());
@@ -6434,10 +6436,6 @@ async fn review_hold_native_open_requires_a_real_founder_and_the_held_marker() {
                 snapped,
                 "a cached partition still crosses the parent barrier"
             );
-            std::fs::remove_dir(root).unwrap();
-            std::fs::rename(&displaced, root).unwrap();
-            std::fs::rename(&directory, directory.with_extension("parked")).unwrap();
-            std::fs::create_dir(&directory).unwrap();
             assert!(store
                 .review_hold_partition_for_test(scope, || Ok(()))
                 .is_err());
