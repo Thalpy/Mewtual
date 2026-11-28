@@ -98,7 +98,8 @@ pub use native_registry::{
     NativeTextColdFounderJoinRequest, NativeTextColdFounderJoinRequests,
     NativeTextColdFounderMemberIngress, NativeTextColdFounderMemberReceiver,
     NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt,
-    NativeTextColdFounderSource,
+    NativeTextColdFounderSource, NativeTextFounderReviewExchange, NativeTextFounderReviewPage,
+    NativeTextFounderReviewReply, NativeTextFounderReviewResult, NativeTextFounderReviewSweep,
 };
 pub use native_registry::{
     NativeTextJoinedArchiveDependency, NativeTextJoinedArchiveReplay,

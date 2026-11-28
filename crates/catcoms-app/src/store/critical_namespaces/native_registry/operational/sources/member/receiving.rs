@@ -5,6 +5,10 @@ catcoms_rt::redacted_debug! {
     [R: CryptoRngCore] NativeTextFounderDependencyProvider<R>;
 }
 
+use super::super::super::governed::{
+    NativeTextFounderReviewExchange, NativeTextFounderReviewReply, NativeTextFounderReviewResult,
+    NativeTextFounderReviewSweep,
+};
 use super::*;
 use crate::store::persistence::v2_member_transport::{
     FounderReceiveOperation, FounderReceiveOutcome, FounderReceiveSession,
@@ -17,9 +21,11 @@ use catcoms_net::{
     NativeChatMemberGossip, NativeChatMemberGossipError, NativeChatMemberGossipEvent,
     NativeChatMemberIngress,
 };
+use catcoms_replication::chat::owner_facts::OwnerFactId;
 use catcoms_replication::chat::ActionId;
 use catcoms_rt::{RequestAuthority, Topic};
-use catcoms_sync::owner_v2::MAX_V2_MEMBER_TRANSPORT_BYTES;
+use catcoms_sync::owner_v2::{V2RemovedReviewQuery, MAX_V2_MEMBER_TRANSPORT_BYTES};
+use catcoms_sync::V2_MEMBER_CONTACT_BYTES;
 use tokio::sync::watch;
 
 struct IngressPayment {
@@ -515,6 +521,86 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberJob<T, R> {
             return Err(Refusal::Cancelled);
         }
         result
+    }
+}
+
+impl<R: CryptoRngCore> NativeTextMemberPreparation<catcoms_net::MeshService, R> {
+    /// Capture a review sweep on the current founder row and an explicitly
+    /// approved signed contact. This only borrows an existing connection.
+    pub fn start_founder_removed_review(
+        self,
+        channel: u128,
+        admission: OwnerFactId,
+        contact: [u8; V2_MEMBER_CONTACT_BYTES],
+        caller: &RequestCancellation,
+    ) -> Result<Arc<NativeTextFounderReviewSweep>, V2MemberSaveRefusal> {
+        self.with_recovered_review(caller, |founder, signal, _| {
+            founder.start_removed_review(channel, admission, contact, signal)
+        })
+    }
+
+    /// Release the original restored runtime before awaiting the exact
+    /// inventory or fetch request. Only its negative and payment survive.
+    pub fn prepare_founder_removed_review(
+        self,
+        sweep: Arc<NativeTextFounderReviewSweep>,
+        query: V2RemovedReviewQuery,
+        caller: &RequestCancellation,
+    ) -> Result<NativeTextFounderReviewExchange, V2MemberSaveRefusal> {
+        self.with_recovered_review(caller, |founder, signal, rng| {
+            founder.prepare_removed_review(sweep, query, signal, rng)
+        })
+    }
+
+    /// Reacquire the original selected row before authenticating a received
+    /// review reply. Exact fetches can only produce a local hold receipt.
+    pub fn receive_founder_removed_review(
+        self,
+        reply: NativeTextFounderReviewReply,
+        caller: &RequestCancellation,
+    ) -> Result<NativeTextFounderReviewResult, V2MemberSaveRefusal> {
+        self.with_recovered_review(caller, |founder, signal, rng| {
+            founder.receive_removed_review(reply, signal, rng)
+        })
+    }
+
+    fn with_recovered_review<T>(
+        self,
+        caller: &RequestCancellation,
+        work: impl FnOnce(
+            &mut crate::store::NativeTextColdFounderSource,
+            &RequestCancellation,
+            &mut R,
+        ) -> Result<T, AppError>,
+    ) -> Result<T, V2MemberSaveRefusal> {
+        use V2MemberSaveRefusal as Refusal;
+        let (cell, mut keys) = self.prepare_keys()?;
+        let source = keys.member_entry().1.observe_current();
+        let signal = connected::constrain_founder_transport(
+            self.scope.clone(),
+            source,
+            caller.clone(),
+            None,
+        );
+        let mut job = self.finish_prepared((cell, keys))?;
+        let inner = &mut job.inner;
+        inner.require_current().map_err(|_| Refusal::Cancelled)?;
+        let body = inner.loan.body.as_mut().ok_or(Refusal::Unavailable)?;
+        let founder = body
+            .recovered_founder
+            .as_mut()
+            .ok_or(Refusal::Unavailable)?;
+        let rng = body.rng.as_mut().ok_or(Refusal::Unavailable)?;
+        let result = work(founder, &signal, rng);
+        inner.loan.recorded = true;
+        inner.require_current().map_err(|_| Refusal::Cancelled)?;
+        if signal.is_cancelled() {
+            return Err(Refusal::Cancelled);
+        }
+        result.map_err(|error| match error {
+            AppError::ChatV2ArchiveBusy => Refusal::Busy,
+            _ => Refusal::Failed,
+        })
     }
 }
 
