@@ -1945,6 +1945,10 @@ fn removed_create_evidence_names_the_selected_remove_and_keeps_signature_bytes()
 
 #[test]
 fn removed_reply_requires_verified_dependencies_and_never_admits_a_delete() {
+    use crate::chat::owner_bodies::{
+        ExactReviewDecisionBody, ExactReviewOriginal, ReviewDecision, ReviewDecisionBody,
+        ReviewSpec,
+    };
     let mut f = Fixture::new();
     let key = DeviceKeypair::from_seed(&[109; 32]);
     let other = DeviceKeypair::from_seed(&[110; 32]);
@@ -1988,6 +1992,53 @@ fn removed_reply_requires_verified_dependencies_and_never_admits_a_delete() {
         .verify_removed_create_for_review(&original, &frozen, &ledger, &view, &[])
         .unwrap();
     assert_eq!(waiting.waiting_for_reply_parent_data(), Some(parent.id()));
+    let held_bytes = waiting.encode_record_data(&original).unwrap();
+    let held = V2RemovedCreateRecord::decode(&held_bytes).unwrap();
+    assert_eq!(
+        f.verifier
+            .verify_removed_create_record_for_audit(&held, &frozen)
+            .unwrap(),
+        reply
+    );
+    let incorrect_remove = held.removal_data().0;
+    let mut wrong_held = held_bytes.to_vec();
+    let offset = wrong_held
+        .windows(incorrect_remove.as_bytes().len())
+        .position(|window| window == incorrect_remove.as_bytes())
+        .unwrap();
+    wrong_held[offset] ^= 1;
+    let wrong_held = V2RemovedCreateRecord::decode(&wrong_held).unwrap();
+    assert!(matches!(
+        f.verifier
+            .verify_removed_create_record_for_audit(&wrong_held, &frozen),
+        Err(ChatError::Scope)
+    ));
+    let (remove_header, remove_epoch) = waiting.removal_data();
+    let exact = ExactReviewOriginal {
+        digest: waiting.original_digest_data(),
+        remove_header,
+        remove_epoch,
+    };
+    let decide = |decision| {
+        ExactReviewDecisionBody::new(
+            ReviewDecisionBody::new(ReviewSpec {
+                target: waiting.target_data().clone(),
+                intent: [76; 16],
+                decision,
+                previous: None,
+            })
+            .unwrap(),
+            exact,
+        )
+        .unwrap()
+    };
+    let approve = decide(ReviewDecision::Approve);
+    let reject = decide(ReviewDecision::Reject);
+    assert_eq!(
+        approve.require_evidence_data(&waiting),
+        Err(ChatError::Dependency)
+    );
+    reject.require_evidence_data(&waiting).unwrap();
     ledger.import(parent.clone()).unwrap();
     let unverified = f
         .verifier
@@ -1998,12 +2049,52 @@ fn removed_reply_requires_verified_dependencies_and_never_admits_a_delete() {
         unverified.waiting_for_reply_parent_data(),
         Some(parent.id())
     );
+    assert_eq!(
+        approve.require_evidence_data(&unverified),
+        Err(ChatError::Dependency)
+    );
     retain(&f, &mut ledger, &parent, &parent_author, &[]);
     let ready = f
         .verifier
         .verify_removed_create_for_review(&original, &frozen, &ledger, &view, &[])
         .unwrap();
     assert_eq!(ready.waiting_for_reply_parent_data(), None);
+    approve.require_evidence_data(&ready).unwrap();
+    let record = ready.encode_record_data(&original).unwrap();
+    approve
+        .require_record_data(&V2RemovedCreateRecord::decode(&record).unwrap())
+        .unwrap();
+    // An independently signed Ed25519 variant of this deterministic
+    // fixture, checked by the external verifier as well as this verifier.
+    // The test seed and alternate nonce are from test data only.
+    let alternate_signature = [
+        0xe2, 0xfe, 0x2a, 0x39, 0xb7, 0x32, 0x66, 0x42, 0x82, 0x7d, 0x6d, 0x82, 0xd4, 0x97, 0x62,
+        0x2c, 0xd6, 0xc2, 0x97, 0xfe, 0x78, 0x27, 0x0e, 0xaa, 0x43, 0x6b, 0x01, 0xf0, 0x86, 0xb6,
+        0xf3, 0xcb, 0x5b, 0x06, 0xd3, 0xcd, 0xaf, 0xa5, 0x77, 0xbf, 0xfa, 0xc0, 0x54, 0x06, 0xf9,
+        0x5e, 0xa2, 0xee, 0x94, 0x30, 0x7b, 0x83, 0x8b, 0x9f, 0xe6, 0x36, 0xb4, 0x2b, 0x08, 0x62,
+        0xbb, 0x2d, 0xc7, 0x07,
+    ];
+    let mut alternate = original.clone();
+    let signature_offset = alternate.len() - alternate_signature.len();
+    alternate[signature_offset..].copy_from_slice(&alternate_signature);
+    let alternate_action = SignedAction::decode(&alternate).unwrap();
+    assert!(alternate_action.verify());
+    assert_eq!(reply.id(), alternate_action.id());
+    let alternate_evidence = f
+        .verifier
+        .verify_removed_create_for_review(&alternate, &frozen, &ledger, &view, &[])
+        .unwrap();
+    assert_eq!(alternate_evidence.case_data(), ready.case_data());
+    assert_eq!(alternate_evidence.waiting_for_reply_parent_data(), None);
+    assert_eq!(
+        approve.require_evidence_data(&alternate_evidence),
+        Err(ChatError::Scope)
+    );
+    let other_record = alternate_evidence.encode_record_data(&alternate).unwrap();
+    assert_eq!(
+        approve.require_record_data(&V2RemovedCreateRecord::decode(&other_record).unwrap()),
+        Err(ChatError::Scope)
+    );
     assert_eq!(ready.case_data(), waiting.case_data());
     assert_eq!(ready.original_digest_data(), waiting.original_digest_data());
     assert_eq!(

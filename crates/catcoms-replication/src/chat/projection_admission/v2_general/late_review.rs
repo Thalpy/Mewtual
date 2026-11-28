@@ -209,6 +209,30 @@ impl<'a> V2RemovedCreateRecord<'a> {
 }
 
 impl V2GeneralPrefixVerifier {
+    /// Reprove a retained case's signed original against the current selected
+    /// historical author and Remove. This read does not assess reply ancestry,
+    /// prove covered storage selection, or return publication authority.
+    pub fn verify_removed_create_record_for_audit(
+        &self,
+        record: &V2RemovedCreateRecord<'_>,
+        author: &V2FrozenAdmission,
+    ) -> Result<SignedAction, ChatError> {
+        let removal = self.removed_review_coordinates(author)?;
+        if record.removal_data() != removal
+            || record.target_data().spec().context != author.cut.tip.context
+        {
+            return Err(ChatError::Scope);
+        }
+        let action = SignedAction::decode(record.original_bytes_data())?;
+        author
+            .admission
+            .core
+            .body
+            .matches_action_delegation(&action)?;
+        self.live()?;
+        Ok(action)
+    }
+
     /// Recheck a transient withholding result at the same selected issuer.
     /// Reloaded or advanced hosts reverify the original evidence instead.
     pub fn require_current_removed_create(
