@@ -22,6 +22,13 @@ keeps its place in history. First-session founder provisioning,
 approved-holder delivery, signed decisions and the admin view remain
 open. Chat V2 remains disabled.
 
+An internal declaration can extend a recovered founder's selected hold
+catalog with an empty decision journal. The exact original hold marker,
+joined pins and archive must still agree when cold recovery selects the
+new catalog. Startup can read that format but does not provision it
+automatically. An ID10-only build refuses a vault once ID11 is selected.
+The decision writer, approval delivery and activation remain open.
+
 ## Rejoin from the retired native session
 
 The rejoin form passes a signed invite and the numeric IP that the user

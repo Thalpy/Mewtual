@@ -5809,6 +5809,9 @@ pub struct ServerStore {
     review_hold_mount: std::sync::Mutex<
         Option<persistence::governance_layout::joined::review_hold::SelectedReviewHold>,
     >,
+    review_decision_mount: std::sync::Mutex<
+        Option<persistence::governance_layout::joined::review_decision::SelectedReviewDecision>,
+    >,
     // Namespace5 marker + held member-outbox parent, installed only by the concrete configured
     // handler. Its presence is mount DATA, never a member-source or save permission.
     member_outbox_layout: std::sync::Mutex<
@@ -6067,6 +6070,7 @@ impl ServerStore {
             installed_rejoin: Default::default(),
             shared_history_mount: Default::default(),
             review_hold_mount: Default::default(),
+            review_decision_mount: Default::default(),
             member_outbox_layout: Default::default(),
             member_outbox_mount: Default::default(),
             current_layout: Default::default(),

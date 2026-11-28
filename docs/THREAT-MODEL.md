@@ -4278,6 +4278,16 @@ selection does not establish when another device received an original.
 Remote originals under an obsolete Admission still require separate
 authorization evidence. Local outbox ancestry carries no display effect.
 
+The empty ID11 decision namespace succeeds only the founder's authenticated
+ID10 catalog. Its recovery seed uses a separate key and domain. Declaration
+retains the original ID10 marker and directory, shared history, pin and native
+founder leaves through exact Stage selection. A foreign claim, crossed
+marker, unexpected entry or unsupported opener stops before the journal
+can acquire authority. Once selected, ID11 prevents an ID10-only binary
+from treating the vault as an older layout. Native startup does not yet
+provision it automatically, and an empty journal supplies no decision or
+message admission.
+
 ## Chat history admission and retained audit (20 October, continuation)
 
 Legacy operation ingress now refuses a 32-byte Automerge actor that differs from its verified

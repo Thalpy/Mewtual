@@ -2,6 +2,13 @@
 //! only an already settled Current3 parent or its exact seeded Current4 successor.
 use super::*;
 
+pub(in crate::store) struct JoinedCatalogDescriptors<'a> {
+    pub(in crate::store) layout: archive_current_namespace_codec::CurrentLayoutData,
+    pub(in crate::store) shared_history: Option<&'a [u8]>,
+    pub(in crate::store) review_hold: Option<&'a [u8]>,
+    pub(in crate::store) review_decision: Option<&'a [u8]>,
+}
+
 fn summary(
     store: &ServerStore,
     key: &[u8; 32],
@@ -28,29 +35,23 @@ impl ServerStore {
         &self,
         plain: &[u8],
     ) -> Result<archive_current_namespace_codec::CurrentLayoutData, AppError> {
-        Ok(self.parse_joined_catalog_descriptors(plain)?.0)
+        Ok(self.parse_joined_catalog_descriptors(plain)?.layout)
     }
 
     pub(in crate::store) fn parse_joined_catalog_descriptors<'a>(
         &self,
         plain: &'a [u8],
-    ) -> Result<
-        (
-            archive_current_namespace_codec::CurrentLayoutData,
-            Option<&'a [u8]>,
-            Option<&'a [u8]>,
-        ),
-        AppError,
-    > {
+    ) -> Result<JoinedCatalogDescriptors<'a>, AppError> {
         if !self.uses_joined_pin_layout() {
             return Err(refused());
         }
         let parsed = self.parse_configured_join_catalog(plain)?;
-        Ok((
-            parsed.current_layout.ok_or_else(refused)?,
-            parsed.shared_history_payload,
-            parsed.review_hold_payload,
-        ))
+        Ok(JoinedCatalogDescriptors {
+            layout: parsed.current_layout.ok_or_else(refused)?,
+            shared_history: parsed.shared_history_payload,
+            review_hold: parsed.review_hold_payload,
+            review_decision: parsed.review_decision_payload,
+        })
     }
 
     pub(in crate::store) fn prepare_governance_layout_declaration(

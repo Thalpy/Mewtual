@@ -5,6 +5,7 @@ mod work;
 use crate::store::critical_namespaces::native_registry::lifecycle::{
     cell, founder, network, refresh, rename,
 };
+use crate::store::critical_namespaces::review_hold_namespace::declaration::ReviewDeclarationKind;
 use std::sync::Mutex;
 pub(in crate::store::critical_namespaces::native_registry) use work::WorkDrain;
 use work::{Slot, SlotAck};
@@ -211,7 +212,8 @@ impl Physical {
             return Ok(false);
         };
         self.require_recovered_cold_founder(&founder)?;
-        let mut declaration = store.prepare_founder_review_declaration(rng)?;
+        let mut declaration =
+            store.prepare_founder_review_declaration(ReviewDeclarationKind::Hold, rng)?;
         declaration.select(store)?;
         Ok(true)
     }

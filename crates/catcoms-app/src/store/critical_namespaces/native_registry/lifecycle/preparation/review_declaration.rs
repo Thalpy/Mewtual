@@ -5,6 +5,7 @@ use crate::store::{
     critical_namespaces::{
         archive_bootstrap::{MountedRoot, ROOT_METADATA_FEE},
         archive_current_namespace_codec::CurrentLayoutData,
+        review_hold_namespace::declaration::ReviewDeclarationKind,
     },
     persistence::native_registry::lifecycle::review_declaration::ReviewDeclarationInventory,
     RetainedBootstrapSourceData, ServerStore,
@@ -23,7 +24,10 @@ pub(in crate::store) struct VerifiedFounderReviewParent {
 impl VerifiedFounderReviewParent {
     /// This proves unchanged founder leaves only. The declaration separately
     /// authenticates the exact Current/Stage/claim relationship before any IO.
-    pub(in crate::store) fn capture(store: &ServerStore) -> Result<Self, AppError> {
+    pub(in crate::store) fn capture(
+        store: &ServerStore,
+        kind: ReviewDeclarationKind,
+    ) -> Result<Self, AppError> {
         let policy = store
             .governance_layout_policy
             .as_ref()
@@ -35,8 +39,19 @@ impl VerifiedFounderReviewParent {
         let original = NativeCapabilityData::for_current_data(layout, &layout.encode_data()?)?;
         let key = Zeroizing::new(store.keys.db_key()?);
         let plain = Zeroizing::new(unseal(&key, &unframe(native.catalog().0)?)?);
-        let parsed = grammar::parse_review_hold_family(&plain, &layout.vault, true)?;
+        let parsed = match kind {
+            ReviewDeclarationKind::Hold => {
+                grammar::parse_review_hold_family(&plain, &layout.vault, true)
+            }
+            ReviewDeclarationKind::Decision => {
+                grammar::parse_review_decision_family(&plain, &layout.vault, true)
+                    .or_else(|_| grammar::parse_review_hold_family(&plain, &layout.vault, true))
+            }
+        }?;
         if parsed.current_layout != Some(layout) || parsed.count != 0 {
+            return Err(refused());
+        }
+        if kind == ReviewDeclarationKind::Decision && parsed.review_hold_payload.is_none() {
             return Err(refused());
         }
         let index = authenticate_fixed_index(

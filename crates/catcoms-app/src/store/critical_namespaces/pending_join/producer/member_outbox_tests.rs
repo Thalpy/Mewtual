@@ -343,17 +343,20 @@ fn native_registry_join_successor_refuses_lost_changed_or_unknown_seven() {
 }
 
 #[test]
-fn review_hold_join_rewrite_keeps_id10_and_successor_refuses_loss() {
+fn review_join_rewrite_keeps_hold_and_decision_descriptors_and_refuses_loss() {
     let raw = catalog(&[4, 5]);
     let mut parsed = codec::parse_all_known_for_test(&raw, &VAULT, false).unwrap();
     let mut target = parsed.rows[0].as_ref().unwrap().metadata.clone();
     target.revision += 1;
     target.scheduling = codec::Scheduling::Active;
     let review = &b"selected founder review namespace"[..];
+    let decisions = &b"selected founder decision namespace"[..];
     parsed.review_hold_payload = Some(review);
+    parsed.review_decision_payload = Some(decisions);
     let candidate = encode_schedule(&parsed, &target, &VAULT).unwrap();
     let mut expected = entries(&raw).into_iter().skip(1).collect::<Vec<_>>();
     expected.push((10, 1, review.to_vec()));
+    expected.push((11, 1, decisions.to_vec()));
     assert_eq!(
         entries(&candidate).into_iter().skip(1).collect::<Vec<_>>(),
         expected
@@ -365,6 +368,9 @@ fn review_hold_join_rewrite_keeps_id10_and_successor_refuses_loss() {
     next.parent = Some(original.digest);
     next.rows[0] = Some(target);
     codec::successor(&original, &next).unwrap();
+    let mut replaced = next.clone();
+    replaced.review_decision_payload_digest = None;
+    assert!(codec::successor(&original, &replaced).is_err());
     next.review_hold_payload_digest = None;
     assert!(codec::successor(&original, &next).is_err());
 }

@@ -50,6 +50,17 @@ IDs at a stream position supply fork evidence even when the decision bodies are 
 The original anchor and selected membership lineage come from the independently verified
 vault or join pin.
 
+The private journal record frames the versioned domain, the signed stream
+entry, the exact decision and the retained original as four bounded,
+length-prefixed fields. Its decoder checks the pinned signature, the
+decision digest and the original's signature and removal tuple. A cold
+writer must rebuild the unsigned entry from the independently selected
+membership, journal predecessor and decision, compare it to the covered
+Attempt bytes, and only then attach the retained Raw signature. A decoded
+record still needs selected membership ancestry and a selected case head.
+Rejected and reopened originals remain private even when a complete record
+can be authenticated.
+
 Production selection needs a separate critical journal with its own head, intent outcomes
 and resource limits. It must cover the exact original, body and resulting head before it
 publishes an approval. An observed founder fork pauses further review effects and retains
@@ -57,8 +68,15 @@ the signed evidence. Ordinary message admission and selected membership stay ind
 Only approved originals and the proof needed to check them are eligible for ordinary
 delivery. Full rejected and reopened case details remain in the founder audit.
 
-The signed frame provides format and linkage checks. The journal, historical membership
-proof, selected case lookup, fork persistence and delivery admission remain open.
+The ID11 storage declaration reserves a separate journal in a recovered
+founder's ID10 catalog. It preserves the occupied descriptors and uses a new
+keyed marker and a domain-specific declaration seed. Cold startup proves
+the covered claim, exact original hold and the empty selected directory.
+It can recover an admitted declaration, but ordinary founder startup does
+not provision the journal before the decision writer is integrated. An
+older ID10-only build refuses once ID11 is selected. The decision writer,
+historical membership proof, selected case lookup, fork persistence and
+delivery admission remain open.
 
 An explicit selected Review Approve supplies a separate EXACT REVIEWED admission route after a
 removal. It does not append to/change the frozen accepted-log cut or prove accepted-before-removal.

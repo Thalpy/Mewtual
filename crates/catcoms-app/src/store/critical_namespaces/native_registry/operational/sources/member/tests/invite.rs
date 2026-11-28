@@ -6051,7 +6051,9 @@ async fn review_hold_native_open_requires_a_real_founder_and_the_held_marker() {
     use super::super::super::tests::selected_joined;
     use crate::store::critical_namespaces::{
         native_registry::preparation::tests::{current_policy, SECRET},
-        pending_join_codec as grammar, review_hold_namespace as review, Slot,
+        pending_join_codec as grammar,
+        review_hold_namespace::{self as review, declaration::ReviewDeclarationKind},
+        Slot,
     };
     use crate::store::persistence::governance_layout::joined::review_hold::{
         DIRECTORY_NAME, MARKER_NAME,
@@ -6088,7 +6090,7 @@ async fn review_hold_native_open_requires_a_real_founder_and_the_held_marker() {
         let store = ordinary.actual_store_for_test().unwrap();
         let key = zeroize::Zeroizing::new(store.keys.db_key().unwrap());
         let domain = store.chat_vault_domain().unwrap();
-        let proof = crate::store::critical_namespaces::native_registry::VerifiedFounderReviewParent::capture(store);
+        let proof = crate::store::critical_namespaces::native_registry::VerifiedFounderReviewParent::capture(store, ReviewDeclarationKind::Hold);
         if founder {
             let proof = proof.unwrap();
             assert_eq!(proof.layout().vault, domain);
@@ -6117,7 +6119,7 @@ async fn review_hold_native_open_requires_a_real_founder_and_the_held_marker() {
                 .join("chat-critical-namespaces.review-hold.claim");
             let raw = std::fs::read(&current).unwrap();
             let draft = store
-                .prepare_founder_review_declaration(&mut rng)
+                .prepare_founder_review_declaration(ReviewDeclarationKind::Hold, &mut rng)
                 .expect("prepare the genuine founder claim");
             let mut corrupt = draft.seed_for_test().to_vec();
             let torn = corrupt[..corrupt.len() - 1].to_vec();
@@ -6160,7 +6162,9 @@ async fn review_hold_native_open_requires_a_real_founder_and_the_held_marker() {
             assert_eq!(std::fs::read(&current).unwrap(), raw);
             assert!(!scratch.exists());
             let store = ordinary.actual_store_for_test().unwrap();
-            let mut declaration = store.prepare_founder_review_declaration(&mut rng).unwrap();
+            let mut declaration = store
+                .prepare_founder_review_declaration(ReviewDeclarationKind::Hold, &mut rng)
+                .unwrap();
             declaration
                 .stage_for_test(store)
                 .expect("cover the claim, 32-byte marker and genuine catalog Stage");
@@ -6285,4 +6289,97 @@ async fn review_hold_native_open_requires_a_real_founder_and_the_held_marker() {
         assert_eq!(std::fs::read(&current).unwrap(), selected);
         assert_eq!(std::fs::read(&marker_path).unwrap(), marker);
     }
+}
+
+#[tokio::test]
+async fn review_decision_native_cold_selection_requires_the_original_hold_and_an_empty_journal() {
+    use super::super::super::tests::selected_joined;
+    use crate::store::critical_namespaces::{
+        governance_layout::GOVERNANCE_SEED,
+        native_registry::preparation::tests::{current_policy, SECRET},
+        pending_join_codec as grammar,
+        review_hold_namespace::declaration::ReviewDeclarationKind,
+        Slot,
+    };
+    use crate::store::persistence::governance_layout::joined::review_hold::MARKER_NAME;
+    use crate::store::NativeTextJoinedStorage;
+    use rand_core::SeedableRng;
+
+    let root = tempfile::tempdir().unwrap();
+    let (vault, budget) = selected_joined(root.path());
+    let (sources, row) = active(&vault, &budget, 0x1511);
+    let mut retirement = sources.prepare_retirement().unwrap();
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while retirement.try_retire().unwrap()
+            == crate::store::NativeTextSourceRetirementStatus::Pending
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    drop((retirement, row, sources, vault, budget));
+
+    let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0x1510);
+    let open = |rng: &mut rand_chacha::ChaCha20Rng| {
+        NativeTextJoinedStorage::open_for_native_startup(root.path(), SECRET, rng, current_policy())
+    };
+    let ordinary = open(&mut rng).unwrap();
+    assert!(ordinary
+        .select_review_storage_before_founder_startup(&mut rng)
+        .unwrap());
+    drop(ordinary);
+    let held = open(&mut rng).unwrap();
+    let store = held.actual_store_for_test().unwrap();
+    assert!(store.has_mounted_review_hold().unwrap());
+    assert!(!store.has_mounted_review_decision().unwrap());
+    let key = zeroize::Zeroizing::new(store.keys.db_key().unwrap());
+    let domain = store.chat_vault_domain().unwrap();
+    let marker_path = root.path().join(MARKER_NAME);
+    let marker = std::fs::read(&marker_path).unwrap();
+    let current_path = root.path().join(Slot::Current.name());
+    let old = std::fs::read(&current_path).unwrap();
+    let mut declaration = store
+        .prepare_founder_review_declaration(ReviewDeclarationKind::Decision, &mut rng)
+        .unwrap();
+    declaration.stage_for_test(store).unwrap();
+    drop(declaration);
+    drop(held);
+
+    let stage = root.path().join(Slot::Stage.name());
+    let candidate = std::fs::read(&stage).unwrap();
+    let claim = root.path().join(GOVERNANCE_SEED);
+    let original_claim = std::fs::read(&claim).unwrap();
+    let mut crossed = marker.clone();
+    crossed[0] ^= 1;
+    std::fs::write(&marker_path, crossed).unwrap();
+    assert!(open(&mut rng).is_err());
+    assert_eq!(std::fs::read(&current_path).unwrap(), old);
+    assert_eq!(std::fs::read(&stage).unwrap(), candidate);
+    assert_eq!(std::fs::read(&claim).unwrap(), original_claim);
+    std::fs::write(&marker_path, &marker).unwrap();
+
+    let selected = open(&mut rng).expect("cold startup selects exactly the covered ID11 Stage");
+    let store = selected.actual_store_for_test().unwrap();
+    assert!(store.has_mounted_review_hold().unwrap());
+    assert!(store.has_mounted_review_decision().unwrap());
+    assert!(!selected
+        .select_review_storage_before_founder_startup(&mut rng)
+        .unwrap());
+    assert_eq!(selected.row_count_data().unwrap(), 1);
+    assert_eq!(std::fs::read(&current_path).unwrap(), candidate);
+    assert_eq!(std::fs::read(&marker_path).unwrap(), marker);
+    assert!(!stage.exists());
+    assert!(!claim.exists());
+    let plain = zeroize::Zeroizing::new(
+        catcoms_crypto::unseal(&key, &crate::store::unframe(&candidate).unwrap()).unwrap(),
+    );
+    assert!(grammar::parse_native_review_startup(&plain, &domain, true).is_err());
+    assert!(grammar::parse_review_decision_family(&plain, &domain, true).is_ok());
+    drop(selected);
+    let debris = root.path().join("chat-v2-review-decisions/torn-record");
+    std::fs::write(&debris, b"torn decision record").unwrap();
+    assert!(open(&mut rng).is_err());
+    assert_eq!(std::fs::read(debris).unwrap(), b"torn decision record");
+    assert_eq!(std::fs::read(current_path).unwrap(), candidate);
 }

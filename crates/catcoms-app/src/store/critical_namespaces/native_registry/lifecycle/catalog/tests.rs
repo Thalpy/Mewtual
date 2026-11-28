@@ -441,12 +441,53 @@ fn review_hold_namespace_preserves_the_exact_base_and_refuses_id9() {
 }
 
 #[test]
+fn decision_namespace_is_an_explicit_successor_of_the_original_hold_catalog() {
+    use crate::store::critical_namespaces::{
+        review_decision_namespace as decisions, review_hold_namespace as holds,
+        shared_history_namespace as history,
+    };
+    let (joined, _) = joined_catalog();
+    let shared = history::prepare_declaration(&joined, &VAULT).unwrap();
+    assert!(decisions::prepare_declaration(&shared, &VAULT).is_err());
+    let held = holds::prepare_declaration(&shared, &VAULT).unwrap();
+    let selected = decisions::prepare_declaration(&held, &VAULT).unwrap();
+    decisions::verify_declaration(&held, &selected, &VAULT).unwrap();
+    assert!(grammar::parse_review_hold_family(&selected, &VAULT, true).is_err());
+    assert!(grammar::parse_native_rejoin_startup(&selected, &VAULT, true).is_err());
+    assert!(grammar::parse_review_decision_family(&held, &VAULT, true).is_err());
+    assert!(decisions::prepare_declaration(&selected, &VAULT).is_err());
+
+    let parsed = grammar::parse_review_decision_family(&selected, &VAULT, true).unwrap();
+    let descriptor = parsed.review_decision_payload.unwrap();
+    assert_eq!(
+        parsed.review_hold_payload,
+        grammar::parse_review_hold_family(&held, &VAULT, true)
+            .unwrap()
+            .review_hold_payload,
+    );
+    let key = [11; 32];
+    assert_ne!(
+        decisions::marker_data(&key, descriptor).unwrap(),
+        holds::marker_data(&key, descriptor).unwrap(),
+    );
+    assert!(decisions::verify_declaration(&held, &selected, &[1; 32]).is_err());
+    let mut altered = descriptor.to_vec();
+    altered[0] ^= 1;
+    for (version, payload) in [(2, descriptor), (decisions::VERSION, altered.as_slice())] {
+        let malformed =
+            catalog_declaration::insert_entry_data(&held, &VAULT, decisions::ID, version, payload)
+                .unwrap();
+        assert!(grammar::parse_review_decision_family(&malformed, &VAULT, true).is_err());
+    }
+}
+
+#[test]
 fn founder_review_seed_replays_the_exact_predecessor_and_requires_each_leaf() {
     use crate::store::critical_namespaces::{
         archive_current_namespace_codec::CurrentLayoutData,
         rejoin_namespace,
         review_hold_namespace::declaration::{
-            AuthenticatedSeed, FounderLeaves, PreparedDeclaration,
+            AuthenticatedSeed, FounderLeaves, PreparedDeclaration, ReviewDeclarationKind,
         },
         shared_history_namespace,
     };
@@ -469,15 +510,21 @@ fn founder_review_seed_replays_the_exact_predecessor_and_requires_each_leaf() {
         pins: [3; 32],
         history: [4; 32],
     };
-    let prepared = PreparedDeclaration::prepare(&key, &original, layout, leaves, &mut rng).unwrap();
+    let kind = ReviewDeclarationKind::Hold;
+    let prepared =
+        PreparedDeclaration::prepare(kind, &key, &original, layout, leaves, &mut rng).unwrap();
     for end in 0..prepared.seed.len() {
         assert!(AuthenticatedSeed::is_incomplete_scratch(
+            kind,
             &prepared.seed[..end]
         ));
     }
-    assert!(!AuthenticatedSeed::is_incomplete_scratch(&prepared.seed));
-    assert!(!AuthenticatedSeed::is_incomplete_scratch(b"unknown"));
-    let seed = AuthenticatedSeed::open(&key, &prepared.seed).unwrap();
+    assert!(!AuthenticatedSeed::is_incomplete_scratch(
+        kind,
+        &prepared.seed
+    ));
+    assert!(!AuthenticatedSeed::is_incomplete_scratch(kind, b"unknown"));
+    let seed = AuthenticatedSeed::open(kind, &key, &prepared.seed).unwrap();
     let recovered = seed.validate(&key, layout, leaves).unwrap();
     assert_eq!(recovered.original, original);
     assert_eq!(recovered.candidate, prepared.candidate.as_slice());
@@ -507,13 +554,34 @@ fn founder_review_seed_replays_the_exact_predecessor_and_requires_each_leaf() {
         ..layout
     };
     assert!(seed.validate(&key, wrong, leaves).is_err());
-    assert!(AuthenticatedSeed::open(&[90; 32], &prepared.seed).is_err());
+    assert!(AuthenticatedSeed::open(kind, &[90; 32], &prepared.seed).is_err());
+    let decision_kind = ReviewDeclarationKind::Decision;
+    assert!(AuthenticatedSeed::open(decision_kind, &key, &prepared.seed).is_err());
+    assert!(
+        PreparedDeclaration::prepare(decision_kind, &key, &original, layout, leaves, &mut rng)
+            .is_err()
+    );
+    let decision = PreparedDeclaration::prepare(
+        decision_kind,
+        &key,
+        &prepared.candidate,
+        layout,
+        leaves,
+        &mut rng,
+    )
+    .unwrap();
+    assert!(AuthenticatedSeed::open(kind, &key, &decision.seed).is_err());
+    let decision_seed = AuthenticatedSeed::open(decision_kind, &key, &decision.seed).unwrap();
+    let next = decision_seed.validate(&key, layout, leaves).unwrap();
+    assert_eq!(next.original, recovered.candidate);
+    assert_eq!(next.candidate, decision.candidate.as_slice());
+    assert_ne!(next.marker, recovered.marker);
     let mut tainted = prepared.seed;
     *tainted.last_mut().unwrap() ^= 1;
-    assert!(!AuthenticatedSeed::is_incomplete_scratch(&tainted));
-    assert!(AuthenticatedSeed::open(&key, &tainted).is_err());
+    assert!(!AuthenticatedSeed::is_incomplete_scratch(kind, &tainted));
+    assert!(AuthenticatedSeed::open(kind, &key, &tainted).is_err());
 
     let a2 = rejoin_namespace::prepare_declaration(&old, &VAULT).unwrap();
     let frame = frame(&seal(&key, &a2, &mut rng).unwrap());
-    assert!(PreparedDeclaration::prepare(&key, &frame, layout, leaves, &mut rng).is_err());
+    assert!(PreparedDeclaration::prepare(kind, &key, &frame, layout, leaves, &mut rng).is_err());
 }

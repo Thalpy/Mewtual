@@ -126,12 +126,12 @@ impl ServerStore {
         opened.validate_original(self)?;
         let key = Zeroizing::new(self.keys.db_key()?);
         let plain = Zeroizing::new(unseal(&key, &unframe(&declaration.prepared.candidate)?)?);
-        let (layout, descriptor, review) = self.parse_joined_catalog_descriptors(&plain)?;
-        if review.is_some() {
+        let parsed = self.parse_joined_catalog_descriptors(&plain)?;
+        if parsed.review_hold.is_some() || parsed.review_decision.is_some() {
             return Err(denied());
         }
-        let descriptor = descriptor.ok_or_else(denied)?;
-        let mounted = SelectedSharedHistory::capture(self, descriptor, layout, &key)?;
+        let descriptor = parsed.shared_history.ok_or_else(denied)?;
+        let mounted = SelectedSharedHistory::capture(self, descriptor, parsed.layout, &key)?;
         let expected_marker = declaration.marker.as_ref().ok_or_else(denied)?;
         if expected_marker.identity != Some(session_id(&mounted.marker.0).map_err(io)?) {
             return Err(denied());

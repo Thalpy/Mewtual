@@ -951,8 +951,12 @@ Remove Header and epoch. Its predecessor is the previous exact wrapper body ID. 
 rederived reply ancestry under the current verifier. `ReviewStreamEntry` supplies the separately
 signed position and exact membership anchor, using the pinned founder key. The audit record
 proof can recheck the signed original and frozen removal without evaluating parent readiness
-or storage durability. Stream selection, durable decisions and native commands remain to be
-implemented. [Exact contract](communication-recovery/CHAT-OWNER-V2-REVIEW-DECISION.md).
+or storage durability. The internal ID11 declaration consumes a verified founder's ID10
+catalog and keeps all preceding descriptors exact. The native founder startup reader
+can recover the covered declaration and mount an empty decision directory. Ordinary
+startup leaves existing vaults on their original format. Stream selection, durable
+decisions and native commands remain to be implemented.
+[Exact contract](communication-recovery/CHAT-OWNER-V2-REVIEW-DECISION.md).
 
 ## Guarded current chat projection core (5 November; authored, unexecuted)
 

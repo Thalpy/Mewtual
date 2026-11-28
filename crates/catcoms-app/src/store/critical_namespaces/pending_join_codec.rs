@@ -109,6 +109,7 @@ pub(super) struct Parsed<'a> {
     pub(super) shared_history_payload: Option<&'a [u8]>,
     pub(super) rejoin_payload: Option<&'a [u8]>,
     pub(super) review_hold_payload: Option<&'a [u8]>,
+    pub(super) review_decision_payload: Option<&'a [u8]>,
 }
 
 /// Fixed, inert classification retained after dropping a complete plaintext. Digest equality
@@ -137,6 +138,7 @@ pub(in crate::store) struct Summary {
     pub(super) shared_history_payload_digest: Option<[u8; 32]>,
     pub(super) rejoin_payload_digest: Option<[u8; 32]>,
     pub(super) review_hold_payload_digest: Option<[u8; 32]>,
+    pub(super) review_decision_payload_digest: Option<[u8; 32]>,
 }
 impl Parsed<'_> {
     pub(super) fn summary(&self, framed: [u8; 32]) -> Summary {
@@ -177,6 +179,9 @@ impl Parsed<'_> {
                 .map(|bytes| *blake3::hash(bytes).as_bytes()),
             review_hold_payload_digest: self
                 .review_hold_payload
+                .map(|bytes| *blake3::hash(bytes).as_bytes()),
+            review_decision_payload_digest: self
+                .review_decision_payload
                 .map(|bytes| *blake3::hash(bytes).as_bytes()),
         }
     }
@@ -221,6 +226,7 @@ struct SupportedLayout {
     shared_history: bool,
     rejoin: bool,
     review_hold: bool,
+    review_decisions: bool,
 }
 impl SupportedLayout {
     const PENDING_ONLY: Self = Self {
@@ -234,6 +240,7 @@ impl SupportedLayout {
         shared_history: false,
         rejoin: false,
         review_hold: false,
+        review_decisions: false,
     };
     const ARCHIVE_BOOTSTRAP: Self = Self {
         archive: true,
@@ -439,6 +446,28 @@ pub(super) fn parse_review_hold_family<'a>(
     domain: &[u8; 32],
     executing: bool,
 ) -> Result<Parsed<'a>, AppError> {
+    parse_founder_review_family(plain, domain, executing, false)
+}
+
+/// Opt in to ID11 only from its separate physical declaration handler.
+pub(super) fn parse_review_decision_family<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+) -> Result<Parsed<'a>, AppError> {
+    let parsed = parse_founder_review_family(plain, domain, executing, true)?;
+    if parsed.review_decision_payload.is_none() || parsed.count != 0 {
+        return Err(refused());
+    }
+    Ok(parsed)
+}
+
+fn parse_founder_review_family<'a>(
+    plain: &'a [u8],
+    domain: &[u8; 32],
+    executing: bool,
+    review_decisions: bool,
+) -> Result<Parsed<'a>, AppError> {
     let parsed = parse_known(
         plain,
         domain,
@@ -446,6 +475,7 @@ pub(super) fn parse_review_hold_family<'a>(
             joined_pin: true,
             shared_history: true,
             review_hold: true,
+            review_decisions,
             ..SupportedLayout::GOVERNANCE_LAYOUT
                 .executing(executing)
                 .member_outbox(true)
@@ -645,6 +675,7 @@ fn parse_known<'a>(
             shared_history_payload: None,
             rejoin_payload: None,
             review_hold_payload: None,
+            review_decision_payload: None,
         });
     }
     let mut rows = std::array::from_fn(|_| None);
@@ -664,6 +695,7 @@ fn parse_known<'a>(
     let mut shared_history_payload = None;
     let mut rejoin_payload = None;
     let mut review_hold_payload = None;
+    let mut review_decision_payload = None;
     for index in 0..envelope.count {
         let entry = envelope.entry(index)?;
         match entry.id {
@@ -817,6 +849,18 @@ fn parse_known<'a>(
                 )?;
                 review_hold_payload = Some(entry.payload);
             }
+            super::review_decision_namespace::ID
+                if layout.review_decisions
+                    && entry.version == super::review_decision_namespace::VERSION =>
+            {
+                super::review_decision_namespace::verify_descriptor(
+                    entry.payload,
+                    current_layout.ok_or_else(refused)?,
+                    shared_history_payload.ok_or_else(refused)?,
+                    review_hold_payload.ok_or_else(refused)?,
+                )?;
+                review_decision_payload = Some(entry.payload);
+            }
             _ => return Err(refused()),
         }
     }
@@ -841,6 +885,7 @@ fn parse_known<'a>(
         shared_history_payload,
         rejoin_payload,
         review_hold_payload,
+        review_decision_payload,
     })
 }
 
@@ -1032,6 +1077,7 @@ pub(super) fn successor(current: &Summary, next: &Summary) -> Result<(), AppErro
         || current.shared_history_payload_digest != next.shared_history_payload_digest
         || current.rejoin_payload_digest != next.rejoin_payload_digest
         || current.review_hold_payload_digest != next.review_hold_payload_digest
+        || current.review_decision_payload_digest != next.review_decision_payload_digest
     {
         return Err(refused());
     }
