@@ -28,8 +28,8 @@ pub(in crate::store) use disk::{
     SharedHistoryActionQuery, SharedHistoryTargetSnapshot,
 };
 pub(in crate::store) use replay::{
-    SharedHistoryMessageSelection, SharedHistoryProjectionLease, SharedHistoryReplay,
-    SharedHistoryReplayCredit, ARCHIVED_LEDGER_LIMITS, ARCHIVED_PROJECTION_WORK,
+    SharedHistoryProjectionLease, SharedHistoryReplay, SharedHistoryReplayCredit,
+    SharedHistoryTargetSelection, ARCHIVED_LEDGER_LIMITS, ARCHIVED_PROJECTION_WORK,
 };
 
 const TAG: &[u8] = b"catcoms/private-chat-v2-shared-history-record/v1\0";

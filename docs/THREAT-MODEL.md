@@ -4355,6 +4355,15 @@ admitted effect. Recovery rechecks the old selector, exact immutable
 outputs and the single index change before retiring the pending record.
 Ordinary ID8 and publication authority remain separate.
 
+An exact joined display can use a covered receipt after a healthy ID8
+lookup establishes that the Create is absent. The selected case,
+original signature and membership lineage are rechecked in a detached
+archive view. At final native publication both the ordinary absence and
+the group-specific receipt observation must still be current. A new
+ordinary archive write or a conflicting review selection can revoke the
+prepared view. The reviewed copy grants no authority to sign, mutate,
+serve the post as an ordinary original, or supply a new reply parent.
+
 The first private selection checks the same exact Raw, signing files
 and held original under the founder loan. An authenticated write-ahead
 file commits the encrypted immutable record, the intent and case index
@@ -4373,8 +4382,9 @@ unreachable before removal. The selected head and exact file handles
 remain held through retirement. The immutable decision records stay
 available for original-intent recovery. The connected route can disclose the
 exact selected Approve proof to a current member. The joined member can
-cover its own receipt for that original. Rendering uses a separate
-admission path that remains open.
+cover its own receipt for that original. Exact-ID display uses the
+separate guarded archive path described above. History discovery and
+renderer invalidation after a review conflict remain open.
 
 ## Chat history admission and retained audit (20 October, continuation)
 

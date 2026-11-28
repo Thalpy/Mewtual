@@ -15,15 +15,19 @@ mod journal;
 mod lane_head;
 mod manifest;
 mod objects;
+mod observation;
 mod plan;
+mod read;
 mod transaction_check;
 mod wal;
 mod write;
 pub(super) use declaration::{recover, require_no_claim_stage};
 #[cfg(test)]
 pub(in crate::store) use fault::{with_receiver_fault, with_receiver_hook, ReceiverFault};
+pub(in crate::store) use journal::pinned_founder;
 pub use journal::{NativeTextReviewApprovalStatus, NativeTextReviewHeaderStatus};
 pub(in crate::store) use plan::ApprovalSelection;
+pub(in crate::store) use read::SelectedReceivedApproval;
 #[cfg(test)]
 mod fault;
 
@@ -42,6 +46,7 @@ pub(in crate::store) struct SelectedReviewReceiver {
     marker: OpenedArchiveObject,
     directory: HeldDirectory,
     mount: PhysicalMountNegative,
+    publication: observation::ReviewPublicationFences,
     _fee: CatalogReadReservation,
 }
 
@@ -53,6 +58,29 @@ struct HeldManifest {
 }
 
 impl ServerStore {
+    pub(in crate::store) fn has_mounted_review_receiver(&self) -> Result<bool, AppError> {
+        Ok(self
+            .review_receive_mount
+            .try_lock()
+            .map_err(review_lock_error)?
+            .is_some())
+    }
+
+    pub(in crate::store) fn read_received_review_approval(
+        &self,
+        binding: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
+        target: (u128, catcoms_replication::chat::ActionId),
+    ) -> Result<Option<SelectedReceivedApproval>, AppError> {
+        let mounted = self
+            .review_receive_mount
+            .try_lock()
+            .map_err(review_lock_error)?;
+        let Some(mounted) = mounted.as_ref() else {
+            return Ok(None);
+        };
+        mounted.read_approval(self, binding, target)
+    }
+
     pub(in crate::store) fn check_received_review_approval(
         &self,
         binding: &catcoms_replication::chat::join_bindings::GenesisAnchorBindingData,
@@ -127,7 +155,7 @@ impl SelectedReviewReceiver {
         key: &[u8; 32],
     ) -> Result<Self, AppError> {
         let policy = store.governance_layout_policy.as_ref().ok_or_else(denied)?;
-        let fee = policy.current.archive.pending.pool.try_reserve(16 * 1024)?;
+        let fee = policy.current.archive.pending.pool.try_reserve(80 * 1024)?;
         let expected = critical_namespaces::review_receive_namespace::marker_data(key, descriptor)?;
         let marker =
             read(&fixed(store, false, MARKER_NAME)?, expected.len())?.ok_or_else(denied)?;
@@ -139,6 +167,7 @@ impl SelectedReviewReceiver {
             marker,
             directory,
             mount: store.capture_physical_mount_negative(),
+            publication: Default::default(),
             _fee: fee,
         };
         captured.require(store)?;

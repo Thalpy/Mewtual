@@ -358,6 +358,7 @@ impl NativeTextColdFounderSource {
                                 selected,
                                 _view: view,
                                 _ledger: ledger,
+                                review: None,
                                 _invocation: None,
                                 _fee: fee,
                                 _replay: replay,

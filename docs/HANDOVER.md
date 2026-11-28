@@ -23,9 +23,16 @@ reply parent so the caller can retry. The encrypted receipt has a separate
 action index. Exact retries and cold recovery preserve the selected copy
 without changing ordinary history.
 
-First-session initialization for a new join, automatic polling, projection,
-admin actions and combined acceptance are still open. The desktop Chat V2
-switch remains off.
+An exact joined history lookup can use the approved copy after a verified
+ordinary archive miss. It rechecks the receipt, original membership,
+Remove and any ordinary reply parent before producing the display. The
+original archive absence and receipt selection both stay current through
+publication. Normal archive discovery and history refresh still need a way
+to enumerate approved originals.
+
+First-session initialization for a new join, automatic polling and approval
+fetch, admin actions and combined acceptance are still open. The desktop
+Chat V2 switch remains off.
 
 ## View held posts in founder chat history
 

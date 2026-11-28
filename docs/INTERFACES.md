@@ -4,6 +4,11 @@ Native Chat V2 selected-message reads accept a Create ID and resolve its
 complete current archive snapshot. The body is withheld if the snapshot
 is incomplete, damaged or stale. Temporary resource pressure can be
 retried. Audit and discovery continuations remain paged.
+If selected ordinary history establishes an exact miss, a joined lookup
+can read the same Create ID from a covered approval receipt. The native
+reply uses the same message schema. The approval lookup also requires
+the correct channel and the still-selected receipt and governing history.
+Ordinary archive pages still enumerate their own selected operations.
 
 Chat V2 history discovery uses the existing connected dependency class with
 its own authenticated page format. The joined-source methods prepare a page

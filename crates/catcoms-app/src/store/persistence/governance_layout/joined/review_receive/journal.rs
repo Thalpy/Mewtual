@@ -47,7 +47,9 @@ pub enum NativeTextReviewApprovalStatus {
     Frozen,
 }
 
-fn pinned_founder(anchor: &GenesisAnchorBindingData) -> FounderGenesisAnchorData {
+pub(in crate::store) fn pinned_founder(
+    anchor: &GenesisAnchorBindingData,
+) -> FounderGenesisAnchorData {
     FounderGenesisAnchorData {
         group: anchor.group.clone(),
         founder: anchor.founder,
@@ -462,6 +464,7 @@ impl SelectedReviewReceiver {
         require_exact_held(&scratch, &mut file, &covered)?;
         require()?;
         absent(&path)?;
+        self.publication.invalidate(scope)?;
         key.mark_admitted(&mut covered);
         finish_exact_write(&scratch, &mut file, &covered)?;
         self.directory.require()?;
@@ -490,6 +493,7 @@ impl SelectedReviewReceiver {
         if scope.as_bytes() != &work.scope {
             return Err(denied());
         }
+        self.publication.invalidate(scope)?;
         // Only the canonical write-ahead file attests that all live checks
         // passed at admission. Completing these exact metadata writes never
         // relies on the old member still being able to sign or receive.

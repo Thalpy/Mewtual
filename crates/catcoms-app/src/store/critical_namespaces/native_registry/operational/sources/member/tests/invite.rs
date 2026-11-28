@@ -13,6 +13,8 @@ use catcoms_rt::{Clock, SystemClock};
 use std::cell::Cell;
 use std::time::Duration;
 
+mod review_projection;
+
 struct TestArchiveAdmission;
 
 impl crate::store::FounderArchiveAdmission for TestArchiveAdmission {
@@ -2946,44 +2948,13 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     // while the covered review still names the old epoch.
                     let invitation = prepare().finish().unwrap().save_invite([0xb2; 32], 60_000, &fresh).unwrap();
                     let packet = crate::store::NativeTextInvitePacketData::decode(invitation.packet_bytes_data()).unwrap();
-                    let join = catcoms_sync::PreparedV2JoinRequest::prepare(
-                        catcoms_mls::MlsDevice::generate().unwrap(),
-                        &packet.binding().spec_data().anchor,
-                        packet.binding(),
-                        [0xb3; 32],
+                    let fourth = Box::pin(review_projection::LaterReceiver::join(
+                        prepare,
+                        &packet,
                         invitation.expires_at_ms() - 1,
-                        catcoms_sync::DirectJoinLimits::new(512 * 1024, 512 * 1024, 64 * 1024).unwrap(),
-                    ).unwrap();
-                    let (probe, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
-                    let address = packet.direct_address_data(std::net::Ipv4Addr::LOCALHOST.into());
-                    assert_eq!(
-                        probe.dial_outcome(address.parse().unwrap()).await.unwrap(),
-                        catcoms_rt::DialSubmission::Submitted,
-                    );
-                    let peer = packet.connected_peer_data();
-                    let mut requests = prepare().open_connected_join_requests(fresh.clone()).unwrap();
-                    tokio::time::timeout(std::time::Duration::from_secs(15), async {
-                        probe.wait_for_peer_connected(peer).await.unwrap();
-                        let mut frame = vec![catcoms_rt::CHAT_V2_JOIN_KIND];
-                        frame.extend_from_slice(join.request_bytes_data());
-                        let send = probe.request_connected(
-                            peer,
-                            crate::store::critical_namespaces::native_registry::operational::governed::JOIN_PROTOCOL,
-                            bytes::Bytes::from(frame),
-                        );
-                        let serve = async {
-                            let Some(TransportEvent::Request {
-                                proto, data, responder, ..
-                            }) = requests.next().await else {
-                                panic!("the reopened founder receives the fresh JoinRequest");
-                            };
-                            prepare().serve_connected_join_request(proto, &data, responder, fresh.clone())
-                        };
-                        let (response, served) = tokio::join!(send, serve);
-                        served.expect("the recovered founder selects the next real MLS Add");
-                        assert!(!response.unwrap().is_empty());
-                    }).await.expect("the recovered native connected join completes");
-                    drop((requests, probe));
+                        &fresh,
+                        seed + 6,
+                    )).await;
                     let retire = async |vault, sources: Owner, recovered_row| {
                         let mut retiring = sources.prepare_retirement().unwrap();
                         tokio::time::timeout(std::time::Duration::from_secs(8), async {
@@ -3192,7 +3163,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                             remove_epoch: other_case.removal.1,
                         }),
                         [0xb8; 16],
-                        ReviewDecision::Reject,
+                        ReviewDecision::Approve,
                     )).unwrap();
                     assert_eq!(other.position_data().sequence, 4);
                     assert_eq!(other.position_data().previous, Some(approved.id()));
@@ -3241,6 +3212,13 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     // different channel from the retained approval.
                     let other_channel = channel ^ 1;
                     let mut provider = founder().attach_founder_dependency_provider(other_channel, fresh.clone()).unwrap();
+                    Box::pin(fourth.check_projection(
+                        founder,
+                        &mut provider,
+                        &packet,
+                        (&other, other_action, channel),
+                        &fresh,
+                    )).await;
                     let anchor = &invite.binding().spec_data().anchor;
                     let pin = catcoms_replication::chat::FounderGenesisAnchorData {
                         group: anchor.group.clone(),
@@ -3436,7 +3414,24 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     assert!(!recovered_receiver.select_review_storage_before_joined_startup(&mut history_rng).unwrap());
                     assert!(!pending.exists());
                     assert_ne!(std::fs::read(&manifest).unwrap(), before);
-                    assert_eq!(std::fs::read(approval_receipt.0).unwrap(), approval_receipt.1);
+                    assert_eq!(std::fs::read(&approval_receipt.0).unwrap(), approval_receipt.1);
+                    let store = recovered_receiver.actual_store_for_test().unwrap();
+                    let cold_receipt = store.read_received_review_approval(anchor, (channel, action))
+                        .unwrap().expect("the original approved receipt is reachable after reopen");
+                    let record = ReviewStreamRecord::decode_public_approval(
+                        &pin, approved.id(), &cold_receipt.raw,
+                    ).unwrap();
+                    assert_eq!(record.held_data().target_data().spec().action, action);
+                    assert_eq!(record.held_data().target_data().spec().context.admission, third_own);
+                    assert_eq!(record.held_data().removal_data(), (removed_head, removed_epoch));
+                    drop(cold_receipt);
+                    let parked = approval_receipt.0.with_extension("parked");
+                    let selector = std::fs::read(&manifest).unwrap();
+                    std::fs::rename(&approval_receipt.0, &parked).unwrap();
+                    assert!(store.read_received_review_approval(anchor, (channel, action)).is_err());
+                    assert!(!approval_receipt.0.exists());
+                    assert_eq!(std::fs::read(&manifest).unwrap(), selector);
+                    std::fs::rename(&parked, approval_receipt.0).unwrap();
                     drop(recovered_receiver);
                     retire(vault, sources, recovered_row).await;
                     // Lose every child of the original mounted journal,

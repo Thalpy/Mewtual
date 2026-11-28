@@ -15,7 +15,7 @@ const MAX_VAULT_BYTES: u64 = 512 * 1024 * 1024;
 const FORK_RESERVE: u64 = 64 * 1024;
 const PER_FILE: u64 = 4096;
 // The existing joined pin inventory supplies the same scope bound.
-const MAX_SCOPES: usize = 256;
+pub(super) const MAX_SCOPES: usize = 256;
 pub(super) const MAX_MANIFEST_BYTES: usize =
     SEAL_BYTES + 4 + DOMAIN.len() + 2 + MAX_SCOPES * ROW_BYTES;
 

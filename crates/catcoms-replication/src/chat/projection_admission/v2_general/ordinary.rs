@@ -1,5 +1,6 @@
 //! Exact ordinary dependency/delegation verification and separate effect issuance.
 use super::*;
+use crate::chat::owner_bodies::{ReviewStreamEntry, ReviewStreamRecord};
 use crate::chat::owner_facts::OwnerFactId;
 
 // A detached host replay can retain ancestry from the entire bounded membership prefix.
@@ -251,7 +252,15 @@ impl V2GeneralPrefixVerifier {
         verified: VerifiedAuthorityBasis,
         token: ProjectionAdmissionToken,
     ) -> Result<ActionState, ChatError> {
-        let state = Self::apply_verified(ledger, action, work, verified)?;
+        let id = Self::retain_exact_original(ledger, action)?;
+        if token.is_reviewed_archive() {
+            ledger
+                .entries
+                .get_mut(&id)
+                .ok_or(ChatError::Unknown)?
+                .reviewed_only = true;
+        }
+        let state = Self::advance_verified(ledger, id, work, verified)?;
         if state == ActionState::Valid {
             ledger.admit_projection(&token, work)?;
         }
@@ -264,6 +273,14 @@ impl V2GeneralPrefixVerifier {
         work: usize,
         verified: VerifiedAuthorityBasis,
     ) -> Result<ActionState, ChatError> {
+        let id = Self::retain_exact_original(ledger, action)?;
+        Self::advance_verified(ledger, id, work, verified)
+    }
+
+    fn retain_exact_original(
+        ledger: &mut ChatLedger,
+        action: &SignedAction,
+    ) -> Result<ActionId, ChatError> {
         let id = action.id();
         match ledger.action(id) {
             Some(original) if original == action => {}
@@ -277,6 +294,15 @@ impl V2GeneralPrefixVerifier {
                 })?;
             }
         }
+        Ok(id)
+    }
+
+    fn advance_verified(
+        ledger: &mut ChatLedger,
+        id: ActionId,
+        work: usize,
+        verified: VerifiedAuthorityBasis,
+    ) -> Result<ActionState, ChatError> {
         ledger.authorize(id, verified)?;
         ledger.advance(work);
         ledger.state(id).ok_or(ChatError::Unknown)
@@ -577,14 +603,102 @@ impl V2GeneralPrefixVerifier {
             admission,
             digest,
         } = original;
-        self.apply_local_archive_original(
+        let status = self.apply_local_archive_original(
             ledger,
             view,
             (action, admission),
             retired,
             work,
             (DependencyEvidence::ArchiveDisplay, Some(digest)),
-        )
+        )?;
+        // A reviewed reply can borrow only a selected ordinary Create.
+        if matches!(action.spec().body, Body::Create { .. }) {
+            self.mark_locally_selected_ancestor(ledger, action, admission, &status)?;
+        }
+        Ok(status)
+    }
+
+    /// Display one exact Create from a physically selected review receipt.
+    ///
+    /// The host authenticates the receipt, the selected ordinal and case,
+    /// and the membership anchor before calling this method. It must give
+    /// an ordinary selected Create precedence and retain both archive
+    /// observations through publication. The original receipt and this
+    /// detached view cannot authorize an OPEN or LOG effect.
+    /// Replay into a fresh ledger. An already retained different signature
+    /// for this Create refuses instead of replacing the approved original.
+    pub fn project_selected_reviewed_create(
+        &self,
+        (ledger, view): (&mut ChatLedger, &ProjectionView),
+        scope: (&FounderGenesisAnchorData, (OwnerHeaderId, u64)),
+        approval: (&ReviewStreamEntry, &ReviewStreamRecord<'_>),
+        author: &V2FrozenAdmission,
+        retired: &[&V2FrozenAdmission],
+        work: usize,
+    ) -> Result<V2OrdinaryReceiveStatus, ChatError> {
+        if !view.life.local_archive {
+            return Err(ChatError::Scope);
+        }
+        let (selected, record) = approval;
+        let target = record.held_data().target_data().spec();
+        if ledger.entries.get(&target.action).is_some_and(|entry| {
+            entry.projection.as_ref().is_some_and(|prior| {
+                !prior.is_reviewed_archive()
+                    && prior.live_for(&view.life, target.action, &entry.action)
+            })
+        }) {
+            return Err(ChatError::AuthorityConflict);
+        }
+        match self.check_selected_reviewed_create(
+            scope,
+            approval,
+            author,
+            (ledger, view),
+            retired,
+        )? {
+            V2ReviewedCreateCheck::WaitingForReplyParent(parent) => {
+                return Ok(V2OrdinaryReceiveStatus::WaitingForDependencies(vec![
+                    parent,
+                ]));
+            }
+            V2ReviewedCreateCheck::Ready(checked) => {
+                self.require_current_reviewed_create(&checked, selected)?;
+            }
+        }
+        // Keep semantic validation and exact projection admission distinct.
+        // No local ancestry marker is installed for the reviewed original.
+        let action = SignedAction::decode(record.held_data().original_bytes_data())?;
+        let LedgerDependencies { missing, exact } = self.ledger_dependencies(
+            ledger,
+            &action,
+            retired,
+            DependencyEvidence::LocallySelectedAncestors,
+        )?;
+        if !missing.is_empty() {
+            return Err(ChatError::Dependency);
+        }
+        let dependencies = exact
+            .iter()
+            .map(|(original, owner)| V2OrdinaryDependency::new(original, owner))
+            .collect::<Vec<_>>();
+        let verified = self.verify_action_semantics(&action, &author.admission, &dependencies)?;
+        let token = ProjectionAdmissionToken {
+            binding: ActionBinding::of(action.id(), &action),
+            context: EvidenceContext::V2Ordinary {
+                profile: self.math.profile().id(),
+                admission: target.context.admission,
+                tenure: self.math.profile().tenure(),
+            },
+            view: view.life.clone(),
+            open: None,
+            support: ProjectionSupport::ReviewedArchive {
+                entry: selected.id(),
+                signature: *action.signature(),
+                origin: self.origin.clone(),
+            },
+        };
+        let state = Self::apply_provisional(ledger, &action, work, verified, token)?;
+        Ok(V2OrdinaryReceiveStatus::Retained(state))
     }
 
     /// A local outbox original may also be an exact ancestry input. It
@@ -629,7 +743,18 @@ impl V2GeneralPrefixVerifier {
             work,
             (DependencyEvidence::LocallySelectedAncestors, None),
         )?;
-        if status == V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
+        self.mark_locally_selected_ancestor(ledger, action, admission, &status)?;
+        Ok(status)
+    }
+
+    fn mark_locally_selected_ancestor(
+        &self,
+        ledger: &mut ChatLedger,
+        action: &SignedAction,
+        admission: OwnerFactId,
+        status: &V2OrdinaryReceiveStatus,
+    ) -> Result<(), ChatError> {
+        if *status == V2OrdinaryReceiveStatus::Retained(ActionState::Valid) {
             if !ledger.matches_valid_ordinary_original(action, admission) {
                 return Err(ChatError::AuthorityConflict);
             }
@@ -643,7 +768,7 @@ impl V2GeneralPrefixVerifier {
                 signature: *action.signature(),
             });
         }
-        Ok(status)
+        Ok(())
     }
 
     /// True for a current verified dependency or this same verifier's
@@ -682,7 +807,7 @@ impl V2GeneralPrefixVerifier {
         let expected = self.math.profile();
         *profile == expected.id()
             && *tenure == expected.tenure()
-            && (self.admission(*admission).is_ok()
+            && ((!entry.reviewed_only && self.admission(*admission).is_ok())
                 || self.matches_local_ancestor(entry, *admission))
     }
 
@@ -831,6 +956,16 @@ impl V2GeneralPrefixVerifier {
             };
             if *origin != profile.id() || *tenure != profile.tenure() {
                 return Err(ChatError::Scope);
+            }
+            // Only an independent ordinary archive receipt can supply
+            // ancestry here. Review alone does not authorize a parent
+            // or mutation target, even after archive view replacement.
+            if entry.reviewed_only && !self.matches_local_ancestor(entry, *owner) {
+                if action.spec().body.create() == Some(id) {
+                    return Err(ChatError::Permission);
+                }
+                missing.push(id);
+                continue;
             }
             let admission = match self.admission(*owner) {
                 Ok(current) => current,

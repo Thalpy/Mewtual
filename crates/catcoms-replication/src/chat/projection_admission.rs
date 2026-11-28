@@ -61,6 +61,19 @@ pub(super) struct ProjectionState {
     realm: RealmId,
 }
 impl ProjectionState {
+    pub(super) fn protects_reviewed_signature(
+        &self,
+        token: &ProjectionAdmissionToken,
+        id: ActionId,
+        retained: &SignedAction,
+    ) -> bool {
+        token.is_reviewed_archive()
+            && self
+                .current
+                .as_ref()
+                .is_some_and(|view| token.live_for(view, id, retained))
+    }
+
     pub(super) fn new(realm: RealmId) -> Self {
         Self {
             gate: Arc::new(RwLock::new(())),
@@ -627,6 +640,11 @@ enum ProjectionSupport {
         original: [u8; 32],
         origin: V2ProjectionOrigin,
     },
+    ReviewedArchive {
+        entry: owner_bodies::ReviewStreamEntryId,
+        signature: [u8; 64],
+        origin: V2ProjectionOrigin,
+    },
     GeneralAccepted {
         record: owner_bodies::AcceptanceRecordId,
         leaf_index: u64,
@@ -648,6 +666,7 @@ impl ProjectionSupport {
             Self::FounderCreate { origin, .. }
             | Self::GeneralOpen { origin }
             | Self::LocalArchive { origin, .. }
+            | Self::ReviewedArchive { origin, .. }
             | Self::GeneralAccepted { origin, .. } => Some(origin),
         }
     }
@@ -658,6 +677,7 @@ impl ProjectionSupport {
             Self::FounderCreate { origin, .. }
             | Self::GeneralOpen { origin }
             | Self::LocalArchive { origin, .. }
+            | Self::ReviewedArchive { origin, .. }
             | Self::GeneralAccepted { origin, .. } => origin.live(),
         }
     }
@@ -693,6 +713,18 @@ impl ProjectionSupport {
                 },
             ) => a == b && ao.same_original(bo),
             (
+                Self::ReviewedArchive {
+                    entry: ae,
+                    signature: asig,
+                    origin: ao,
+                },
+                Self::ReviewedArchive {
+                    entry: be,
+                    signature: bsig,
+                    origin: bo,
+                },
+            ) => ae == be && asig == bsig && ao.same_original(bo),
+            (
                 Self::GeneralAccepted {
                     record: ar,
                     leaf_index: ai,
@@ -714,7 +746,24 @@ impl ProjectionSupport {
             Self::FounderCreate { .. }
             | Self::GeneralOpen { .. }
             | Self::LocalArchive { .. }
+            | Self::ReviewedArchive { .. }
             | Self::GeneralAccepted { .. } => None,
+        }
+    }
+
+    fn is_archive(&self) -> bool {
+        matches!(
+            self,
+            Self::LocalArchive { .. } | Self::ReviewedArchive { .. }
+        )
+    }
+
+    fn matches_review_original(&self, action: &SignedAction) -> bool {
+        match self {
+            Self::ReviewedArchive { signature, .. } => {
+                matches!(action.spec().body, Body::Create { .. }) && action.signature() == signature
+            }
+            _ => true,
         }
     }
 }
@@ -723,7 +772,8 @@ impl ProjectionSupport {
 /// status-bool adapter. The V2 founder verifier issues only accepted Create effects inside
 /// this boundary after checking exact signed lineage, delegated semantics and inclusion.
 /// The separate general verifier issues Provisional ordinary effects and non-Delete LOG
-/// inclusion. Exact Proven V2 Delete custody/Review remain separately closed.
+/// inclusion. A selected review can support only the exact detached archive Create.
+/// Exact Proven V2 Delete custody remains separately closed.
 /// Its view binding is identity/support, not issuance revision: unrelated OPEN closure must not
 /// revoke accepted/reviewed support when the next original projection lease is captured.
 #[derive(Clone)]
@@ -741,6 +791,10 @@ impl std::fmt::Debug for ProjectionAdmissionToken {
     }
 }
 impl ProjectionAdmissionToken {
+    pub(super) fn is_reviewed_archive(&self) -> bool {
+        matches!(self.support, ProjectionSupport::ReviewedArchive { .. })
+    }
+
     fn equivalent_effect(&self, other: &Self) -> bool {
         self.binding == other.binding
             && self.context == other.context
@@ -766,9 +820,10 @@ impl ProjectionAdmissionToken {
     }
     fn live_for(&self, view: &Arc<ViewLife>, id: ActionId, action: &SignedAction) -> bool {
         Arc::ptr_eq(&self.view, view)
-            && view.local_archive == matches!(self.support, ProjectionSupport::LocalArchive { .. })
+            && view.local_archive == self.support.is_archive()
             && view.live()
             && self.support.live()
+            && self.support.matches_review_original(action)
             && self.binding.realm == view.realm
             && self.binding.action == id
             && self.binding.create == action.spec().body.create().unwrap_or(id)

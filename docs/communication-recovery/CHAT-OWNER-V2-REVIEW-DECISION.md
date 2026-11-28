@@ -223,8 +223,11 @@ The receipt covers the complete signed record in a separate encrypted
 file. Its action index is selected by a versioned lane Head that preserves
 the original public stream position and both header roots. Recovery can
 finish a previously admitted write. The receipt does not select or replace
-an ordinary message. Integration with projection and automatic review
-polling remain open.
+an ordinary message. An exact joined history read can use it after a
+verified ordinary miss. The detached display preserves the original
+signature and rechecks ordinary reply ancestry. The read checks both
+selectors again before publishing and cannot repair a pending receipt.
+Automatic review polling and receipt discovery remain open.
 
 ## Exact case transitions
 

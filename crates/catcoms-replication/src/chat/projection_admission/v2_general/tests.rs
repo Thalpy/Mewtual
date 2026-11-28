@@ -2067,22 +2067,8 @@ fn removed_reply_requires_verified_dependencies_and_never_admits_a_delete() {
     approve
         .require_record_data(&V2RemovedCreateRecord::decode(&record).unwrap())
         .unwrap();
-    // An independently signed Ed25519 variant of this deterministic
-    // fixture, checked by the external verifier as well as this verifier.
-    // The test seed and alternate nonce are from test data only.
-    let alternate_signature = [
-        0xe2, 0xfe, 0x2a, 0x39, 0xb7, 0x32, 0x66, 0x42, 0x82, 0x7d, 0x6d, 0x82, 0xd4, 0x97, 0x62,
-        0x2c, 0xd6, 0xc2, 0x97, 0xfe, 0x78, 0x27, 0x0e, 0xaa, 0x43, 0x6b, 0x01, 0xf0, 0x86, 0xb6,
-        0xf3, 0xcb, 0x5b, 0x06, 0xd3, 0xcd, 0xaf, 0xa5, 0x77, 0xbf, 0xfa, 0xc0, 0x54, 0x06, 0xf9,
-        0x5e, 0xa2, 0xee, 0x94, 0x30, 0x7b, 0x83, 0x8b, 0x9f, 0xe6, 0x36, 0xb4, 0x2b, 0x08, 0x62,
-        0xbb, 0x2d, 0xc7, 0x07,
-    ];
-    let mut alternate = original.clone();
-    let signature_offset = alternate.len() - alternate_signature.len();
-    alternate[signature_offset..].copy_from_slice(&alternate_signature);
-    let alternate_action = SignedAction::decode(&alternate).unwrap();
-    assert!(alternate_action.verify());
-    assert_eq!(reply.id(), alternate_action.id());
+    let alternate_action = reviewed_create::alternate_withheld_reply(&reply);
+    let alternate = alternate_action.encode();
     let alternate_evidence = f
         .verifier
         .verify_removed_create_for_review(&alternate, &frozen, &ledger, &view, &[])
