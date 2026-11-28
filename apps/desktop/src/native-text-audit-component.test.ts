@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { flushSync, mount, unmount } from "svelte";
 import NativeTextAudit from "./NativeTextAudit.svelte";
-import type { NativeAuditRecord, NativeOriginal } from "./native-text-history.ts";
+import type { NativeAuditRecord, NativeHeldDecision, NativeHeldPost, NativeOriginal } from "./native-text-history.ts";
 import { createVisualNativeTextFixture } from "./visual-native-text-fixture.ts";
 
 test("the Chat V2 owner audit renders saved edits as text and clears them when closed", async () => {
@@ -11,6 +11,7 @@ test("the Chat V2 owner audit renders saved edits as text and clears them when c
   let pauseOwn = false;
   let paginateOwn = false;
   let finishOwn: (() => void) | undefined;
+  let heldDecision: NativeHeldDecision = { status: "undecided" };
   const native = {
     async invoke(command: string, args: Record<string, unknown>) {
       calls.push(args);
@@ -20,6 +21,10 @@ test("the Chat V2 owner audit renders saved edits as text and clears them when c
         const records = (reply.value as { items: NativeAuditRecord[] }).items;
         const edit = records.find(record => record.body.kind === "edit")?.body;
         if (edit?.kind === "edit") edit.text += " <img src=x onerror=alert(1)>";
+      }
+      if ("heldAfter" in args) {
+        const items = (reply.value as { items: NativeHeldPost[] | null }).items;
+        for (const item of items ?? []) item.decision = heldDecision;
       }
       if ("start" in args && pauseOwn) {
         await new Promise<void>(resolve => { finishOwn = resolve; });
@@ -47,7 +52,14 @@ test("the Chat V2 owner audit renders saved edits as text and clears them when c
   document.body.append(target);
   const instance = mount(NativeTextAudit, {
     target,
-    props: { server: 1, channel: "1", context: "a1".repeat(32) },
+    props: { server: 1, channel: "1", context: "a1".repeat(32),
+      onReview: async (scope, item, choice) => {
+        assert.deepEqual(scope, { server: 1, channel: "1", context: "a1".repeat(32) });
+        assert.equal(item.decision.status, "undecided");
+        assert.equal(choice, "reject");
+        heldDecision = { status: "selected", choice: "reject", decisionBodyId: "ab".repeat(32), streamEntryId: "cd".repeat(32) };
+        return "superseded";
+      } },
   });
   const button = (text: string) => {
     const found = [...target.querySelectorAll("button")].find(node => node.textContent?.trim() === text);
@@ -136,6 +148,12 @@ test("the Chat V2 owner audit renders saved edits as text and clears them when c
     assert.deepEqual(calls.at(-1), {
       server: 1, channel: "1", expectedContext: "a1".repeat(32), heldAfter: null, limit: 2,
     });
+    button("Reject").click();
+    await settle();
+    assert.match(dialog.textContent ?? "", /Rejected/);
+    assert.match(dialog.textContent ?? "", /Review the current post/);
+    assert.equal(button("Reopen").disabled, false);
+    assert.ok([...dialog.querySelectorAll("button")].every(item => item.textContent?.trim() !== "Approve"));
     button("Close").click();
     await settle();
     assert.doesNotMatch(dialog.textContent ?? "", /A late post held for review/);

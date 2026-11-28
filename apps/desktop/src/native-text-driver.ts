@@ -2,7 +2,8 @@
  * uncertainty never redraws a token or edits its original payload. Native still
  * independently checks actual authorization and commits the signed original. */
 import { retainNativeTextIntent, type NativeTextIntents, type NativeTextFoundIntent, type NativeTextCreateIntent,
-  type NativeTextEditIntent, type NativeTextDeleteIntent, type NativeTextMutationIntent, type NativeTextIntent } from "./native-text-intents.ts";
+  type NativeTextEditIntent, type NativeTextDeleteIntent, type NativeTextMutationIntent,
+  type NativeTextReviewIntent, type NativeTextIntent } from "./native-text-intents.ts";
 import { decodeRestoredChatSession, type NativeTextServer } from "./native-text-session.ts";
 export type NativeTextDriverDependencies = {
   read(): NativeTextIntents;
@@ -12,10 +13,12 @@ export type NativeTextDriverDependencies = {
   mayDispatch?(intent: NativeTextIntent): boolean;
   sealed?(intent: NativeTextIntent): void;
   token(): string;
-  invoke: (command: "found_server" | "send_message" | "edit_message" | "delete_message", args: Record<string, unknown>) => Promise<unknown>;
+  invoke: (command: "found_server" | "send_message" | "edit_message" | "delete_message" | "decide_native_chat_held_post", args: Record<string, unknown>) => Promise<unknown>;
 };
 export type NativeFoundSettings = Omit<NativeTextFoundIntent, "kind" | "token">;
 export type NativeMutationSettings = Omit<NativeTextEditIntent, "token"> | Omit<NativeTextDeleteIntent, "token">;
+export type NativeReviewSettings = Omit<NativeTextReviewIntent, "kind" | "token">;
+export type NativeReviewDisposition = "saved" | "superseded";
 export type NativeSavedMessage = { disposition: "saved-local"; action: string; ordinal: string; cleanupPending: boolean };
 type ActionIntent = NativeTextCreateIntent | NativeTextMutationIntent;
 const same = (a: NativeTextIntent, b: NativeTextIntent) => JSON.stringify(retainNativeTextIntent({}, a)[a.token]) === JSON.stringify(retainNativeTextIntent({}, b)[b.token]);
@@ -24,6 +27,8 @@ const object = (value: unknown): Record<string, unknown> => {
   return value as Record<string, unknown>;
 };
 const decimal = (value: unknown): value is string => typeof value === "string" && /^(0|[1-9][0-9]{0,19})$/.test(value) && BigInt(value) <= (1n << 64n) - 1n;
+const nonzeroId = (value: unknown): value is string =>
+  typeof value === "string" && /^[0-9a-f]{64}$/.test(value) && !/^0+$/.test(value);
 export function createNativeTextDriver(deps: NativeTextDriverDependencies) {
   const permitted = (intent: NativeTextIntent) => deps.current() && (deps.mayDispatch?.(intent) ?? true);
   async function prepare(intent: NativeTextIntent): Promise<boolean> {
@@ -67,6 +72,24 @@ export function createNativeTextDriver(deps: NativeTextDriverDependencies) {
     const cleanupPending = await complete(intent);
     return deps.current() ? { disposition: "saved-local", action: response.message_id, ordinal: response.ordinal, cleanupPending } : null;
   }
+  async function reviewDecision(intent: NativeTextReviewIntent): Promise<{ status: NativeReviewDisposition; cleanupPending: boolean } | null> {
+    if (!await prepare(intent) || !ready(intent)) return null;
+    const { kind: _kind, token, ...settings } = intent;
+    const nonce = token.slice(32);
+    const result = await deps.invoke("decide_native_chat_held_post", { ...settings, intent: nonce });
+    if (!deps.current()) return null;
+    const response = object(result);
+    const { status } = response;
+    const fields = Object.keys(response).length;
+    const confirmed = status === "saved"
+      ? fields === 6 && nonzeroId(response.decisionBodyId) && nonzeroId(response.streamEntryId)
+      : status === "superseded" && fields === 4;
+    if ((status !== "saved" && status !== "superseded") || !confirmed || response.intent !== nonce || response.choice !== intent.choice || response.caseId !== intent.caseId) {
+      throw new Error("The decision could not be confirmed. Retry the same decision.");
+    }
+    const cleanupPending = await complete(intent);
+    return deps.current() ? { status, cleanupPending } : null;
+  }
   return {
     async found(settings: NativeFoundSettings): Promise<{ server: NativeTextServer; cleanupPending: boolean } | null> {
       if (!deps.current()) return null;
@@ -107,6 +130,18 @@ export function createNativeTextDriver(deps: NativeTextDriverDependencies) {
       const original = deps.read()[intent.token];
       if (!deps.current() || !original || !same(original, intent)) return null;
       return dispatch(intent);
+    },
+    async decideReview(settings: NativeReviewSettings) {
+      if (!deps.current()) return null;
+      const existing = Object.values(deps.read()).find((item): item is NativeTextReviewIntent => item.kind === "review");
+      const intent: NativeTextReviewIntent = { kind: "review", token: existing?.token ?? deps.token(), ...settings };
+      if (existing && !same(existing, intent)) throw new Error("Finish the pending decision first.");
+      return reviewDecision(intent);
+    },
+    async retryReview(intent: NativeTextReviewIntent) {
+      const original = deps.read()[intent.token];
+      if (!deps.current() || !original || !same(original, intent)) return null;
+      return reviewDecision(intent);
     },
   };
 }

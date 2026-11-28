@@ -45,11 +45,14 @@ to an inactive conversation.
 
 The recovered founder can see selected decision status in Held posts.
 The exact native decision command uses the original founder, held case and
-previous decision label. The renderer still needs the action controls and
-durable retry ownership before offering them to the founder.
+previous decision label. The dialog offers the permitted decision for the
+verified case and saves the exact request before sending it to native.
+A generic failure keeps that request for retry. Native can confirm that
+an already superseded request never reached admission, which lets the
+dialog clear the retry and show the current decision.
 
-First-session initialization, cold route restoration, review action
-controls and combined acceptance remain open. The desktop
+First-session initialization, cold route restoration and combined
+acceptance remain open. The desktop
 Chat V2 switch remains off.
 
 ## View held posts in founder chat history

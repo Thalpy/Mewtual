@@ -76,7 +76,7 @@ impl NativeTextColdFounderSource {
         ),
         caller: &RequestCancellation,
         rng: &mut dyn CryptoRngCore,
-    ) -> Result<ReviewStreamEntry, AppError> {
+    ) -> Result<Option<ReviewStreamEntry>, AppError> {
         if request.intent == [0; 16] {
             return Err(refused());
         }
@@ -109,7 +109,7 @@ impl NativeTextColdFounderSource {
                             check(Some(position))
                         })?
                     {
-                        return Ok(saved);
+                        return Ok(Some(saved));
                     }
                 }
                 let mut base = if select {
@@ -118,7 +118,15 @@ impl NativeTextColdFounderSource {
                     PreparedReviewBase::First
                 };
                 if let PreparedReviewBase::Saved(saved) = base {
-                    return Ok(saved);
+                    return Ok(Some(saved));
+                }
+                if matches!(base, PreparedReviewBase::SupersededBeforeAdmission) {
+                    // None has exactly this private issuer: an authenticated
+                    // nonce miss and superseded same-case predecessor, with
+                    // every signing/selection control absent. The original
+                    // native row/caller is rechecked by the outer operation
+                    // before converting this into the typed UI disposition.
+                    return Ok(None);
                 }
                 let mut original =
                     store.prepare_held_review_original(scope, request.case, || check(None))?;
@@ -250,7 +258,7 @@ impl NativeTextColdFounderSource {
                         }
                     }
                 }
-                Ok(entry)
+                Ok(Some(entry))
             })
         })
     }

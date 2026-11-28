@@ -69,3 +69,18 @@ test("native founder settings stay exact and obey native byte limits", () => {
     assert.throws(() => decodeNativeTextIntents({ [token]: { ...found, ...patch } }, 4));
   }
 });
+
+test("critical continuity preserves one exact held-post decision and a distinct predecessor", () => {
+  const review = { kind: "review", token, server: 2, channel: "9", expectedContext: "02".repeat(32),
+    caseId: "03".repeat(32), action: "04".repeat(32), originalDigest: "05".repeat(32),
+    removalHeader: "06".repeat(32), removalEpoch: "7", previousDecision: "07".repeat(32), choice: "reopen" } as const;
+  const prior = retainNativeTextIntent({}, review);
+  assert.deepEqual(decodeNativeTextIntents(JSON.parse(JSON.stringify(prior)), 4), prior);
+  assert.throws(() => retainNativeTextIntent(prior, { ...review, previousDecision: "08".repeat(32) }));
+  assert.throws(() => retainNativeTextIntent(prior, { ...review, token: "09".repeat(32) }));
+  for (const patch of [{ previousDecision: null }, { removalEpoch: "0" }, { server: 0 }, { choice: "delete" }]) {
+    assert.throws(() => decodeNativeTextIntents({ [token]: { ...review, ...patch } }, 4));
+  }
+  const nonceZero = "01".repeat(16) + "00".repeat(16);
+  assert.throws(() => decodeNativeTextIntents({ [nonceZero]: { ...review, token: nonceZero } }, 4));
+});

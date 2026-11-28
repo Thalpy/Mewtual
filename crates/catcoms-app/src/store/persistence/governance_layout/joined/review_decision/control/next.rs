@@ -21,6 +21,7 @@ const APPEND_WORK: usize = 8 * MAX_APPEND_BYTES + 4 * MAX_RECORD_BYTES + 256 * 1
 pub(in crate::store) enum PreparedReviewBase {
     First,
     Saved(ReviewStreamEntry),
+    SupersededBeforeAdmission,
     Next(Box<PreparedIndexedReviewSource>),
 }
 
@@ -171,6 +172,19 @@ impl ServerStore {
             return Err(denied());
         }
         match snapshot.check_request(root, &key, pin, request)? {
+            IndexedReviewRequest::Superseded(mut proof) => {
+                // The lower proof checked a real same-case revision, an
+                // exact nonce miss and absent physical controls. A retained
+                // warm continuation is independent evidence and also blocks
+                // retiring the caller's retry custody.
+                if mount.warm.is_some() {
+                    return Err(denied());
+                }
+                recheck(Some(proof.case_position()?))?;
+                mount.require(self)?;
+                snapshot.require_superseded(root, &mut proof)?;
+                Ok(PreparedReviewBase::SupersededBeforeAdmission)
+            }
             IndexedReviewRequest::Saved(mut lookup) => {
                 let entry = lookup.record.as_ref().ok_or_else(denied)?.entry.clone();
                 recheck(Some(entry.position_data()))?;

@@ -7,6 +7,7 @@ use catcoms_replication::chat::owner_header::OwnerHeaderId;
 
 pub(in super::super::super::super) enum IndexedReviewRequest {
     Saved(IndexedDecisionLookup),
+    Superseded(IndexedReviewPredecessor),
     Next(IndexedReviewPredecessor),
 }
 
@@ -42,7 +43,16 @@ impl IndexedDecisionSnapshot {
         )?;
         let actual = case.record.as_ref().map(|record| record.decision.id());
         if actual != request.previous {
-            return Err(denied());
+            // An absent case cannot prove that a proposed predecessor has
+            // been superseded. The same exact original must have a real,
+            // independently authenticated selected case record already.
+            case.record
+                .as_ref()
+                .ok_or_else(denied)?
+                .require_case(request)?;
+            let mut superseded = IndexedReviewPredecessor { intent, case };
+            self.require_superseded(root, &mut superseded)?;
+            return Ok(IndexedReviewRequest::Superseded(superseded));
         }
         if let Some(prior) = &case.record {
             prior.require_case(request)?;
@@ -51,6 +61,25 @@ impl IndexedDecisionSnapshot {
         selected.require_current()?;
         self.require_current(root)?;
         Ok(IndexedReviewRequest::Next(selected))
+    }
+
+    /// Keep the intent miss, current other case and actual Head on one
+    /// selection. Any pending signing/selection evidence defeats the
+    /// no-admission conclusion, even if it appears unrelated or damaged.
+    pub(in super::super::super::super) fn require_superseded(
+        &mut self,
+        root: &HeldDirectory,
+        proof: &mut IndexedReviewPredecessor,
+    ) -> Result<(), AppError> {
+        use super::super::super::super::control;
+        control::require_control_names(root)?;
+        control::require_no_signing_controls(root)?;
+        require_quiet_selection(root)?;
+        proof.require_current()?;
+        self.require_current(root)?;
+        control::require_control_names(root)?;
+        control::require_no_signing_controls(root)?;
+        require_quiet_selection(root)
     }
 
     pub(in super::super::super::super) fn next_position(
@@ -70,6 +99,18 @@ impl IndexedDecisionSnapshot {
 }
 
 impl IndexedReviewPredecessor {
+    pub(in super::super::super::super) fn case_position(
+        &self,
+    ) -> Result<ReviewStreamPosition, AppError> {
+        Ok(self
+            .case
+            .record
+            .as_ref()
+            .ok_or_else(denied)?
+            .entry
+            .position_data())
+    }
+
     pub(in super::super::super::super) fn require_current(&mut self) -> Result<(), AppError> {
         self.intent.require_current()?;
         self.case.require_current()

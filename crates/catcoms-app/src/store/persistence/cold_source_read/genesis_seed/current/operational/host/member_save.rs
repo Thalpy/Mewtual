@@ -131,7 +131,9 @@ pub enum V2MemberSaveOutcome {
     Ready,
 }
 
-/// Why a phase refused. None of these means a write happened, and none means "absent".
+/// Why a phase refused. Ordinary failures prove neither a write nor
+/// absence. The specifically checked founder-review supersession below
+/// is the sole no-admission disposition for its exact obsolete request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum V2MemberSaveRefusal {
     /// No namespace5 handler or mount, or the Store, mount or original source closed.
@@ -149,6 +151,14 @@ pub enum V2MemberSaveRefusal {
     /// The token holds a DIFFERENT request (saved, presealed or retained), or the original
     /// does not belong here. A same-token retry with changed DATA always lands here.
     Conflict,
+    /// This exact founder-review nonce has an authenticated selected-index
+    /// miss, while the same case already selects a different decision-body
+    /// predecessor. All signing/selection roles were proved absent under
+    /// the original source. No signature or selection was admitted for this
+    /// request. Only this exact request's UI retry custody may be retired;
+    /// a new choice requires a fresh current-case read and user intent.
+    /// Generic errors and ambiguous/pending attempts never return this.
+    ReviewSupersededBeforeAdmission,
     /// A persistent quota or index bound would be exceeded. Nothing was evicted; the exact
     /// original is kept for a retry.
     Pressure,

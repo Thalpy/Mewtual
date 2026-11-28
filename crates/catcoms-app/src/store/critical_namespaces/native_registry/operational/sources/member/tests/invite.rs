@@ -3099,6 +3099,15 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         sources.policy.prepare_member().unwrap(),
                     ).select_initial_founder_review(request, &fresh);
                     assert!(advance(exact_request([0xb4; 16], ReviewDecision::Reopen)).is_err());
+                    let (superseded, entered) = with_review_control_fault(
+                        ReviewControlFault::BeforeFreshKey,
+                        || advance(exact_request([0xbd; 16], ReviewDecision::Approve)),
+                    );
+                    assert!(!entered, "a checked stale predecessor must never enter the signer");
+                    assert!(matches!(superseded, Err(
+                        V2MemberSaveRefusal::ReviewSupersededBeforeAdmission
+                    )));
+                    assert_eq!(std::fs::read(&head).unwrap(), sealed_head);
                     // Read the real selected Case index through the same
                     // recovered founder and keep both audit observations
                     // alive while the next physical decision begins.
@@ -3126,6 +3135,16 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     )).is_err());
                     drop(decision_audit);
                     assert!(stopped.is_err() && used);
+                    // A real unselected transaction has signing controls
+                    // and WAL. Its presence must block a no-admission reply
+                    // for another obsolete renderer request.
+                    let blocked = advance(exact_request([0xbd; 16], ReviewDecision::Approve));
+                    assert!(blocked.is_err());
+                    assert!(!matches!(blocked, Err(
+                        V2MemberSaveRefusal::ReviewSupersededBeforeAdmission
+                    )));
+                    assert!(journal.join("key.attempt").is_file());
+                    assert!(pending.is_file());
                     assert_eq!(std::fs::read(&head).unwrap(), sealed_head);
                     let (stopped, used) = with_review_control_fault(
                         ReviewControlFault::AfterSelectionHeadRename, || advance(reopen_request()),
@@ -3288,23 +3307,38 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         header: catcoms_replication::chat::owner_header::OwnerHeaderId::from_bytes(anchor.header),
                         state: catcoms_replication::chat::owner_header::OwnerStateCommitment::from_bytes(anchor.state),
                     };
-                    let read_exchange = async |exchange: crate::store::NativeTextJoinedReviewExchange, provider: &mut crate::store::NativeTextFounderDependencyProvider<rand_chacha::ChaCha20Rng>| {
+                    type ReviewProvider = crate::store::NativeTextFounderDependencyProvider<rand_chacha::ChaCha20Rng>;
+                    let mut provider = Some(provider);
+                    let read_exchange = async |phase: (&str, u64), exchange: crate::store::NativeTextJoinedReviewExchange, provider: &mut Option<ReviewProvider>| {
                         let serve = async {
-                            let incoming = provider.next().await.expect("the actual founder receives the public review query");
-                            founder().serve_founder_dependency_request(provider, incoming).unwrap();
+                            let mut listener = provider.take().unwrap();
+                            let incoming = listener.next().await.expect("the actual founder receives the public review query");
+                            let original = founder();
+                            // Native serves this paid disk and signature work off
+                            // the transport runtime. Keep the same boundary here
+                            // so a slow disk check cannot stall both socket actors.
+                            let completed = tokio::task::spawn_blocking(move || {
+                                original.serve_founder_dependency_request(&listener, incoming).unwrap();
+                                listener
+                            }).await.unwrap();
+                            *provider = Some(completed);
                         };
                         let (wire, ()) = tokio::time::timeout(
                             std::time::Duration::from_secs(12), async { tokio::join!(exchange.receive(), serve) },
-                        ).await.unwrap();
-                        wire.unwrap()
+                        ).await.unwrap_or_else(|error| panic!("the founder review phase {phase:?} exceeded its bound: {error}"));
+                        wire.unwrap_or_else(|error| panic!("the founder review phase {phase:?} returned {error:?}"))
                     };
-                    let read = async |query, provider: &mut crate::store::NativeTextFounderDependencyProvider<rand_chacha::ChaCha20Rng>, rng: &mut OsCryptoRng, caller: &RequestCancellation| {
+                    let read = async |query: ReviewStreamQuery, provider: &mut Option<ReviewProvider>, rng: &mut OsCryptoRng, caller: &RequestCancellation| {
+                        let phase = match query {
+                            ReviewStreamQuery::Header(sequence) => ("explicit header", sequence),
+                            ReviewStreamQuery::Approval { sequence, .. } => ("explicit approval", sequence),
+                        };
                         let exchange = survivor().prepare_review_delivery(
                             &selection, &invite, (&contact, query), caller.clone(), rng,
                         ).unwrap();
-                        read_exchange(exchange, provider).await
+                        read_exchange(phase, exchange, provider).await
                     };
-                    let poll = async |check_tip, provider: &mut crate::store::NativeTextFounderDependencyProvider<rand_chacha::ChaCha20Rng>, rng: &mut OsCryptoRng| {
+                    let poll = async |check_tip, provider: &mut Option<ReviewProvider>, rng: &mut OsCryptoRng| {
                         assert!(matches!(
                             survivor().review_header_contact_scope(&selection, check_tip, &fresh),
                             Ok(crate::store::NativeTextReviewHeaderPollStatus::Ready(..))
@@ -3312,7 +3346,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                         let exchange = survivor().prepare_next_review_header(
                             &selection, (&contact, check_tip), fresh.clone(), rng,
                         ).unwrap().expect("the original row supplies a checked cursor and founder route");
-                        read_exchange(exchange, provider).await
+                        read_exchange((if check_tip { "automatic tip" } else { "automatic next" }, 0), exchange, provider).await
                     };
                     let initial = poll(false, &mut provider, &mut history_rng).await;
                     survivor().with_review_delivery(&selection, initial, &fresh, |reply| {

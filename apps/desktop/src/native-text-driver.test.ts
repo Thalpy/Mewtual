@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createNativeTextDriver } from "./native-text-driver.ts";
+import { createNativeTextDriver, type NativeReviewSettings } from "./native-text-driver.ts";
 import type { NativeTextIntents } from "./native-text-intents.ts";
 const settings={displayName:"Catte",serverName:"  ",advertise:"",relay:"",rendezvous:"",isDm:false};
 function fixture(){
@@ -9,7 +9,8 @@ function fixture(){
   let reply:(command:string,args:Record<string,unknown>)=>Promise<unknown>=async(_command,args)=>({backend:"text-v2",server:1,context:args.requestId,channel:"9",is_dm:false});
   const driver=createNativeTextDriver({read:()=>intents,replace:next=>{intents=next;},seal:async()=>{if(fail)throw new Error("disk failure");sealed=structuredClone(intents);},current:()=>current,
     token:()=> (++draws).toString(16).padStart(64,"0"),invoke:async(command,args)=>{calls.push({command,args:structuredClone(args),sealed:structuredClone(sealed)});return reply(command,args);}});
-  return {driver,calls,state:()=>({intents,sealed,draws}),fail:(yes:boolean)=>{fail=yes;},current:(yes:boolean)=>{current=yes;},answer:(fn:typeof reply)=>{reply=fn;}};
+  return {driver,calls,state:()=>({intents,sealed,draws}),fail:(yes:boolean)=>{fail=yes;},current:(yes:boolean)=>{current=yes;},answer:(fn:typeof reply)=>{reply=fn;},
+    reopen:()=>{intents=structuredClone(sealed);current=true;}};
 }
 test("native founder resolves name before sealing and dispatches those exact settings",async()=>{
   const f=fixture();const created=await f.driver.found(settings);assert.equal(created?.server.name,"Catte");
@@ -81,4 +82,64 @@ test("foreign receipts and cleanup failures preserve native custody",async()=>{
 test("a replaced UI session never applies late success or retires its retained request",async()=>{
   const f=fixture();f.answer(async(_cmd,args)=>{f.current(false);return{backend:"text-v2",server:1,context:args.requestId,channel:"9",is_dm:false};});
   assert.equal(await f.driver.found(settings),null);assert.equal(Object.keys(f.state().intents).length,1);
+});
+
+test("review decisions seal before dispatch and recover the original intent after lock and lost reply", async () => {
+  const f = fixture();
+  const input: NativeReviewSettings = {
+    server: 1, channel: "9", expectedContext: "02".repeat(32), caseId: "03".repeat(32),
+    action: "04".repeat(32), originalDigest: "05".repeat(32), removalHeader: "06".repeat(32),
+    removalEpoch: "7", previousDecision: "08".repeat(32), choice: "reopen",
+  };
+  const receipt = (args: Record<string, unknown>) => ({ status: "saved", caseId: args.caseId, intent: args.intent,
+    choice: args.choice, decisionBodyId: "09".repeat(32), streamEntryId: "0a".repeat(32) });
+  f.fail(true);
+  await assert.rejects(f.driver.decideReview(input), /disk failure/);
+  assert.equal(f.calls.length, 0);
+  f.fail(false);
+  f.answer(async (_command, args) => { f.current(false); return receipt(args); });
+  assert.equal(await f.driver.decideReview(input), null);
+  assert.equal(f.calls[0].command, "decide_native_chat_held_post");
+  const original = Object.values(f.calls[0].sealed)[0];
+  assert.equal(original.kind, "review");
+  if (original.kind !== "review") throw new Error("expected an original decision");
+  assert.deepEqual(f.calls[0].args, { ...input, intent: original.token.slice(32) });
+  f.reopen();
+  await assert.rejects(f.driver.decideReview({ ...input, previousDecision: "0b".repeat(32) }), /pending decision/);
+  assert.equal(f.calls.length, 1);
+  f.answer(async (_command, args) => ({ ...receipt(args), choice: "reject" }));
+  await assert.rejects(f.driver.retryReview(original), /could not be confirmed/);
+  assert.deepEqual(Object.values(f.state().sealed), [original]);
+  f.answer(async (_command, args) => receipt(args));
+  assert.deepEqual(await f.driver.retryReview(original), { status: "saved", cleanupPending: false });
+  assert.deepEqual(f.calls[2].args, f.calls[0].args);
+  assert.equal(f.state().draws, 1);
+  assert.deepEqual(f.state().sealed, {});
+});
+
+
+test("only a matching superseded proof retires a stale review intent", async () => {
+  const f = fixture();
+  const input: NativeReviewSettings = {
+    server: 1, channel: "9", expectedContext: "02".repeat(32), caseId: "03".repeat(32),
+    action: "04".repeat(32), originalDigest: "05".repeat(32), removalHeader: "06".repeat(32),
+    removalEpoch: "7", previousDecision: "08".repeat(32), choice: "reopen",
+  };
+  const superseded = (args: Record<string, unknown>) => ({ status: "superseded", caseId: args.caseId, intent: args.intent, choice: args.choice });
+  f.answer(async (_command, args) => ({ ...superseded(args), intent: "ff".repeat(16) }));
+  await assert.rejects(f.driver.decideReview(input), /could not be confirmed/);
+  const [original] = Object.values(f.state().sealed);
+  assert.equal(original.kind, "review");
+  if (original.kind !== "review") throw new Error("expected a pending review");
+  f.answer(async (_command, args) => ({ ...superseded(args), decisionBodyId: "09".repeat(32) }));
+  await assert.rejects(f.driver.retryReview(original), /could not be confirmed/);
+  f.answer(async (_command, args) => { f.fail(true); return superseded(args); });
+  assert.deepEqual(await f.driver.retryReview(original), { status: "superseded", cleanupPending: true });
+  assert.deepEqual(Object.values(f.state().intents), [original]);
+  assert.deepEqual(Object.values(f.state().sealed), [original]);
+  f.fail(false);
+  f.answer(async (_command, args) => superseded(args));
+  assert.deepEqual(await f.driver.retryReview(original), { status: "superseded", cleanupPending: false });
+  assert.deepEqual(f.state().sealed, {});
+  assert.equal(f.state().draws, 1);
 });

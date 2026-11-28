@@ -14,7 +14,7 @@ use catcoms_rt::OsCryptoRng;
 use serde_json::{json, Map, Value};
 
 const INVALID: &str = "This held-post decision is invalid.";
-const FAILED: &str = "Could not save this decision. Refresh held posts and try again.";
+const FAILED: &str = "Could not confirm the decision. Retry the same decision.";
 
 pub(super) struct Input {
     pub(super) channel: u128,
@@ -108,33 +108,49 @@ pub(super) fn select(
     if let Some(previous) = input.previous {
         request = request.for_successor(previous);
     }
-    let entry = prepared
-        .select_founder_review(request, caller)
-        .map_err(|error| match error {
-            V2MemberSaveRefusal::Busy => BUSY,
-            V2MemberSaveRefusal::Stale | V2MemberSaveRefusal::Cancelled => listing::STALE,
-            _ => FAILED,
-        })?;
-    let step = entry.case_step_data().ok_or(FAILED)?;
-    if step.case_data() != input.case || step.choice_data() != input.choice {
-        return Err(FAILED);
-    }
+    let selection = match prepared.select_founder_review(request, caller) {
+        Ok(entry) => {
+            let step = entry.case_step_data().ok_or(FAILED)?;
+            if step.case_data() != input.case || step.choice_data() != input.choice {
+                return Err(FAILED);
+            }
+            Some((entry.decision_id_data(), entry.id()))
+        }
+        Err(V2MemberSaveRefusal::ReviewSupersededBeforeAdmission) => None,
+        Err(V2MemberSaveRefusal::Busy) => return Err(BUSY),
+        Err(V2MemberSaveRefusal::Stale | V2MemberSaveRefusal::Cancelled) => {
+            return Err(listing::STALE);
+        }
+        Err(_) => return Err(FAILED),
+    };
+    Ok(encode_response(&input, selection))
+}
+
+fn encode_response(
+    input: &Input,
+    selection: Option<(
+        OwnerBodyId,
+        catcoms_replication::chat::owner_bodies::ReviewStreamEntryId,
+    )>,
+) -> String {
     let choice = match input.choice {
         ReviewDecision::Approve => "approve",
         ReviewDecision::Reject => "reject",
         ReviewDecision::Reopen => "reopen",
     };
-    // This is the exact request's saved result. A separate audit read may
-    // report a later current decision for the same case.
-    serde_json::to_string(&json!({
-        "status": "saved",
+    // An exact saved retry may predate the current case. Only an authenticated
+    // refusal before admission can release the renderer's original intent.
+    let mut response = json!({
+        "status": if selection.is_some() { "saved" } else { "superseded" },
         "caseId": hex::encode(input.case.as_bytes()),
         "intent": hex::encode(input.intent),
         "choice": choice,
-        "decisionBodyId": hex::encode(entry.decision_id_data().as_bytes()),
-        "streamEntryId": hex::encode(entry.id().as_bytes()),
-    }))
-    .map_err(|_| FAILED)
+    });
+    if let Some((body, entry)) = selection {
+        response["decisionBodyId"] = hex::encode(body.as_bytes()).into();
+        response["streamEntryId"] = hex::encode(entry.as_bytes()).into();
+    }
+    response.to_string()
 }
 
 #[cfg(test)]
@@ -155,6 +171,22 @@ mod tests {
             "intent": "77".repeat(16),
             "choice": "reopen",
         })
+    }
+
+    #[test]
+    fn native_held_decision_only_releases_the_exact_superseded_intent() {
+        let request = input();
+        let received = parse(request.as_object().unwrap()).unwrap();
+        let response: Value = serde_json::from_str(&encode_response(&received, None)).unwrap();
+        assert_eq!(
+            response,
+            json!({
+                "status": "superseded",
+                "caseId": request["caseId"],
+                "intent": request["intent"],
+                "choice": request["choice"],
+            })
+        );
     }
 
     #[test]

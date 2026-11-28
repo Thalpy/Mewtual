@@ -91,7 +91,7 @@ export function decodeNativeReceived(
   return { action, text: body, certainty: row.certainty, ...(reviewedOnly ? { replyAllowed: false as const } : {}) };
 }
 
-type NativeHistoryTarget = { server: number; channel: string; context: string };
+export type NativeHistoryTarget = { server: number; channel: string; context: string };
 type NativeInvoke = (command: string, args: Record<string, unknown>) => Promise<unknown>;
 
 export async function readNativeAudit(

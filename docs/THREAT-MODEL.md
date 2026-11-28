@@ -4406,7 +4406,11 @@ intent. It uses the recovered founder's own key and signed Case index.
 The held-post status read checks the original hold and current decision
 independently. Missing required files cannot prove an undecided case.
 The result of a retried mutation belongs to that exact intent and may be
-older than the case's current status.
+older than the case's current status. An authenticated miss in the Intent
+index and a different selected revision of the exact case can retire a
+superseded request. Outstanding signing controls, staged selection or
+retained warm work defeat this proof. The renderer retains the same request
+after an uncertain response or continuity write.
 
 ## Chat history admission and retained audit (20 October, continuation)
 

@@ -51,6 +51,7 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
     let pendingSends = {}, recoveredSendDrafts = {}, nativeTextIntents = {}, pendingSendErrors = {}, pendingSendResolution = null, uiContinuityVersion = 1;
     let retryingPendingSends = false, pendingManagerOpen = false, sending = false;
     let chatBackend = "legacy", nativeRejoinRequired = false, nativeOriginals = [], nativeCursor = null, nativeHistoryLoading = false, nativeHistoryLoaded = false, nativeHistoryError = null, nativeHistoryRevision = 0, nativeRetryGeneration = null, viewGeneration = 1;
+    let nativeReviewGeneration = null;
     let nativePages = [], nativeHistoryCalls = [];
     let nativeOwnMessages = {}, nativeOwnLoading = false, nativeOwnPages = [], nativeOwnCalls = [];
     let nativeReceived = [], nativeReceivedScope = null, nativeReceivedRevision = 0;
@@ -119,6 +120,11 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
     const chatScopeKey = (s,c) => s + ":" + c;
     const chanKey = () => activeServerId === null || !cur?.active ? null : chatScopeKey(activeServerId,cur.active);
     const invoke = async (command, args) => {
+      if (command === "decide_native_chat_held_post") {
+        if (Object.keys(args).length !== 11 || "trace" in args) throw new Error("invalid decision fields");
+        submissions.push({ command, args: structuredClone(args), sealed: JSON.parse(backend.sealed) });
+        return await submitAnswer(args);
+      }
       if (command === "preview_invite" || command === "join_server") {
         nativeJoinCalls.push({ command, args: structuredClone(args) });
         const next = nativeJoinReplies.shift();
@@ -170,6 +176,7 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
       backend.nativeWrites = write.catch(() => {}); return write;
     };
     const invokeDebugged = async (command, args) => {
+      if (command === "decide_native_chat_held_post") return { value: await invoke(command, { ...args, trace: 1 }) };
       const call = { command, args: structuredClone(args), sealed: JSON.parse(backend.sealed) };
       if (command === "stop_durable_chat") { stops.push(call); return { value: await stopAnswer(args) }; }
       submissions.push(call);
@@ -218,6 +225,7 @@ export function pendingManagerApp(initial: unknown, backend=pendingManagerBacken
       nativeOwnHistory(...pages) { nativeOwnPages = pages; },
       nativeOwn() { return { messages: structuredClone(nativeOwnMessages), calls: nativeOwnCalls }; },
       nativeChange: changeNativeOwnMessage,
+      nativeDecide: decideNativeHeldPost, nativeRetryDecision: retryNativeHeldDecision,
       nativeRefresh: refreshNativeHistory,
       nativeArchiveRefresh: refreshNativeArchive,
       nativeArchivePages(...pages) { nativeArchivePages = pages; },

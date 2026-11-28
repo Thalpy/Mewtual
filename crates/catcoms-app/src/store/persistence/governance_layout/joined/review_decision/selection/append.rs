@@ -354,9 +354,12 @@ mod tests {
                 spec.decision,
             )
         };
-        assert!(snapshot
-            .check_request(&root, &key, &pin, &request_for(&next))
-            .is_err());
+        assert!(matches!(
+            snapshot
+                .check_request(&root, &key, &pin, &request_for(&next))
+                .unwrap(),
+            disk::indexed::IndexedReviewRequest::Superseded(_)
+        ));
         let successor = request_for(&next).for_successor(first.id());
         let disk::indexed::IndexedReviewRequest::Next(mut preflight) = snapshot
             .check_request(&root, &key, &pin, &successor)

@@ -202,3 +202,149 @@ fn founder_status_refuses_legacy_or_missing_selected_pages_without_repair() {
     )
     .is_err());
 }
+
+#[test]
+fn founder_review_supersession_requires_an_exact_nonce_miss_and_preserves_saved_retry() {
+    use super::super::selection::disk::indexed::IndexedReviewRequest;
+    use crate::store::NativeTextInitialReviewRequest;
+    let fixture = fixture(true);
+    let request = |nonce, choice| {
+        NativeTextInitialReviewRequest::new(
+            fixture.decision.decision().spec().target.spec().channel,
+            (
+                fixture.case.case,
+                fixture.case.signed.id(),
+                fixture.decision.original_data(),
+            ),
+            nonce,
+            choice,
+        )
+    };
+    let mut snapshot =
+        IndexedDecisionSnapshot::read(&fixture.root, &fixture.key, &fixture.pin).unwrap();
+    let stale = request([94; 16], ReviewDecision::Approve);
+    let IndexedReviewRequest::Superseded(mut proof) = snapshot
+        .check_request(&fixture.root, &fixture.key, &fixture.pin, &stale)
+        .unwrap()
+    else {
+        panic!("a real other case revision and unused nonce must be distinguished");
+    };
+    assert_eq!(
+        proof.case_position().unwrap(),
+        fixture.entry.position_data()
+    );
+    snapshot
+        .require_superseded(&fixture.root, &mut proof)
+        .unwrap();
+
+    // Same nonce wins before the now-different current case predecessor.
+    let original = fixture.decision.decision().spec();
+    let saved = request(original.intent, original.decision);
+    assert!(matches!(
+        snapshot
+            .check_request(&fixture.root, &fixture.key, &fixture.pin, &saved,)
+            .unwrap(),
+        IndexedReviewRequest::Saved(_)
+    ));
+    let changed_saved = request(original.intent, ReviewDecision::Approve);
+    assert!(snapshot
+        .check_request(&fixture.root, &fixture.key, &fixture.pin, &changed_saved)
+        .is_err());
+    let mut crossed_original = request([95; 16], ReviewDecision::Approve);
+    crossed_original.case.removal.1 += 1;
+    assert!(snapshot
+        .check_request(&fixture.root, &fixture.key, &fixture.pin, &crossed_original)
+        .is_err());
+}
+
+#[test]
+fn founder_review_supersession_never_retires_a_genuine_ambiguous_attempt() {
+    use super::super::attempt::{AttemptParent, ReviewIntent};
+    use super::super::selection::{disk::indexed::IndexedReviewRequest, head_digest};
+    use crate::store::NativeTextInitialReviewRequest;
+    use catcoms_replication::chat::owner_bodies::{ReviewDecisionBody, ReviewSpec};
+    let fixture = fixture(true);
+    let (_, _, position, _, held) = signed_case_fixture(ReviewDecision::Reject);
+    let next = ExactReviewDecisionBody::new(
+        ReviewDecisionBody::new(ReviewSpec {
+            target: fixture.decision.decision().spec().target.clone(),
+            intent: [96; 16],
+            decision: ReviewDecision::Reopen,
+            previous: Some(fixture.decision.id()),
+        })
+        .unwrap(),
+        fixture.decision.original_data(),
+    )
+    .unwrap();
+    let unsigned = UnsignedReviewStreamEntry::prepare_public(
+        &fixture.pin,
+        ReviewStreamPosition {
+            sequence: 2,
+            previous: Some(fixture.entry.id()),
+            ..position
+        },
+        &next,
+    )
+    .unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0x4912);
+    let head = std::fs::read(fixture.root.child(HEAD_NAME)).unwrap();
+    let intent = ReviewIntent::seal(
+        &fixture.key,
+        *next.id().as_bytes(),
+        &next,
+        &held,
+        (&unsigned, Some(head_digest(&head))),
+        &mut rng,
+    )
+    .unwrap();
+    let plain = fixture.key.open_intent(&intent).unwrap();
+    assert_eq!(
+        ReviewIntent::decode(&plain).unwrap().decision.id(),
+        next.id()
+    );
+    let parent = AttemptParent::from_authenticated_frame(&intent).unwrap();
+    let attempt = parent.seal_attempt(&fixture.key, &mut rng).unwrap();
+    parent.require_attempt(&fixture.key, &attempt).unwrap();
+    std::fs::write(fixture.root.child("intent.pending"), &intent).unwrap();
+    std::fs::write(fixture.root.child("key.attempt"), &attempt).unwrap();
+    // No in-memory unentered witness or Raw survives this serialized
+    // checkpoint. Authentic Attempt presence must defeat no-admission.
+    assert!(!fixture.root.child("key.raw").exists());
+    let stale = NativeTextInitialReviewRequest::new(
+        fixture.decision.decision().spec().target.spec().channel,
+        (
+            fixture.case.case,
+            fixture.case.signed.id(),
+            fixture.decision.original_data(),
+        ),
+        [97; 16],
+        ReviewDecision::Approve,
+    );
+    let mut snapshot =
+        IndexedDecisionSnapshot::read(&fixture.root, &fixture.key, &fixture.pin).unwrap();
+    assert!(snapshot
+        .check_request(&fixture.root, &fixture.key, &fixture.pin, &stale)
+        .is_err());
+    let pending = NativeTextInitialReviewRequest::new(
+        stale.channel,
+        (stale.case.id, stale.case.action, next.original_data()),
+        next.decision().spec().intent,
+        ReviewDecision::Reopen,
+    )
+    .for_successor(fixture.decision.id());
+    assert!(matches!(
+        snapshot
+            .check_request(&fixture.root, &fixture.key, &fixture.pin, &pending,)
+            .unwrap(),
+        IndexedReviewRequest::Next(_)
+    ));
+    assert_eq!(
+        std::fs::read(fixture.root.child("intent.pending")).unwrap(),
+        intent.as_slice()
+    );
+    assert_eq!(
+        std::fs::read(fixture.root.child("key.attempt")).unwrap(),
+        attempt.as_slice()
+    );
+    assert_eq!(std::fs::read(fixture.root.child(HEAD_NAME)).unwrap(), head);
+}

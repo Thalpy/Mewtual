@@ -1015,8 +1015,10 @@ intent before consulting the latest case. The main-window
 `decide_native_chat_held_post` command binds the original row, channel, case,
 action, signed-original digest, Remove, choice, previous decision-body ID
 and a 16-byte intent. Its response describes that exact saved decision.
-The history view displays current status. Renderer controls and durable
-intent recovery remain separate work.
+The history view can approve or reject an undecided or reopened case and
+reopen a rejected case. It seals the exact request in critical4 before
+invocation. Only a matching saved result or an authenticated no-admission
+response can retire that request.
 Joined callers can select a
 checked public header from the original connected response. The recipient
 journal reports a covered header, duplicate, missing predecessor or frozen

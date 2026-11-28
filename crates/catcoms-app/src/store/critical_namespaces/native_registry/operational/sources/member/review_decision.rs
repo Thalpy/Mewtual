@@ -31,6 +31,9 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
     /// Select or recover one exact private founder decision. The request
     /// binds the expected case revision. An exact earlier outcome can be
     /// recovered after subsequent case changes.
+    /// `ReviewSupersededBeforeAdmission` is the sole checked no-admission
+    /// result for retiring this exact obsolete UI retry. Other refusals
+    /// cannot justify clearing it or changing its predecessor/nonce.
     pub fn select_founder_review(
         self,
         request: NativeTextInitialReviewRequest,
@@ -77,9 +80,10 @@ impl<T: MeshTransport, R: CryptoRngCore> NativeTextMemberPreparation<T, R> {
             return Err(Refusal::Cancelled);
         }
         job.inner.require_current().map_err(|_| Refusal::Stale)?;
-        result.map_err(|error| match error {
+        let saved = result.map_err(|error| match error {
             AppError::ChatV2RegistryBusy | AppError::Io(_) => Refusal::Busy,
             _ => Refusal::Unavailable,
-        })
+        })?;
+        saved.ok_or(Refusal::ReviewSupersededBeforeAdmission)
     }
 }

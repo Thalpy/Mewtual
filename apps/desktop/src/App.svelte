@@ -213,10 +213,10 @@
     type ModerationEvent, type ModerationState, type TimelineMessage,
   } from "./moderation";
   import { MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
-  import type { NativeTextIntent, NativeTextIntents } from "./native-text-intents";
-  import { createNativeTextDriver } from "./native-text-driver";
+  import type { NativeReviewChoice, NativeTextIntent, NativeTextIntents, NativeTextReviewIntent } from "./native-text-intents";
+  import { createNativeTextDriver, type NativeReviewDisposition } from "./native-text-driver";
   import { decodeNativeMembershipNotice, decodeRestoredChatSession, type NativeTextServer } from "./native-text-session";
-  import { decodeNativeReceived, decodeNativeReceivedNotice, isNativeHistoryBusy, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, readNativeReviewedArchive, updateNativeReceived, type NativeOriginal, type NativeOwnMessage, type NativeReceived } from "./native-text-history";
+  import { decodeNativeReceived, decodeNativeReceivedNotice, isNativeHistoryBusy, readNativeOriginals, readNativeOwnMessage, readNativeReceivedArchive, readNativeReviewedArchive, updateNativeReceived, type NativeHeldPost, type NativeHistoryTarget, type NativeOriginal, type NativeOwnMessage, type NativeReceived } from "./native-text-history";
   import NativeSavedChat from "./NativeSavedChat.svelte";
   import {
     captureLockContinuity, closeContinuityAcknowledgement, NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
@@ -415,6 +415,7 @@
   let nativeHistoryError = $state<string|null>(null);
   let nativeHistoryRevision = 0;
   let nativeRetryGeneration = $state<number|null>(null);
+  let nativeReviewGeneration: number | null = null;
   let activeServerId = $state<number | null>(null);
   // Bumped by every move that changes WHICH group the panes show. An async refresh captures it
   // on entry and re-checks after its awaits: a slow answer from the group you just left must
@@ -3638,7 +3639,7 @@
   $effect(() => {
     pendingSendRetry.update(
       !locked && uiStateReady && !windowCloseInFlight ? uiStateLoadGeneration : null,
-      chatBackend==="text-v2" ? Object.values(nativeTextIntents).some(nativeIntentCanRetry) : Object.values(pendingSends).some(intent => !quarantinedPendingIntent(intent) && (intent.resolution || !intent.retryBlock)),
+      chatBackend==="text-v2" ? Object.values(nativeTextIntents).some(intent => intent.kind !== "review" && nativeIntentCanRetry(intent)) : Object.values(pendingSends).some(intent => !quarantinedPendingIntent(intent) && (intent.resolution || !intent.retryBlock)),
       sending || (chatBackend==="text-v2" ? nativeHistoryLoading || nativeOwnLoading || busy || nativeRetryGeneration===uiStateLoadGeneration : retryingPendingSends || pendingManagerOpen || pendingSendResolution !== null),
     );
   });
@@ -7142,17 +7143,56 @@
       replace:next=>{if(!current())throw new Error("The chat session changed.");nativeTextIntents=next;uiContinuityVersion=4;},
       seal:()=>queueUiStateSave(()=>{if(!current())throw new Error("The chat session changed.");return continuityJson();}),
       current,
-      mayDispatch: nativeIntentCanRetry,
+      mayDispatch: intent => nativeIntentCanRetry(intent) && (intent.kind !== "review" || nativeReviewCurrent(intent.server, intent.channel, intent.expectedContext)),
       token:()=>Array.from(crypto.getRandomValues(new Uint8Array(32)),byte=>byte.toString(16).padStart(2,"0")).join(""),
       invoke:async(command,args)=>{
         if(command==="found_server")return(await invokeDebugged<unknown>("found_server",args)).value;
         if(command==="send_message")return(await invokeDebugged<unknown>("send_message",args)).value;
         if(command==="edit_message")return(await invokeDebugged<unknown>("edit_message",args)).value;
         if(command==="delete_message")return(await invokeDebugged<unknown>("delete_message",args)).value;
+        if(command==="decide_native_chat_held_post")return await invoke<unknown>("decide_native_chat_held_post",args);
         throw new Error("Unsupported native chat request.");
       },
       sealed:()=>sealed?.(),
     });
+  }
+  function nativeReviewCurrent(server: number, channel: string, context: string): boolean {
+    return !locked && uiStateReady && !uiSessionRetired && !windowCloseInFlight
+      && activeServerId === server && cur?.backend === "text-v2" && cur.active === channel
+      && cur.context === context && !nativeConversationRemoved(server, context);
+  }
+  function pendingNativeReview(server: number, channel: string, context: string): NativeTextReviewIntent | null {
+    return Object.values(nativeTextIntents).find((item): item is NativeTextReviewIntent =>
+      item.kind === "review" && item.server === server && item.channel === channel && item.expectedContext === context) ?? null;
+  }
+  // Navigation can mount a second history dialog while the first still
+  // owns native dispatch or the continuity write that retires its intent.
+  async function runNativeReview(
+    target: NativeHistoryTarget,
+    invokeOriginal: (session: number) => Promise<{ status: NativeReviewDisposition } | null>,
+  ): Promise<NativeReviewDisposition | null> {
+    const session = uiStateLoadGeneration;
+    if (nativeReviewGeneration === session || !nativeReviewCurrent(target.server, target.channel, target.context)) return null;
+    nativeReviewGeneration = session;
+    try {
+      const result = await invokeOriginal(session);
+      return result?.status ?? null;
+    } finally {
+      if (nativeReviewGeneration === session) nativeReviewGeneration = null;
+    }
+  }
+  async function decideNativeHeldPost(target: NativeHistoryTarget, item: NativeHeldPost, choice: NativeReviewChoice) {
+    const { server, channel, context } = target;
+    const previousDecision = item.decision.status === "selected" ? item.decision.decisionBodyId : null;
+    return runNativeReview(target, session => nativeTextDriver(session).decideReview({
+      server, channel, expectedContext: context, caseId: item.caseId, action: item.action,
+      originalDigest: item.originalDigest, removalHeader: item.removalHeader, removalEpoch: item.removalEpoch,
+      previousDecision, choice,
+    }));
+  }
+  async function retryNativeHeldDecision(intent: NativeTextReviewIntent) {
+    return runNativeReview({ server: intent.server, channel: intent.channel, context: intent.expectedContext },
+      session => nativeTextDriver(session).retryReview(intent));
   }
   function installNativeServer(row:NativeTextServer) {
     const previous=servers.find(server=>server.id===row.server);
@@ -7180,7 +7220,7 @@
     try {
       for(const intent of Object.values(nativeTextIntents)) {
         if(locked || session!==uiStateLoadGeneration || windowCloseInFlight || chatBackend!=="text-v2")return;
-        if(!nativeTextIntents[intent.token] || !nativeIntentCanRetry(intent))continue;
+        if(intent.kind==="review" || !nativeTextIntents[intent.token] || !nativeIntentCanRetry(intent))continue;
         try {
           if(intent.kind==="found") {
             // Only open a recovered first group while this original empty-view
@@ -30849,7 +30889,9 @@
             {#if snapshot.members.some((member) => member.you && member.founder)
               && cur.context && activeServerId !== null && !locked && uiStateReady && !windowCloseInFlight}
               {#key `${activeServerId}:${cur.context}:${cur.active}:${chatLedgerMount}`}
-                <NativeTextAudit server={activeServerId} channel={cur.active} context={cur.context} />
+                <NativeTextAudit server={activeServerId} channel={cur.active} context={cur.context}
+                  pendingReview={pendingNativeReview(activeServerId, cur.active, cur.context)}
+                  onReview={decideNativeHeldPost} onRetryReview={retryNativeHeldDecision} />
               {/key}
             {/if}
             {#if snapshot.members.some((member) => member.you && !member.founder)}

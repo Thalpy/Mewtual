@@ -33,6 +33,7 @@ export function createVisualNativeTextFixture(empty = false) {
       body: { kind: "create", text: "A second saved message, with a longer line to check wrapping at the desktop window size.", reply_to: null } },
   ];
   const receipts = new Map<string, { request: string; ordinal: string }>();
+  const reviewReceipts = new Map<string, { request: string; response: Record<string, unknown> }>();
   const revisions = new Map<string, NativeOwnRevision>();
   for (const row of rows) {
     if (row.body.kind === "create") revisions.set(row.action, { revision: row.action, text: row.body.text, status: row.status });
@@ -53,6 +54,36 @@ export function createVisualNativeTextFixture(empty = false) {
       server.context=String(args.requestId);server.name=String(args.serverName);server.display_name=String(args.displayName);
       if (!servers.length) servers.push(server);
       return result({backend:"text-v2",server:1,context:server.context,channel:"1",is_dm:false});
+    }
+    if (command === "decide_native_chat_held_post") {
+      if (!servers.length || args.server !== 1 || args.channel !== "1" || args.expectedContext !== server.context
+        || args.caseId !== held.caseId || args.action !== held.action || args.originalDigest !== held.originalDigest
+        || args.removalHeader !== held.removalHeader || args.removalEpoch !== held.removalEpoch
+        || typeof args.intent !== "string" || !/^[0-9a-f]{32}$/.test(args.intent)) {
+        throw new Error("Invalid review decision for this conversation");
+      }
+      const request = JSON.stringify([args.caseId, args.originalDigest, args.previousDecision, args.choice]);
+      const saved = reviewReceipts.get(args.intent);
+      if (saved) {
+        if (saved.request !== request) throw new Error("The saved decision request changed");
+        return result(structuredClone(saved.response));
+      }
+      const current = held.decision;
+      const previous = current.status === "selected" ? current.decisionBodyId : null;
+      const choice = args.choice;
+      if (args.previousDecision !== previous || current.status === "unavailable"
+        || (current.status === "selected" && current.choice === "approve")
+        || (current.status === "selected" && current.choice === "reject"
+          ? choice !== "reopen"
+          : choice !== "approve" && choice !== "reject")) {
+        throw new Error("The review decision changed");
+      }
+      const step = (reviewReceipts.size + 1).toString(16).padStart(63, "0");
+      const decisionBodyId = `a${step}`, streamEntryId = `b${step}`;
+      held.decision = { status: "selected", choice: choice as "approve" | "reject" | "reopen", decisionBodyId, streamEntryId };
+      const response = { status: "saved", caseId: held.caseId, intent: args.intent, choice, decisionBodyId, streamEntryId };
+      reviewReceipts.set(args.intent, { request, response });
+      return result(structuredClone(response));
     }
     if (["get_message_page", "send_message", "edit_message", "delete_message"].includes(command)) {
       if (args.server !== 1 || args.channel !== "1" || args.expectedContext !== server.context || !servers.length) throw new Error("Unknown Native Text fixture conversation");

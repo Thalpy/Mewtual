@@ -41,6 +41,7 @@ pub(crate) fn validate(object: &Map<String, Value>, version: u64) -> Result<(), 
         .as_object()
         .filter(|map| map.len() <= MAXIMUM)
         .ok_or(REFUSED)?;
+    let mut review_seen = false;
     for (key, item) in intents {
         let item = item.as_object().ok_or(REFUSED)?;
         if id(item.get("token"))? != key {
@@ -67,6 +68,13 @@ pub(crate) fn validate(object: &Map<String, Value>, version: u64) -> Result<(), 
                     text(item.get(field), 4096, false)?;
                 }
                 item.get("isDm").and_then(Value::as_bool).ok_or(REFUSED)?;
+            }
+            Some("review") => {
+                if review_seen || key.as_bytes()[32..].iter().all(|byte| *byte == b'0') {
+                    return Err(REFUSED);
+                }
+                review_seen = true;
+                validate_review_intent(item)?;
             }
             Some(kind @ ("create" | "edit" | "delete")) => {
                 item.get("server")
@@ -117,6 +125,72 @@ pub(crate) fn validate(object: &Map<String, Value>, version: u64) -> Result<(), 
     }
     Ok(())
 }
+
+fn validate_review_intent(item: &Map<String, Value>) -> Result<(), &'static str> {
+    exact(
+        item,
+        &[
+            "kind",
+            "token",
+            "server",
+            "channel",
+            "expectedContext",
+            "caseId",
+            "action",
+            "originalDigest",
+            "removalHeader",
+            "removalEpoch",
+            "previousDecision",
+            "choice",
+        ],
+    )?;
+    item.get("server")
+        .and_then(Value::as_u64)
+        .filter(|value| (1..=SAFE_INTEGER).contains(value))
+        .ok_or(REFUSED)?;
+    let channel = item
+        .get("channel")
+        .and_then(Value::as_str)
+        .filter(|text| text.len() <= 39)
+        .ok_or(REFUSED)?;
+    if channel
+        .parse::<u128>()
+        .ok()
+        .is_none_or(|value| value.to_string() != channel)
+    {
+        return Err(REFUSED);
+    }
+    let epoch = item
+        .get("removalEpoch")
+        .and_then(Value::as_str)
+        .filter(|text| text.len() <= 20)
+        .ok_or(REFUSED)?;
+    if epoch
+        .parse::<u64>()
+        .ok()
+        .is_none_or(|value| value == 0 || value.to_string() != epoch)
+    {
+        return Err(REFUSED);
+    }
+    for key in [
+        "expectedContext",
+        "caseId",
+        "action",
+        "originalDigest",
+        "removalHeader",
+    ] {
+        id(item.get(key))?;
+    }
+    let previous = item.get("previousDecision").ok_or(REFUSED)?;
+    if !previous.is_null() {
+        id(Some(previous))?;
+    }
+    match item.get("choice").and_then(Value::as_str) {
+        Some("approve" | "reject") => Ok(()),
+        Some("reopen") if !previous.is_null() => Ok(()),
+        _ => Err(REFUSED),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,6 +200,36 @@ mod tests {
     fn envelope(intent: Value) -> Value {
         let token = "01".repeat(32);
         serde_json::json!({"version":4,"drafts":{},"readMarks":{},"nativeTextIntents":{token:intent}})
+    }
+
+    #[test]
+    fn native_continuity_covers_one_exact_review_decision() {
+        let token = "01".repeat(32);
+        let review = serde_json::json!({
+            "kind": "review", "token": token, "server": 7, "channel": u128::MAX.to_string(),
+            "expectedContext": "02".repeat(32), "caseId": "03".repeat(32), "action": "04".repeat(32),
+            "originalDigest": "05".repeat(32), "removalHeader": "06".repeat(32),
+            "removalEpoch": "7", "previousDecision": "08".repeat(32), "choice": "reopen",
+        });
+        let root = envelope(review.clone());
+        assert!(crate::validate_ui_state_json(&root.to_string()).is_ok());
+        for (key, value) in [
+            ("previousDecision", Value::Null),
+            ("removalEpoch", "0".into()),
+            ("removalEpoch", "18446744073709551616".into()),
+            ("server", 0.into()),
+            ("choice", "delete".into()),
+        ] {
+            let mut invalid = review.clone();
+            invalid[key] = value;
+            assert!(crate::validate_ui_state_json(&envelope(invalid).to_string()).is_err());
+        }
+        let mut duplicate = root;
+        let mut second = review;
+        let second_token = "09".repeat(32);
+        second["token"] = second_token.clone().into();
+        duplicate["nativeTextIntents"][second_token] = second;
+        assert!(crate::validate_ui_state_json(&duplicate.to_string()).is_err());
     }
     #[test]
     fn native_continuity_critical4_accepts_exact_requests_and_preserves_old_closed_versions() {
