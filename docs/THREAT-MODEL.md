@@ -96,6 +96,15 @@ The first offered IDs stay fixed for the life of the connection and
 sweep. A retrieval must reprove the exact selected Create from an
 unchanged offer. Remote review never performs ordinary archive recovery.
 
+The original mounted founder accepts review replies through that same
+approved connection and selected prefix. Native expiry, lock and row
+replacement revoke the check and later disclosure of its result.
+An offered ID is a retrieval hint. Only an exact authenticated Create
+and the verified frozen Remove can supply withholding evidence. Reads
+of the ordinary archive and own outbox establish local ancestry or
+absence without applying unrelated pending writes. Only the
+founder-only hold storage receives a new unproven original.
+
 A holder's archive page exposes eligible IDs to a reciprocally approved
 peer on the original authenticated connection. Its continuation gives no
 raw offset, author ID or unoffered ActionId. The cursor is replayable on

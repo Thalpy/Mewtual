@@ -1,10 +1,13 @@
 //! Inspect and remove exact published admissions through the native row.
 use super::*;
 use catcoms_app::store::NativeTextJoinedContactConsent;
+use catcoms_replication::chat::owner_facts::OwnerFactId;
 use catcoms_replication::chat::owner_header::OwnerBodyId;
 use catcoms_sync::V2_MEMBER_CONTACT_BYTES;
 use std::net::IpAddr;
 use tauri::ipc::InvokeResponseBody;
+
+mod review;
 
 pub(super) const BUSY: &str = "Chat membership is busy. Retry the request.";
 const FAILED: &str = "Chat membership is unavailable for this conversation.";
@@ -14,12 +17,14 @@ pub(super) const COMMANDS: &[&str] = &[
     "share_native_chat_contact",
     "connect_native_chat_contact",
     "forget_native_chat_contacts",
+    "check_native_chat_removed_posts",
 ];
 const LIST: &str = COMMANDS[0];
 const REMOVE: &str = COMMANDS[1];
 const SHARE: &str = COMMANDS[2];
 const CONNECT: &str = COMMANDS[3];
 const FORGET: &str = COMMANDS[4];
+const REVIEW: &str = COMMANDS[5];
 
 enum Operation {
     List,
@@ -27,6 +32,11 @@ enum Operation {
     Share,
     Connect([u8; V2_MEMBER_CONTACT_BYTES], IpAddr, bool),
     Forget,
+    Review {
+        admission: OwnerFactId,
+        contact: [u8; V2_MEMBER_CONTACT_BYTES],
+        deadline: review::Deadline,
+    },
 }
 
 pub(super) fn handles(command: &str) -> bool {
@@ -56,12 +66,14 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
         let account = keep_session::current(&state, generation).ok_or(listing::STALE)?;
         let (server, context, operation) =
             parse(invoke.message.command(), invoke.message.payload())?;
-        let permit = state
-            .native_text
-            .inflight
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| BUSY)?;
+        // A review check waits on a peer between short local turns. It
+        // cannot reserve the ordinary command slot during that wait.
+        let lane = if matches!(&operation, Operation::Review { .. }) {
+            &state.native_text.removed_post_checks
+        } else {
+            &state.native_text.inflight
+        };
+        let permit = lane.clone().try_acquire_owned().map_err(|_| BUSY)?;
         let mut source_payment = Some(state.native_text.ui_budget.prepare().map_err(|_| BUSY)?);
         let table = state.servers.try_lock().map_err(|_| BUSY)?;
         let row = table.native(&server).ok_or(listing::STALE)?;
@@ -72,7 +84,7 @@ pub(super) fn route<R: tauri::Runtime>(invoke: Invoke<R>, spawn: &impl Fn(Task))
             &row.data().selection,
             server_table::NativeSelection::Founder(_)
         );
-        if (!founder && matches!(operation, Operation::Remove(_)))
+        if (!founder && matches!(operation, Operation::Remove(_) | Operation::Review { .. }))
             || (founder
                 && matches!(
                     operation,
@@ -136,6 +148,18 @@ async fn perform(
     founder: bool,
     consent: Option<NativeTextJoinedContactConsent>,
 ) -> Result<(String, Option<catcoms_app::store::NativeTextRoster>), &'static str> {
+    if let Operation::Review {
+        admission,
+        contact,
+        deadline,
+    } = &operation
+    {
+        // The main-window invocation captures this exact signed contact,
+        // selected row and former Admission before scheduling any work.
+        return review::check(state, source, *admission, *contact, deadline)
+            .await
+            .map(|body| (body, None));
+    }
     let negative = source.negative();
     let local = source
         .member_work()
@@ -336,6 +360,28 @@ fn parse(command: &str, body: &InvokeBody) -> Result<(u64, [u8; 32], Operation),
             Operation::Connect(decode_exact_hex(contact)?, host, remember)
         }
         FORGET if fields.len() == 2 => Operation::Forget,
+        REVIEW if fields.len() == 4 => {
+            let raw = decode_exact_hex(
+                fields
+                    .get("expectedAdmission")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(FAILED)?,
+            )?;
+            let contact = decode_exact_hex(
+                fields
+                    .get("contact")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(FAILED)?,
+            )?;
+            if raw == [0; 32] {
+                return Err(FAILED);
+            }
+            Operation::Review {
+                admission: OwnerFactId::from_bytes(raw),
+                contact,
+                deadline: review::Deadline::new(Arc::new(SystemClock)),
+            }
+        }
         REMOVE if fields.len() == 3 => {
             let label = fields
                 .get("expectedAdmission")
@@ -405,6 +451,21 @@ mod tests {
             assert!(parse(REMOVE, &body(value)).is_err());
         }
         let contact = "ab".repeat(V2_MEMBER_CONTACT_BYTES);
+        assert!(matches!(
+            parse(REVIEW, &body(serde_json::json!({
+                "server": 1, "expectedAdmission": &label, "contact": &contact,
+            }))),
+            Ok((1, context, Operation::Review { admission, .. }))
+                if context == original_context && admission.as_bytes() == target.as_bytes()
+        ));
+        assert!(parse(
+            REVIEW,
+            &body(serde_json::json!({
+                "server": 1, "expectedAdmission": &label, "contact": &contact,
+                "approvedHost": "127.0.0.1",
+            }))
+        )
+        .is_err());
         assert!(matches!(
             parse(
                 CONNECT,

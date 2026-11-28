@@ -64,6 +64,24 @@ impl<'a> V2MemberContactData<'a> {
         self.admission
     }
 
+    /// Reprove the current signed holder against the actual connected peer.
+    /// The caller retains its approved contact and original connection.
+    pub fn require_review_holder(
+        &self,
+        verifier: &V2GeneralPrefixVerifier,
+        connected_peer: catcoms_rt::PeerId,
+    ) -> Result<OwnerFactId, SyncError> {
+        if blake3::hash(self.peer).as_bytes() != connected_peer.as_bytes() {
+            return Err(SyncError::JoinRejected);
+        }
+        self.verify_selected(verifier)?;
+        let admission = OwnerFactId::from_bytes(*self.admission.as_bytes());
+        verifier
+            .observe_live_member(admission)
+            .map_err(|_| SyncError::JoinRejected)?;
+        Ok(admission)
+    }
+
     fn verify_selected(&self, verifier: &V2GeneralPrefixVerifier) -> Result<(), SyncError> {
         let replay = verifier.replay_data();
         if replay.profile().id().as_bytes() != self.profile
