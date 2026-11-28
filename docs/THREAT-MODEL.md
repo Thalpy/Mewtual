@@ -4303,8 +4303,20 @@ founder leaves through exact Stage selection. A foreign claim, crossed
 marker, unexpected entry or unsupported opener stops before the journal
 can acquire authority. Once selected, ID11 prevents an ID10-only binary
 from treating the vault as an older layout. Native startup does not yet
-provision it automatically, and an empty journal supplies no decision or
-message admission.
+provision it automatically, and its mounted declaration supplies no decision
+or message admission. Occupied or corrupt transaction names are classified
+only in the review operation after the exact mount has been proved.
+
+The first review signature requires the original founder, exact witnessed
+hold, the selected frozen admission and a strict ID8 absence check. A
+successful dedicated native key entry is required before obtaining Raw.
+Once obtained, that exact output can be covered after UI cancellation.
+A same-vault warm retry can finish its own short file and an Attempt
+provably left before its signer was called. Cold or ambiguous Attempt
+has no permission to enter the key again. A file that is merely readable
+is synced by its original identity before use. Result disclosure remains
+bound to the current native command. These checks produce private data
+for a future journal selector.
 
 ## Chat history admission and retained audit (20 October, continuation)
 

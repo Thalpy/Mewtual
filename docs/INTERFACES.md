@@ -972,9 +972,14 @@ signed position and exact membership anchor, using the pinned founder key. The a
 proof can recheck the signed original and frozen removal without evaluating parent readiness
 or storage durability. The internal ID11 declaration consumes a verified founder's ID10
 catalog and keeps all preceding descriptors exact. The native founder startup reader
-can recover the covered declaration and mount an empty decision directory. Ordinary
-startup leaves existing vaults on their original format. Stream selection, durable
-decisions and native commands remain to be implemented.
+can recover the covered declaration. Once the journal is selected, its separately
+classified transaction files can refuse review without changing the original
+founder history path. Ordinary startup leaves existing vaults on their original
+format. The initial review request names the exact expected case, original digest,
+Remove and stable intent. The original recovered member source can cover its first
+signature through a dedicated native key cut. The returned entry carries no selected
+decision or approval authority. Stream selection, later epoch recovery, delivery
+and native commands remain to be implemented.
 [Exact contract](communication-recovery/CHAT-OWNER-V2-REVIEW-DECISION.md).
 
 ## Guarded current chat projection core (5 November; authored, unexecuted)

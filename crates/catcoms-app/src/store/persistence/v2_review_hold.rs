@@ -23,10 +23,10 @@ pub(super) const MAX_FRAME: usize = MAX_REMOVED_CREATE_RECORD_BYTES + 40;
 /// reproof against the selected governing prefix before any decision.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(in crate::store) struct HeldCase {
-    pub(super) id: ReviewCaseId,
-    pub(super) action: ActionId,
-    pub(super) original: OriginalActionDigest,
-    pub(super) removal: (OwnerHeaderId, u64),
+    pub(in crate::store) id: ReviewCaseId,
+    pub(in crate::store) action: ActionId,
+    pub(in crate::store) original: OriginalActionDigest,
+    pub(in crate::store) removal: (OwnerHeaderId, u64),
 }
 
 /// Sealed incoming data is bound to the actual vault, group incarnation
@@ -248,4 +248,4 @@ impl NativeTextHeldReviewPage {
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::store::persistence) mod tests;

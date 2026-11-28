@@ -61,10 +61,20 @@ joined pins and archive must still agree when cold recovery selects the
 new catalog. Startup can read that format but does not provision it
 automatically. An ID10-only build refuses a vault once ID11 is selected.
 The Windows cold fixture selects the original covered Stage after the
-hold marker is restored. The same fixture preserves an unexpected journal
-file and refuses the open. Five focused App cases and the focused Core
-review cases passed. The old grammar was exercised in-process.
-The decision writer, approval delivery and activation remain open.
+hold marker is restored. Once the declaration is settled, an unexpected
+journal file stays on disk and stops review work. The founder row still
+opens. The old grammar was exercised in-process.
+
+The App can cover the first exact review signature on the original
+recovered founder. It retains one bounded retry in the same vault after
+a short write. A recovered complete file receives its own sync before
+the writer relies on it. The private result stays in the journal.
+Eleven focused App tests passed on Windows. The three-vault TCP fixture
+exercised retries before signing, exact recovery of a short write and
+a full reopen after a torn signature file. The torn file stays
+unchanged while the founder can read its roster and ordinary archive.
+Selected decisions, recovery across a later membership epoch, approval
+delivery and activation remain open.
 
 ## Rejoin from the retired native session
 

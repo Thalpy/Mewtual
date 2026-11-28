@@ -502,7 +502,7 @@ impl RecoveredReviewSelection {
         self.history.require(store)?;
         held.require(store)?;
         if let Some(journal) = &selected.review_decision {
-            journal.require(store)?;
+            journal.require_empty_declaration(store)?;
         }
         Ok(())
     }

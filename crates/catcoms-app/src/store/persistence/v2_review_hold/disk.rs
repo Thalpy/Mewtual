@@ -17,7 +17,7 @@ mod audit;
 mod receipt;
 pub use audit::SelectedHeldCase;
 pub(in crate::store) use audit::{
-    HeldReviewQuery, HoldRootRead, PreparedHeldWindow, SelectedHeldWindow,
+    HeldReviewQuery, HoldRootRead, PreparedHeldWindow, SelectedHeldWindow, SelectedReviewOriginal,
 };
 use receipt::Witnesses;
 

@@ -22,7 +22,7 @@ pub use source_close::NativeChatSourceClose;
 
 const CLOSED: usize = 1 << (usize::BITS - 1);
 const MAX_ENTRIES: usize = 32;
-const PURPOSES: usize = 15;
+const PURPOSES: usize = 16;
 
 /// Closed purposes selected by concrete producers, never a WebView permission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +56,9 @@ pub enum NativeChatKeyPurpose {
     RemovalHeader,
     /// Advertise this already admitted member's original TCP listener.
     MemberContact,
+    /// Sign an exact held-post decision after its original intent and
+    /// attempt are covered by the recovered founder's App journal.
+    ReviewDecision,
 }
 impl NativeChatKeyPurpose {
     fn slot(self) -> usize {
@@ -77,6 +80,7 @@ impl NativeChatKeyPurpose {
             Self::RemoveSdk => 12,
             Self::RemovalHeader => 13,
             Self::MemberContact => 14,
+            Self::ReviewDecision => 15,
         }
     }
 }

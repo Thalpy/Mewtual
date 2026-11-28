@@ -3,18 +3,22 @@
 use super::*;
 use crate::store::critical_namespaces::CatalogReadReservation;
 use crate::store::persistence::native_registry::network::NetworkDependency;
-use crate::store::persistence::v2_member_outbox::member_outbox_key;
+use crate::store::persistence::v2_member_outbox::{member_outbox_key, MemberOutboxContextId};
 use crate::store::persistence::v2_member_transport::{
     replay_local_member_dependencies, HISTORY_DEPENDENCY_READS,
 };
-use crate::store::persistence::v2_shared_history::MAX_SHARED_HISTORY_RECORDS;
+use crate::store::persistence::v2_shared_history::{
+    SharedHistoryScope, MAX_SHARED_HISTORY_RECORDS,
+};
+use crate::store::ServerStore;
 use catcoms_net::{
     NativeChatMemberDependencyExchange, NativeChatMemberDependencyObservation,
     NativeChatMemberInventoryExchange,
 };
 use catcoms_replication::chat::{
-    owner_facts::OwnerFactId, ActionId, ChatLedger, LedgerLimits, Realm, SignedAction,
-    V2FrozenAdmission, V2GeneralPrefixVerifier, MAX_ACTION_BYTES, MAX_PARENTS,
+    owner_facts::OwnerFactId, ActionId, ChatLedger, LedgerLimits, ProjectionGroupView,
+    ProjectionView, Realm, SignedAction, V2FrozenAdmission, V2GeneralPrefixVerifier,
+    V2RemovedCreateEvidence, MAX_ACTION_BYTES, MAX_PARENTS,
 };
 use catcoms_rt::{ConnectionLease, CHAT_V2_DEPENDENCY_RESPONSE_MAX_BYTES};
 use catcoms_sync::owner_v2::{
@@ -42,7 +46,7 @@ const WIRE_FEE: usize = 6 * CHAT_V2_DEPENDENCY_RESPONSE_MAX_BYTES + 16 * 1024;
 const SWEEP_FEE: usize = MAX_SHARED_HISTORY_RECORDS * 128 + 16 * 1024;
 const ANCESTRY_BYTES: usize = HISTORY_DEPENDENCY_READS * MAX_ACTION_BYTES;
 const ANCESTRY_WORK: usize = 4 * HISTORY_DEPENDENCY_READS + MAX_PARENTS;
-const VERIFY_FEE: usize = 2 * ANCESTRY_BYTES
+pub(super) const VERIFY_FEE: usize = 2 * ANCESTRY_BYTES
     + HISTORY_DEPENDENCY_READS * (MAX_PARENTS + 2) * 256
     + 2 * V2GeneralPrefixVerifier::removed_create_review_temporary_layout_bytes()
     + 2 * MAX_ACTION_BYTES;
@@ -427,68 +431,18 @@ impl NativeTextColdFounderSource {
                 {
                     return Err(refused());
                 }
-                let realm = Realm::new(&scope.group, scope.channel).map_err(|_| refused())?;
-                let mut ledger = ChatLedger::new(
-                    realm,
-                    LedgerLimits {
-                        max_actions: HISTORY_DEPENDENCY_READS,
-                        max_action_bytes: ANCESTRY_BYTES,
-                    },
-                )
-                .map_err(|_| refused())?;
-                let view = ledger
-                    .begin_projection_view_in(group)
-                    .map_err(|_| refused())?;
-                let retired = frozen.iter().collect::<Vec<_>>();
                 let exact = original.original_data();
-                let action = SignedAction::decode(exact).map_err(|_| refused())?;
-                verifier
-                    .require_removed_review_create(author, &action)
-                    .map_err(|_| refused())?;
-                let mut roots = action.spec().parents.clone();
-                if let catcoms_replication::chat::Body::Create {
-                    reply_to: Some(parent),
-                    ..
-                } = action.spec().body
-                {
-                    if !roots.contains(&parent) {
-                        roots.push(parent);
-                    }
-                }
                 let mut require_current = || {
                     current()?;
                     require()
                 };
-                if !roots.is_empty() {
-                    // Resolve only authenticated local ancestry before
-                    // taking the strict ordinary-history absence guard.
-                    replay_local_member_dependencies(
-                        &roots,
-                        (verifier, &retired, &mut ledger, &view),
-                        ANCESTRY_WORK,
-                        (store, scope),
-                        |id| {
-                            use crate::store::V2MemberSaveRefusal as Refusal;
-                            let Some(outbox) = store
-                                .installed_member_outbox_mount()
-                                .map_err(|_| Refusal::Busy)?
-                            else {
-                                return Ok(None);
-                            };
-                            let key = member_outbox_key(store).map_err(|_| Refusal::Unavailable)?;
-                            outbox
-                                .read_selected_history_action(store, outbox_context, &key, id)
-                                .map_err(|_| Refusal::Busy)
-                        },
-                        || require_current().map_err(|_| crate::store::V2MemberSaveRefusal::Stale),
-                    )
-                    .map_err(|_| refused())?;
-                }
-                let derive = |bytes: &[u8]| {
-                    verifier
-                        .verify_removed_create_for_review(bytes, author, &ledger, &view, &retired)
-                        .map_err(|_| refused())
-                };
+                let ancestry = review_ancestry(
+                    (store, scope, outbox_context),
+                    (verifier, group, frozen),
+                    (author, exact),
+                    &mut require_current,
+                )?;
+                let derive = |bytes: &[u8]| ancestry.evidence(verifier, author, bytes);
                 let evidence = derive(exact)?;
                 let retained = store.retain_removed_create(
                     scope,
@@ -503,7 +457,7 @@ impl NativeTextColdFounderSource {
     }
 }
 
-fn frozen_author(
+pub(super) fn frozen_author(
     frozen: &[V2FrozenAdmission],
     admission: OwnerFactId,
 ) -> Result<&V2FrozenAdmission, AppError> {
@@ -511,6 +465,101 @@ fn frozen_author(
         .iter()
         .find(|author| author.admission_id_data() == admission)
         .ok_or_else(refused)
+}
+
+pub(super) struct ReviewAncestry<'a> {
+    view: ProjectionView,
+    ledger: ChatLedger,
+    retired: Vec<&'a V2FrozenAdmission>,
+}
+
+impl ReviewAncestry<'_> {
+    pub(super) fn evidence(
+        &self,
+        verifier: &V2GeneralPrefixVerifier,
+        author: &V2FrozenAdmission,
+        bytes: &[u8],
+    ) -> Result<V2RemovedCreateEvidence, AppError> {
+        verifier
+            .verify_removed_create_for_review(
+                bytes,
+                author,
+                &self.ledger,
+                &self.view,
+                &self.retired,
+            )
+            .map_err(|_| refused())
+    }
+}
+
+/// Resolve authenticated local dependencies before taking the strict ID8
+/// absence guard. This path can retain a reply with missing ancestry for
+/// review. The actual Approve body refuses until the parent is verified.
+pub(super) fn review_ancestry<'a>(
+    (store, scope, outbox_context): (&ServerStore, SharedHistoryScope, MemberOutboxContextId),
+    (verifier, group, frozen): (
+        &V2GeneralPrefixVerifier,
+        &ProjectionGroupView,
+        &'a [V2FrozenAdmission],
+    ),
+    (author, exact): (&V2FrozenAdmission, &[u8]),
+    require_current: &mut dyn FnMut() -> Result<(), AppError>,
+) -> Result<ReviewAncestry<'a>, AppError> {
+    let realm = Realm::new(&scope.group, scope.channel).map_err(|_| refused())?;
+    let mut ledger = ChatLedger::new(
+        realm,
+        LedgerLimits {
+            max_actions: HISTORY_DEPENDENCY_READS,
+            max_action_bytes: ANCESTRY_BYTES,
+        },
+    )
+    .map_err(|_| refused())?;
+    let view = ledger
+        .begin_projection_view_in(group)
+        .map_err(|_| refused())?;
+    let retired = frozen.iter().collect::<Vec<_>>();
+    let action = SignedAction::decode(exact).map_err(|_| refused())?;
+    verifier
+        .require_removed_review_create(author, &action)
+        .map_err(|_| refused())?;
+    let mut roots = action.spec().parents.clone();
+    if let catcoms_replication::chat::Body::Create {
+        reply_to: Some(parent),
+        ..
+    } = action.spec().body
+    {
+        if !roots.contains(&parent) {
+            roots.push(parent);
+        }
+    }
+    if !roots.is_empty() {
+        replay_local_member_dependencies(
+            &roots,
+            (verifier, &retired, &mut ledger, &view),
+            ANCESTRY_WORK,
+            (store, scope),
+            |id| {
+                use crate::store::V2MemberSaveRefusal as Refusal;
+                let Some(outbox) = store
+                    .installed_member_outbox_mount()
+                    .map_err(|_| Refusal::Busy)?
+                else {
+                    return Ok(None);
+                };
+                let key = member_outbox_key(store).map_err(|_| Refusal::Unavailable)?;
+                outbox
+                    .read_selected_history_action(store, outbox_context, &key, id)
+                    .map_err(|_| Refusal::Busy)
+            },
+            || require_current().map_err(|_| crate::store::V2MemberSaveRefusal::Stale),
+        )
+        .map_err(|_| refused())?;
+    }
+    Ok(ReviewAncestry {
+        view,
+        ledger,
+        retired,
+    })
 }
 
 fn frozen_target(

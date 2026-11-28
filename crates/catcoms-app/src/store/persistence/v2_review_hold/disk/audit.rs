@@ -68,6 +68,44 @@ struct SelectedCaseRead {
     witness: receipt::WitnessRead,
 }
 
+/// Paid exact record carried across dependency reads and the decision
+/// admission checks. The caller lends the mounted ID10 root proof.
+pub(in crate::store) struct SelectedReviewOriginal {
+    opened: OpenedHold,
+    proof: SelectedCaseRead,
+    directory: HeldDirectory,
+    root: HoldRootRead,
+    _lease: VaultPhysicalWorkLease,
+    _fee: CatalogReadReservation,
+}
+
+impl SelectedReviewOriginal {
+    pub(in crate::store) fn require_original(&mut self) -> Result<(), AppError> {
+        self.with_original_data(|_, require| require())
+    }
+
+    pub(in crate::store) fn with_original_data<T>(
+        &mut self,
+        work: impl FnOnce(&[u8], &mut dyn FnMut() -> Result<(), AppError>) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        let Self {
+            opened,
+            proof,
+            directory,
+            root,
+            ..
+        } = self;
+        let mut require = || {
+            root.require()?;
+            directory.require()?;
+            proof.require()?;
+            directory.require()?;
+            root.require()
+        };
+        work(&opened.plain, &mut require)
+    }
+}
+
 impl SelectedCaseRead {
     fn require(&mut self) -> Result<(), AppError> {
         require_exact_held(&self.path, &mut self.file, &self.bytes)?;
@@ -216,24 +254,9 @@ impl HoldDisk {
         label: [u8; 32],
         verify: &mut impl FnMut(&V2RemovedCreateRecord<'_>) -> Result<SignedAction, AppError>,
     ) -> Result<(SelectedHeldCase, SelectedCaseRead), AppError> {
-        let witnesses = self.witnesses.as_ref().ok_or_else(refused)?;
-        let path = self
-            .directory
-            .child(&format!("{}{HOLD_SUFFIX}", hex::encode(label)));
-        let selected = self.read_frame(&path)?.ok_or_else(refused)?;
-        let witness = witnesses.require_selected(&self.scope, key, label, &selected.bytes)?;
-        let opened = self.scope.open(key, &selected.bytes)?;
-        if self.scope.file_label(key, opened.identity.id) != label {
-            return Err(refused());
-        }
+        let (opened, mut proof) = self.open_original_case(key, label)?;
         let data = V2RemovedCreateRecord::decode(&opened.plain).map_err(|_| refused())?;
         let signed = verify(&data)?;
-        let mut proof = SelectedCaseRead {
-            path,
-            file: (selected.file, selected.native),
-            bytes: selected.bytes,
-            witness,
-        };
         proof.require()?;
         Ok((
             SelectedHeldCase {
@@ -245,6 +268,59 @@ impl HoldDisk {
             },
             proof,
         ))
+    }
+
+    /// Read the exact case named by the founder request. This read cannot
+    /// create a hold, repair its witness, or select any review effect.
+    pub(in crate::store::persistence) fn prepare_selected_review_original(
+        &self,
+        key: &[u8; 32],
+        expected: HeldCase,
+        root: HoldRootRead,
+        session: &VaultSessionGuard,
+    ) -> Result<SelectedReviewOriginal, AppError> {
+        let lease = session.retain_for_physical_work();
+        let fee = self.pool.try_reserve(WORK)?;
+        self.require(key, &fee)?;
+        let (opened, proof) =
+            self.open_original_case(key, self.scope.file_label(key, expected.id))?;
+        if opened.identity != expected {
+            return Err(refused());
+        }
+        let mut selected = SelectedReviewOriginal {
+            opened,
+            proof,
+            directory: self.directory.try_clone()?,
+            root,
+            _lease: lease,
+            _fee: fee,
+        };
+        selected.require_original()?;
+        Ok(selected)
+    }
+
+    fn open_original_case(
+        &self,
+        key: &[u8; 32],
+        label: [u8; 32],
+    ) -> Result<(OpenedHold, SelectedCaseRead), AppError> {
+        let witnesses = self.witnesses.as_ref().ok_or_else(refused)?;
+        let path = self
+            .directory
+            .child(&format!("{}{HOLD_SUFFIX}", hex::encode(label)));
+        let selected = self.read_frame(&path)?.ok_or_else(refused)?;
+        let witness = witnesses.require_selected(&self.scope, key, label, &selected.bytes)?;
+        let opened = self.scope.open(key, &selected.bytes)?;
+        if self.scope.file_label(key, opened.identity.id) != label {
+            return Err(refused());
+        }
+        let proof = SelectedCaseRead {
+            path,
+            file: (selected.file, selected.native),
+            bytes: selected.bytes,
+            witness,
+        };
+        Ok((opened, proof))
     }
 }
 

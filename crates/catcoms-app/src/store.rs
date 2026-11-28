@@ -137,6 +137,8 @@ pub use native_text_invite::{
     NativeTextSavedJoinResponse, MAX_NATIVE_TEXT_INVITE_PACKET_BYTES,
 };
 pub use native_text_roster::{NativeTextRoster, NativeTextRosterMember};
+mod native_text_review;
+pub use native_text_review::NativeTextInitialReviewRequest;
 pub use persistence::governance_layout::joined::rejoin::{
     NativeTextRejoinIndexReceipt, NativeTextRejoinOutcomeReceipt, NativeTextRejoinPendingReceipt,
     NativeTextRejoinPrefixReceipt, NativeTextRejoinReceivedReceipt, NativeTextRejoinWelcomeStatus,

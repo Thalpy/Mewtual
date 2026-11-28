@@ -21,6 +21,7 @@ mod publication;
 mod receiving;
 mod replies;
 mod review;
+mod review_decision;
 #[cfg(test)]
 mod tests;
 pub use publication::{NativeTextColdFounderPublication, NativeTextColdFounderPublicationReceipt};

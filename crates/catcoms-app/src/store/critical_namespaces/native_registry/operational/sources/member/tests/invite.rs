@@ -2613,6 +2613,16 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
                         founder_dir.path(), SECRET, &mut history_rng, current_policy(),
                     ).unwrap();
+                    {
+                        use crate::store::critical_namespaces::review_hold_namespace::declaration::ReviewDeclarationKind;
+                        let store = cold.actual_store_for_test().unwrap();
+                        let mut journal = store.prepare_founder_review_declaration(ReviewDeclarationKind::Decision, &mut history_rng).unwrap();
+                        journal.select(store).unwrap();
+                    }
+                    drop(cold);
+                    cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+                        founder_dir.path(), SECRET, &mut history_rng, current_policy(),
+                    ).unwrap();
                 }
                 let mut cold = cold
                     .prepare_recovered_founder()
@@ -2629,6 +2639,9 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     .members()
                     .iter()
                     .any(|member| member.founder && member.you));
+                let (_cancel, signal) = tokio::sync::watch::channel(true);
+                let closed = RequestCancellation::new(signal, None);
+                assert!(cold.governed_roster(&closed).is_err());
                 if let Some(action) = late {
                     use catcoms_sync::owner_v2::V2RemovedReviewQuery;
                     use crate::store::NativeTextFounderReviewResult;
@@ -2686,7 +2699,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     ).unwrap().prepare_recovered_founder().map_err(|(_, error)| error).unwrap();
                     let audit = cold.selected_held_review_window(channel, None, 2, &fresh).unwrap();
                     assert!(audit.continuation().is_none());
-                    audit.with_records(|records, unavailable| {
+                    let case = audit.with_records(|records, unavailable| {
                         assert_eq!(unavailable, 0);
                         let [record] = records.unwrap() else {
                             panic!("the audit sees the one exact covered hold after reopen");
@@ -2699,6 +2712,12 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                             Body::Create { text, reply_to: None }
                                 if text == "Only the surviving member saw this post"
                         ));
+                        crate::store::persistence::v2_review_hold::HeldCase {
+                            id: record.case,
+                            action,
+                            original: record.original,
+                            removal: record.removal,
+                        }
                     }).unwrap();
                     drop(audit);
                     let directory = std::fs::read_dir(founder_dir.path().join("chat-v2-removed-holds"))
@@ -2709,10 +2728,102 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     assert!(cold.selected_held_review_window(channel, None, 2, &fresh).is_err());
                     std::fs::remove_dir(&directory).unwrap();
                     std::fs::rename(&parked, &directory).unwrap();
+                    use crate::store::NativeTextInitialReviewRequest;
+                    use crate::store::persistence::governance_layout::joined::review_decision::{
+                        with_review_control_fault, ReviewControlFault,
+                    };
+                    use catcoms_replication::chat::owner_bodies::{ExactReviewOriginal, ReviewDecision};
+                    let authorized = Arc::new(AtomicU64::new(0));
+                    let (vault, sources, recovered_row, authentication) = cold
+                        .into_recovered_native_sources(
+                            (Arc::new(AtomicU64::new(7)), authorized.clone(), Arc::new(AtomicBool::new(false))),
+                            founder_budget.clone(), &policy(), SECRET, super::inputs(), &fresh,
+                        ).unwrap();
+                    assert!(authentication.is_for_original_vault(&vault));
+                    authorized.store(7, std::sync::atomic::Ordering::SeqCst);
+                    let review = |decision| sources.capture_member(
+                        &recovered_row,
+                        command(&vault, &founder_budget),
+                        sources.policy.prepare_member().unwrap(),
+                    ).cover_initial_founder_review(
+                        NativeTextInitialReviewRequest::new(
+                            channel,
+                            (case.id, action, ExactReviewOriginal {
+                                digest: case.original,
+                                remove_header: case.removal.0,
+                                remove_epoch: case.removal.1,
+                            }),
+                            [0xb1; 16],
+                            decision,
+                        ),
+                        &fresh,
+                    );
+                    let journal = founder_dir.path().join("chat-v2-review-decisions");
+                    let raw_path = journal.join("key.raw");
+                    for cut in [ReviewControlFault::BeforeAttempt, ReviewControlFault::BeforeIntentFileSync] {
+                        let (stopped, cut_used) = with_review_control_fault(
+                            cut, || review(ReviewDecision::Approve),
+                        );
+                        assert!(stopped.is_err() && cut_used);
+                        assert!(journal.join("intent.pending").is_file());
+                        assert!(!journal.join("key.attempt").exists());
+                        assert!(!raw_path.exists());
+                    }
+                    let (stopped, cut_used) = with_review_control_fault(
+                        ReviewControlFault::BeforeFreshKey, || review(ReviewDecision::Approve),
+                    );
+                    assert!(stopped.is_err() && cut_used);
+                    assert!(journal.join("key.attempt").is_file());
+                    assert!(!raw_path.exists());
+                    let (stopped, cut_used) = with_review_control_fault(
+                        ReviewControlFault::ShortRawWrite, || review(ReviewDecision::Approve),
+                    );
+                    assert!(stopped.is_err() && cut_used);
+                    let partial = std::fs::read(&raw_path).unwrap();
+                    let (selected, entered_again) = with_review_control_fault(
+                        ReviewControlFault::BeforeFreshKey, || review(ReviewDecision::Approve),
+                    );
+                    assert!(!entered_again, "the retained exact Raw must not sign again");
+                    let selected = selected.unwrap();
+                    assert_eq!(selected.position_data().sequence, 1);
+                    assert_eq!(selected.position_data().membership_header, removed_head);
+                    assert_eq!(selected.position_data().membership_epoch, removed_epoch);
+                    let raw = std::fs::read(&raw_path).unwrap();
+                    assert!(raw.starts_with(&partial) && partial.len() < raw.len());
+                    let (stopped, cut_used) = with_review_control_fault(
+                        ReviewControlFault::BeforeRawFileSync, || review(ReviewDecision::Approve),
+                    );
+                    assert!(stopped.is_err() && cut_used);
+                    assert_eq!(review(ReviewDecision::Approve).unwrap(), selected);
+                    assert!(review(ReviewDecision::Reject).is_err());
+                    assert_eq!(std::fs::read(&raw_path).unwrap(), raw);
+
+                    let mut retiring = sources.prepare_retirement().unwrap();
+                    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                        while retiring.try_retire().unwrap()
+                            == crate::store::NativeTextSourceRetirementStatus::Pending
+                        {
+                            tokio::task::yield_now().await;
+                        }
+                    }).await.expect("the native founder releases the original journal and actor");
+                    drop((retiring, recovered_row, sources, vault));
+                    // Reopen without any warm bytes. A short Raw cannot mint
+                    // a decision or make the ordinary founder unavailable.
+                    std::fs::write(&raw_path, &partial).unwrap();
+                    let reopened = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+                        founder_dir.path(), SECRET, &mut history_rng, current_policy(),
+                    ).unwrap();
+                    let store = reopened.actual_store_for_test().unwrap();
+                    assert!(store.with_review_decision_control::<()>(|_, _| {
+                        panic!("a cold torn Raw cannot enter review")
+                    }).is_err());
+                    assert_eq!(std::fs::read(raw_path).unwrap(), partial);
+                    let mut reopened = reopened.prepare_recovered_founder().map_err(|(_, error)| error).unwrap();
+                    assert_eq!(reopened.governed_roster(&fresh).unwrap().members().len(), 2);
+                    assert!(reopened.archived_message_projection(
+                        channel, action, &fresh, &mut history_rng,
+                    ).unwrap().is_none());
                 }
-                let (_cancel, signal) = tokio::sync::watch::channel(true);
-                let closed = RequestCancellation::new(signal, None);
-                assert!(cold.governed_roster(&closed).is_err());
             })
             .await;
             return;
@@ -6578,7 +6689,14 @@ async fn review_decision_native_cold_selection_requires_the_original_hold_and_an
     drop(selected);
     let debris = root.path().join("chat-v2-review-decisions/torn-record");
     std::fs::write(&debris, b"torn decision record").unwrap();
-    assert!(open(&mut rng).is_err());
+    let reopened = open(&mut rng).expect("the selected founder can use ordinary history");
+    assert_eq!(reopened.row_count_data().unwrap(), 1);
+    let store = reopened.actual_store_for_test().unwrap();
+    assert!(store
+        .with_review_decision_control::<()>(|_, _| panic!(
+            "unexpected files cannot enter a decision"
+        ))
+        .is_err());
     assert_eq!(std::fs::read(debris).unwrap(), b"torn decision record");
     assert_eq!(std::fs::read(current_path).unwrap(), candidate);
 }

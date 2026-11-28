@@ -74,9 +74,13 @@ keyed marker and a domain-specific declaration seed. Cold startup proves
 the covered claim, exact original hold and the empty selected directory.
 It can recover an admitted declaration, but ordinary founder startup does
 not provision the journal before the decision writer is integrated. An
-older ID10-only build refuses once ID11 is selected. The decision writer,
-historical membership proof, selected case lookup, fork persistence and
-delivery admission remain open.
+older ID10-only build refuses once ID11 is selected. The original
+recovered founder can cover the first signature under the App's exact
+Intent, Attempt and Raw files. It rechecks the original hold, current
+membership and ordinary archive before the dedicated native key call.
+The covered signature is private and has no selected case result.
+Selection, later membership recovery, fork persistence and delivery
+admission remain open.
 
 ### Covered founder audit
 
