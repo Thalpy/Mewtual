@@ -735,3 +735,26 @@ live Admission at the actual selected head before attempting a route. Both
 peers need an authenticated live connection before history recovery starts.
 **Forget saved contacts** clears the disk record and revokes pending restored
 work. A later governing head needs a fresh contact approval for cold startup.
+
+## Discover members on existing authenticated connections
+
+The passive discovery exchange proves that both connection endpoints hold
+current Admissions in the same selected group. The request and reply use
+separate keys derived from the selected Profile, governing Header, epoch,
+and ordered transport peers. The encrypted reply binds the exact request.
+Each side also checks the signed contact against the expected Noise peer.
+Only a verified current requester receives a reply. The encrypted proof
+includes a signed listener port. Discovery does not use it to dial.
+
+The Sync exchange is independent of native dispatch. Native must capture
+the original authenticated connection and current row through verification
+and reply delivery. It must reuse one paid current signed proof per row and
+governing head. An incoming request cannot request a new signature. Any
+discovered contact should expire with its original connection, membership,
+or row. This is for ordinary history on existing connections. It grants no
+standing address approval or access to removed-member review.
+
+The initial exchange requires the same selected head and epoch on both
+sides. Peers with different heads still use the existing governing recovery
+route. Fair candidate rotation, native transport acceptance and mixed-version
+behavior need to be verified before this path is enabled.

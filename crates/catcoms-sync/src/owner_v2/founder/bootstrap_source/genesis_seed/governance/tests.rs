@@ -23,6 +23,7 @@ const NOW: u64 = 1_800_000_000_000;
 const RAW: usize = 2 * 1024 * 1024;
 
 mod native_stage;
+mod passive_discovery;
 mod signed_request;
 mod welcome;
 

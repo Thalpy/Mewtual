@@ -58,6 +58,10 @@ pub use member_dependencies::archive_history::{
     OpenedV2ArchiveHistoryRequest, PreparedV2ArchiveHistoryRequest, V2ArchiveHistoryCursor,
     V2ArchiveHistoryPage, V2_ARCHIVE_HISTORY_PAGE_SIZE,
 };
+pub(crate) use member_dependencies::discovery::DiscoveryEndpoint;
+pub use member_dependencies::discovery::{
+    DiscoveredV2Member, OpenedV2MemberDiscovery, PreparedV2MemberDiscovery,
+};
 pub use member_dependencies::history::{
     OpenedV2MemberHistoryRequest, PreparedV2MemberHistoryRequest, V2JoinedMemberHistoryAccess,
     V2MemberHistoryCursor, V2MemberHistoryEntry, V2MemberHistoryPage, V2_MEMBER_HISTORY_PAGE_SPAN,

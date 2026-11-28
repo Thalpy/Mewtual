@@ -3,6 +3,7 @@
 //! response grants a current view, historical acceptance, or global absence.
 pub(super) mod archive_history;
 mod archive_relay;
+pub(super) mod discovery;
 pub(super) mod history;
 pub(super) mod removed_review;
 pub(super) mod review_delivery;

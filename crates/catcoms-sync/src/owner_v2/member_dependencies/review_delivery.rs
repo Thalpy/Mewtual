@@ -18,7 +18,7 @@ const REPLY: &[u8] = b"mewtual/chat/review-delivery-reply/v1\0";
 const REQUEST_KEY: &str = "mewtual/chat/review-delivery-request-key/v1";
 const REPLY_KEY: &str = "mewtual/chat/review-delivery-reply-key/v1";
 const EXACT: &str = "mewtual/chat/review-delivery-exact-request/v1";
-const PROOF_BYTES: usize = V2MemberContactData::REVIEW_REQUEST_PROOF_BYTES;
+const PROOF_BYTES: usize = V2MemberContactData::CONNECTED_PROOF_BYTES;
 const REQUEST_BODY: usize = 1 + 8 + 16 + 36 + 4 + PROOF_BYTES;
 // The dedicated exporter purpose makes zero a group-wide carrier here.
 // The approval channel is authenticated inside that request and record.
@@ -153,7 +153,7 @@ impl ReviewEndpoint<'_> {
                 data(request.put_bytes(entry.as_bytes()))?;
             }
         }
-        data(request.put_bytes(&contact.review_request_proof()))?;
+        data(request.put_bytes(&contact.connected_proof()))?;
         let wire = seal_frame(&key, REQUEST, &request.finish(), rng)?;
         Ok(PreparedV2ReviewDelivery {
             binding: self.binding(query, &wire),
@@ -197,7 +197,7 @@ impl ReviewEndpoint<'_> {
             .try_into()
             .map_err(|_| SyncError::Malformed)?;
         data(read.finish())?;
-        let requester = V2MemberContactData::require_review_request_proof(
+        let requester = V2MemberContactData::require_connected_proof(
             verifier,
             self.route.requester,
             proof,

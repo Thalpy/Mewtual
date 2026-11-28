@@ -5,7 +5,7 @@ use catcoms_replication::chat::{owner_header::OwnerBodyId, V2LiveMemberObservati
 const DOMAIN: &[u8] = b"mewtual/chat/v2/member-contact/v1\0";
 const PEER_BYTES: usize = 38;
 const INLINE_ED25519: &[u8; 6] = &[0, 36, 8, 1, 18, 32];
-const REVIEW_PROOF_BYTES: usize = 32 + 32 + 2 + 64;
+const PROOF_BYTES: usize = 32 + 32 + 2 + 64;
 const PREIMAGE_BYTES: usize = DOMAIN.len() + 3 * 32 + 8 + PEER_BYTES + 2;
 pub const V2_MEMBER_CONTACT_BYTES: usize = PREIMAGE_BYTES + 64;
 
@@ -27,7 +27,7 @@ impl std::fmt::Debug for V2MemberContactData<'_> {
 }
 
 impl<'a> V2MemberContactData<'a> {
-    pub(crate) const REVIEW_REQUEST_PROOF_BYTES: usize = REVIEW_PROOF_BYTES;
+    pub(crate) const CONNECTED_PROOF_BYTES: usize = PROOF_BYTES;
 
     pub fn decode(raw: &'a [u8]) -> Result<Self, SyncError> {
         let raw: &[u8; V2_MEMBER_CONTACT_BYTES] =
@@ -68,20 +68,19 @@ impl<'a> V2MemberContactData<'a> {
         self.admission
     }
 
-    /// The authenticated review carrier already has the current Profile,
-    /// selected Header, and epoch. Keep the other signed fields, including
-    /// the real TCP identity and signature, under its request size cap.
-    pub(crate) fn review_request_proof(&self) -> [u8; REVIEW_PROOF_BYTES] {
-        let mut proof = [0; REVIEW_PROOF_BYTES];
+    /// An authenticated current group carrier already has the Profile,
+    /// Header and epoch. Keep the other signed fields under its wire cap.
+    pub(crate) fn connected_proof(&self) -> [u8; PROOF_BYTES] {
+        let mut proof = [0; PROOF_BYTES];
         proof[..32].copy_from_slice(self.admission.as_bytes());
         proof[32..].copy_from_slice(&self.raw[DOMAIN.len() + 3 * 32 + 8 + INLINE_ED25519.len()..]);
         proof
     }
 
-    pub(crate) fn require_review_request_proof(
+    pub(crate) fn require_connected_proof(
         verifier: &V2GeneralPrefixVerifier,
         requester: catcoms_rt::PeerId,
-        proof: &[u8; REVIEW_PROOF_BYTES],
+        proof: &[u8; PROOF_BYTES],
     ) -> Result<V2LiveMemberObservation, SyncError> {
         let replay = verifier.replay_data();
         let mut full = [0; V2_MEMBER_CONTACT_BYTES];

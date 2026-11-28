@@ -11,6 +11,7 @@ use super::first_add_proof::SelectedJoinData;
 use super::received_add::TransitionBody;
 use super::*;
 mod contact;
+mod member_discovery;
 mod review_delivery;
 use catcoms_mls::{
     group::text_current_add::{
