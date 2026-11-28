@@ -1,5 +1,21 @@
 # Mewtual; Handover
 
+## Recover signed founder decisions on a joined vault
+
+The original joined source can cover public founder decision headers in an
+encrypted recipient journal. It reports the missing sequence for a gap,
+recognizes exact retries and preserves a signed contradiction before
+freezing that review lane. The ordinary chat archive keeps its own selector.
+An authenticated admission tag lets cold startup settle an interrupted
+metadata write from its original pin and exact write-ahead file.
+
+Native startup provisions the receiver on an eligible recovered joined
+vault. The first ID9 declaration preserves ID12. Existing ID9 vaults keep
+their exact catalog and require a separate migration for the receiver.
+First-session initialization for a new join, automatic polling, recipient
+approval receipts, projection, admin actions and combined acceptance are
+still open. The desktop Chat V2 switch remains off.
+
 ## View held posts in founder chat history
 
 The founder's Chat history dialog has a read-only Held posts view. It

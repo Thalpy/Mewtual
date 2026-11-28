@@ -218,6 +218,19 @@ impl Physical {
         Ok(true)
     }
 
+    pub(super) fn select_review_storage_before_joined_startup(
+        &self,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<bool, AppError> {
+        if !self.handler.accepts_rejoin_startup() {
+            return Err(refused());
+        }
+        self.handler.require()?;
+        self.handler.require_idle_cached()?;
+        let store = self.current()?.checked_store()?;
+        store.select_review_receiver_before_native_startup(rng)
+    }
+
     pub(super) fn has_mounted_review_hold(&self) -> Result<bool, AppError> {
         self.current()?.checked_store()?.has_mounted_review_hold()
     }

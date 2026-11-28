@@ -2,10 +2,6 @@
 //! root. The journal owner still covers all new pages before selecting
 //! that root, and proves old pages unreachable before any retirement.
 use super::*;
-use crate::store::persistence::v2_text::private_index::{
-    encode_private_branch_data, PrivateIndexChildRefData, PrivateIndexNodeFrame,
-    PrivateIndexRewriteData,
-};
 use catcoms_replication::chat::cold_index::MAX_INDEX_HEIGHT;
 use catcoms_storage::private_chat_page::open_private_chat_page;
 
@@ -94,7 +90,7 @@ impl DecisionIndexes {
         (root, query): (NodeRefData, DecisionIndexQuery),
         (expected, replacement): (Option<ReviewIndexValueData>, ReviewIndexValueData),
         mut read: impl FnMut(PrivateChatPageId) -> Result<Zeroizing<Vec<u8>>, AppError>,
-        mut output: impl FnMut(&[u8], NodeSummaryData) -> Result<NodeRefData, AppError>,
+        output: impl FnMut(&[u8], NodeSummaryData) -> Result<NodeRefData, AppError>,
     ) -> Result<(NodeRefData, Vec<NodeRefData>), AppError> {
         let (context, key) = query.coordinates(self.context);
         if expected.is_some_and(|prior| {
@@ -107,63 +103,17 @@ impl DecisionIndexes {
         if actual != expected {
             return Err(denied());
         }
-        let original = path
-            .original_frame_sizes_data()
-            .map(|(reference, _)| reference)
-            .collect::<Vec<_>>();
-        let parents = original.len().checked_sub(1).ok_or_else(denied)?;
-        let leaf = path
-            .rewrite_leaf_data(&PrivateIndexLeafRowData {
+        path.rewrite_selected_path(
+            context,
+            &PrivateIndexLeafRowData {
                 key,
                 value: PrivateIndexValueData::Review(replacement),
-            })
-            .map_err(|_| denied())?;
-        let mut children = revised_children(context, &leaf, &mut output)?;
-        for level in (0..parents).rev() {
-            let boundary = path
-                .boundary_page_data(level, children.len())
-                .map_err(|_| denied())?
-                .map(&mut read)
-                .transpose()?;
-            let rewritten = path
-                .rewrite_branch_data(
-                    level,
-                    &children,
-                    boundary
-                        .as_deref()
-                        .map(|frame| (&*self.key, frame.as_slice())),
-                )
-                .map_err(|_| denied())?;
-            children = revised_children(context, &rewritten, &mut output)?;
-        }
-        let root = match children.as_slice() {
-            [child] => child.node,
-            [_, _] => {
-                let plain = encode_private_branch_data(context, &children, NodePlacementData::Root)
-                    .map_err(|_| denied())?;
-                let node = PrivateIndexNodeFrame::decode(&plain, context, NodePlacementData::Root)
-                    .map_err(|_| denied())?;
-                output(&plain, node.summary())?
-            }
-            _ => return Err(denied()),
-        };
-        Ok((root, original))
+            },
+            &self.key,
+            read,
+            output,
+        )
     }
-}
-
-fn revised_children(
-    context: PrivateIndexContextData,
-    update: &PrivateIndexRewriteData,
-    output: &mut impl FnMut(&[u8], NodeSummaryData) -> Result<NodeRefData, AppError>,
-) -> Result<Vec<PrivateIndexChildRefData>, AppError> {
-    update
-        .nodes_data()
-        .iter()
-        .map(|node| {
-            let node = output(node.plain_data(), node.summary_data())?;
-            Ok(PrivateIndexChildRefData { context, node })
-        })
-        .collect()
 }
 
 #[cfg(test)]

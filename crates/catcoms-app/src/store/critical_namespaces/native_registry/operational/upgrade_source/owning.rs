@@ -461,6 +461,14 @@ impl Store {
             .select_review_storage_before_founder_startup(rng)
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn select_review_storage_before_joined_startup(
+        &self,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<bool, AppError> {
+        self.physical
+            .select_review_storage_before_joined_startup(rng)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn require_review_hold_founder(
         &self,
     ) -> Result<(), AppError> {

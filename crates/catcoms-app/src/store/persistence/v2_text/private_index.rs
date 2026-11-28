@@ -15,13 +15,16 @@ use catcoms_storage::private_chat_page::PrivateChatPageId;
 use catcoms_wire::{Decoder, Encoder};
 use zeroize::Zeroizing;
 
+mod cow;
 mod path;
 mod review;
+mod review_receiver;
 mod rewrite;
 pub(in crate::store) use path::{
     PrivateIndexPathData, PRIVATE_INDEX_BOUNDARY_OPEN_BYTES, PRIVATE_INDEX_PATH_METADATA_BYTES,
 };
 pub(in crate::store) use review::ReviewIndexValueData;
+pub(in crate::store) use review_receiver::ReceivedReviewIndexValueData;
 pub(in crate::store) use rewrite::{
     rewrite_private_branch_data, rewrite_private_leaf_data, PrivateIndexRewriteData,
     PRIVATE_INDEX_REWRITE_METADATA_BYTES, PRIVATE_INDEX_REWRITE_TEMPORARY_BYTES,
@@ -31,6 +34,9 @@ const TOKEN_DOMAIN: &[u8] = b"catcoms/private-chat-text-token-index/v1\0";
 const PUBLICATION_DOMAIN: &[u8] = b"catcoms/private-chat-text-publication-index/v1\0";
 const REVIEW_INTENT_DOMAIN: &[u8] = b"catcoms/private-chat-review-intent-index/v1\0";
 const REVIEW_CASE_DOMAIN: &[u8] = b"catcoms/private-chat-review-case-index/v1\0";
+const RECEIVED_REVIEW_ORDINAL_DOMAIN: &[u8] =
+    b"catcoms/private-chat-received-review-ordinal-index/v1\0";
+const RECEIVED_REVIEW_CASE_DOMAIN: &[u8] = b"catcoms/private-chat-received-review-case-index/v1\0";
 const VERSION: u16 = 1;
 const BRANCH_ROW_BYTES: usize = 80;
 const MAX_VALUE_BYTES: usize = 384;
@@ -71,6 +77,8 @@ pub(in crate::store) enum PrivateIndexKindData {
     Publication,
     ReviewIntent,
     ReviewCase,
+    ReviewReceivedOrdinal,
+    ReviewReceivedCase,
 }
 impl PrivateIndexKindData {
     fn domain(self) -> &'static [u8] {
@@ -79,6 +87,8 @@ impl PrivateIndexKindData {
             Self::Publication => PUBLICATION_DOMAIN,
             Self::ReviewIntent => REVIEW_INTENT_DOMAIN,
             Self::ReviewCase => REVIEW_CASE_DOMAIN,
+            Self::ReviewReceivedOrdinal => RECEIVED_REVIEW_ORDINAL_DOMAIN,
+            Self::ReviewReceivedCase => RECEIVED_REVIEW_CASE_DOMAIN,
         }
     }
     fn code(self) -> u8 {
@@ -87,6 +97,8 @@ impl PrivateIndexKindData {
             Self::Publication => 2,
             Self::ReviewIntent => 3,
             Self::ReviewCase => 4,
+            Self::ReviewReceivedOrdinal => 5,
+            Self::ReviewReceivedCase => 6,
         }
     }
     fn header_bytes(self) -> usize {
@@ -95,6 +107,9 @@ impl PrivateIndexKindData {
             Self::Publication => PUBLICATION_HEADER_BYTES,
             Self::ReviewIntent => REVIEW_INTENT_HEADER_BYTES,
             Self::ReviewCase => REVIEW_CASE_HEADER_BYTES,
+            Self::ReviewReceivedOrdinal | Self::ReviewReceivedCase => {
+                TOKEN_HEADER_BYTES - TOKEN_DOMAIN.len() + self.domain().len()
+            }
         }
     }
 }
@@ -112,6 +127,7 @@ pub(in crate::store) enum PrivateIndexValueData {
     Token(TokenValueData),
     Publication(PublicationValueData),
     Review(ReviewIndexValueData),
+    ReceivedReview(ReceivedReviewIndexValueData),
 }
 impl PrivateIndexValueData {
     fn check_key(self, context: PrivateIndexContextData, key: [u8; 32]) -> Result<()> {
@@ -138,6 +154,11 @@ impl PrivateIndexValueData {
                 PrivateIndexKindData::ReviewIntent | PrivateIndexKindData::ReviewCase,
                 Self::Review(value),
             ) => value.require_key(context, key),
+            (
+                PrivateIndexKindData::ReviewReceivedOrdinal
+                | PrivateIndexKindData::ReviewReceivedCase,
+                Self::ReceivedReview(value),
+            ) => value.require_key(context, key),
             _ => Err(PrivateIndexError::Context),
         }
     }
@@ -152,6 +173,10 @@ impl PrivateIndexValueData {
             PrivateIndexKindData::ReviewIntent | PrivateIndexKindData::ReviewCase => {
                 Self::Review(ReviewIndexValueData::decode(raw)?)
             }
+            PrivateIndexKindData::ReviewReceivedOrdinal
+            | PrivateIndexKindData::ReviewReceivedCase => {
+                Self::ReceivedReview(ReceivedReviewIndexValueData::decode(raw)?)
+            }
         };
         value.check_key(context, key)?;
         Ok(value)
@@ -162,6 +187,7 @@ impl PrivateIndexValueData {
             Self::Token(value) => value.encode_data(),
             Self::Publication(value) => value.encode_data(),
             Self::Review(value) => return value.encode(),
+            Self::ReceivedReview(value) => return value.encode(),
         }
         .map_err(|_| PrivateIndexError::Malformed)?;
         if raw.is_empty() || raw.len() > MAX_VALUE_BYTES {

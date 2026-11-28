@@ -70,6 +70,11 @@ impl PreparedV2ReviewDelivery {
     pub fn wire_data(&self) -> &[u8] {
         &self.wire
     }
+
+    /// The response must match this authenticated request's original query.
+    pub fn query_data(&self) -> ReviewStreamQuery {
+        self.binding.query
+    }
 }
 
 impl OpenedV2ReviewDelivery {

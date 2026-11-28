@@ -1966,7 +1966,7 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         assert_eq!(std::fs::read(&stage).unwrap(), saved_stage);
         std::fs::rename(&registration_parked, &outcome_path).unwrap();
     }
-    let cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+    let mut cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
         dir.path(),
         SECRET,
         &mut rng,
@@ -1987,6 +1987,42 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
         Some(local_transport)
     );
     assert_eq!(std::fs::read(&path).unwrap(), ciphertext);
+    if successor == Some(MountedSuccessor::RemovedReview) {
+        use crate::store::persistence::governance_layout::joined::review_receive::{
+            with_receiver_fault, ReceiverFault,
+        };
+        let (interrupted, reached) = with_receiver_fault(ReceiverFault::CatalogClaim, || {
+            cold.select_review_storage_before_joined_startup(&mut rng)
+        });
+        assert!(interrupted.is_err() && reached);
+        drop(cold);
+        for point in [ReceiverFault::CatalogStage, ReceiverFault::CatalogSelected] {
+            let (interrupted, reached) = with_receiver_fault(point, || {
+                crate::store::NativeTextJoinedStorage::open_for_native_startup(
+                    dir.path(),
+                    SECRET,
+                    &mut rng,
+                    current_policy(),
+                )
+            });
+            assert!(interrupted.is_err() && reached);
+        }
+        cold = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+            dir.path(),
+            SECRET,
+            &mut rng,
+            current_policy(),
+        )
+        .unwrap();
+        assert!(!cold
+            .select_review_storage_before_joined_startup(&mut rng)
+            .unwrap());
+        assert_eq!(
+            cold.recovered_join_registration_data().unwrap(),
+            Some(registration)
+        );
+        assert_eq!(std::fs::read(&index).unwrap(), saved_stage);
+    }
     let (foreign, _) = catcoms_net::MeshService::new_tcp(None, &[]).unwrap();
     let cold = match cold.bind_recovered_join_runtime(
         foreign,
@@ -2568,6 +2604,8 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             .await;
             drop(third_selection);
             Box::pin(async move {
+                let recovered_row =
+                    || mounted_sources.capture_joined_selection(command(&mounted_vault, &budget));
                 let mut retirement = third.prepare_retirement().unwrap();
                 tokio::time::timeout(std::time::Duration::from_secs(8), async {
                     while retirement.try_retire().unwrap()
@@ -3162,6 +3200,47 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                             Ok(())
                         }).unwrap();
                     }
+                    {
+                        use crate::store::NativeTextReviewHeaderStatus as Received;
+                        use crate::store::persistence::governance_layout::joined::review_receive::{
+                            with_receiver_fault, ReceiverFault,
+                        };
+                        let received = dir.path().join("chat-v2-review-received");
+                        let manifest = received.join("manifest.current");
+                        let pending = received.join("selection.pending");
+                        let foreign = received.join(format!("g-{}.scratch", "ff".repeat(32)));
+                        std::fs::write(&foreign, b"CTV2").unwrap();
+                        let original = std::fs::read(&manifest).unwrap();
+                        let wire = read(ReviewStreamQuery::Header(2), &mut provider, &mut history_rng, &fresh).await;
+                        assert_eq!(survivor().select_review_delivery_header(&selection, wire, &fresh, &mut history_rng).unwrap(),
+                            Some(Received::WaitingFor(1)));
+                        assert_eq!(std::fs::read(&manifest).unwrap(), original);
+                        let mut moved_partial = None;
+                        for (sequence, point) in [(1, ReceiverFault::AdmittedHeader), (2, ReceiverFault::ManifestSelected)] {
+                            let wire = read(ReviewStreamQuery::Header(sequence), &mut provider, &mut history_rng, &fresh).await;
+                            let (interrupted, reached) = with_receiver_fault(point, || {
+                                survivor().select_review_delivery_header(&selection, wire, &fresh, &mut history_rng)
+                            });
+                            assert!(interrupted.is_err() && reached);
+                            assert!(pending.is_file());
+                            let wire = read(ReviewStreamQuery::Header(sequence), &mut provider, &mut history_rng, &fresh).await;
+                            assert_eq!(survivor().select_review_delivery_header(&selection, wire, &fresh, &mut history_rng).unwrap(),
+                                Some(Received::Duplicate));
+                            assert!(!pending.exists());
+                            if sequence == 1 {
+                                let lane = std::fs::read_dir(&received).unwrap().map(|entry| entry.unwrap().path())
+                                    .find(|path| path.is_dir()).unwrap();
+                                let partial = lane.with_extension("scratch");
+                                std::fs::copy(&foreign, &partial).unwrap();
+                                moved_partial = Some(partial);
+                            }
+                        }
+                        let wire = read(ReviewStreamQuery::Header(3), &mut provider, &mut history_rng, &fresh).await;
+                        assert_eq!(survivor().select_review_delivery_header(&selection, wire, &fresh, &mut history_rng).unwrap(),
+                            Some(Received::Covered));
+                        assert_eq!(std::fs::read(foreign).unwrap(), b"CTV2");
+                        assert_eq!(std::fs::read(moved_partial.unwrap()).unwrap(), b"CTV2");
+                    }
                     for (entry, requested_channel) in [(&selected, channel), (&reopened, channel), (&approved, other_channel)] {
                         let wire = read(ReviewStreamQuery::Approval {
                             sequence: entry.position_data().sequence, entry: entry.id(), channel: requested_channel,
@@ -3191,7 +3270,40 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
                     assert!(survivor().with_review_delivery::<()>(&selection, delivered, &fresh, |_| {
                         panic!("a response to a cancelled review scope must stay private")
                     }).is_err());
+                    {
+                        use crate::store::persistence::governance_layout::joined::review_receive::{
+                            with_receiver_fault, ReceiverFault,
+                        };
+                        let wire = read(ReviewStreamQuery::Header(4), &mut provider, &mut history_rng, &fresh).await;
+                        let (interrupted, reached) = with_receiver_fault(ReceiverFault::AdmittedHeader, || {
+                            survivor().select_review_delivery_header(&selection, wire, &fresh, &mut history_rng)
+                        });
+                        assert!(interrupted.is_err() && reached);
+                    }
                     drop(provider);
+                    drop(selection);
+                    let mut retirement = mounted_sources.prepare_retirement().unwrap();
+                    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                        while retirement.try_retire().unwrap()
+                            == crate::store::NativeTextSourceRetirementStatus::Pending
+                        {
+                            tokio::task::yield_now().await;
+                        }
+                    }).await.unwrap();
+                    drop((retirement, mounted_sources, mounted_vault));
+                    let recovered_receiver = crate::store::NativeTextJoinedStorage::open_for_native_startup(
+                        dir.path(), SECRET, &mut history_rng, current_policy(),
+                    ).unwrap();
+                    assert_eq!(recovered_receiver.recovered_join_registration_data().unwrap(), Some(registration));
+                    let recipient = dir.path().join("chat-v2-review-received");
+                    let pending = recipient.join("selection.pending");
+                    let manifest = recipient.join("manifest.current");
+                    assert!(pending.is_file());
+                    let before = std::fs::read(&manifest).unwrap();
+                    assert!(!recovered_receiver.select_review_storage_before_joined_startup(&mut history_rng).unwrap());
+                    assert!(!pending.exists());
+                    assert_ne!(std::fs::read(&manifest).unwrap(), before);
+                    drop(recovered_receiver);
                     retire(vault, sources, recovered_row).await;
                     // Lose every child of the original mounted journal,
                     // leaving its actual directory and catalog marker.

@@ -168,6 +168,47 @@ action body is duplicated inside a decision; it remains in the retained action a
 
 ## Successor decision rules
 
+### Recipient journal
+
+The native joined source covers signed public headers in critical namespace
+ID12. Startup can declare it on the original recovered joined vault before
+the first same-vault rejoin declaration. The declaration checks the registered
+row against the original joined pin, retains the native registry and shared
+history files, and covers the authenticated empty selector before replacing
+Current. A2 binds the complete encrypted catalog. A vault with an existing
+ID9 keeps that catalog, while a future ID9 declaration preserves all ID12
+descriptor bytes.
+
+The selector uses the original genesis pin and vault for each group's stable
+identity. It keeps an exact ordinal chain and each case's latest covered
+decision. A gap reports the next required sequence. An exact duplicate
+preserves the existing selection. Two distinct valid headers at the same
+sequence cover both originals and freeze that group's review lane. The
+ordinary message archive continues independently.
+
+Both the original native row and selected membership ancestry are checked
+before admitting a new header. An admitted write-ahead file retains the
+exact original pin and selector change and can finish after a restart or
+membership replacement. Recovery verifies the signatures, predecessor,
+immutable index outputs and exact old or new selector. This recovery can
+cover header metadata alone. Message admission requires its own proof and
+receipt. Missing selected files leave review unavailable.
+
+Cold recovery requires the separate keyed admission tag. It preserves any
+incomplete scratch and permits a fresh attempt in one fixed spare for
+that scope. Two incomplete scratch files leave the lane held. A previously
+authenticated selector can be restored from outside the process if its
+matching old files survive.
+
+The selector charges retained files against 128 MiB per group and 512 MiB
+per vault, with room reserved to record one contradiction in each lane.
+The original header, fork evidence and index/head frames remain encrypted
+locally. This implementation retains older index frames and charges for
+them. Recipient approval receipts, integration with ordinary projection and
+automatic review polling remain open.
+
+## Exact case transitions
+
 The pure new-transition checker requires the exact same case and previous body CID:
 
 - Initial None -> Approve or Reject.

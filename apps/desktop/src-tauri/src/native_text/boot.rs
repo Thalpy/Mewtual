@@ -130,6 +130,9 @@ impl Bootstrap {
                         if storage
                             .select_review_storage_before_founder_startup(&mut rng)
                             .map_err(|_| EXISTING)?
+                            || storage
+                                .select_review_storage_before_joined_startup(&mut rng)
+                                .map_err(|_| EXISTING)?
                         {
                             // The write used the original exclusive vault
                             // mount. Transfer no source when replacing it.

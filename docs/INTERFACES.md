@@ -996,8 +996,12 @@ the authenticated empty head covered by the declaration. A later request binds
 the exact previous case decision and the original encrypted journal head.
 The native recovered-founder operation supports independent cases and
 Reject, Reopen and Approve transitions. Exact retry looks up the original
-intent before consulting the latest case. Approval delivery and native admin
-commands remain to be implemented.
+intent before consulting the latest case. Joined callers can select a
+checked public header from the original connected response. The recipient
+journal reports a covered header, duplicate, missing predecessor or frozen
+review lane. An exact approved body is available over the founder route.
+Its recipient receipt, message projection and native admin commands remain
+open.
 [Exact contract](communication-recovery/CHAT-OWNER-V2-REVIEW-DECISION.md).
 
 ## Guarded current chat projection core (5 November; authored, unexecuted)

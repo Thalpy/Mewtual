@@ -2,7 +2,7 @@
 //! response is verified data for a later durable recipient selection.
 use super::dependencies::REPLY_FEE;
 use super::*;
-use crate::store::NativeTextInvitePacketData;
+use crate::store::{NativeTextInvitePacketData, NativeTextReviewHeaderStatus};
 use catcoms_net::{
     NativeChatMemberDependencyExchange, NativeChatMemberDependencyObservation,
     NativeChatMemberInventoryExchange,
@@ -208,5 +208,81 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
             .require_current(caller)
             .map_err(|_| Refusal::Cancelled)?;
         Ok(result)
+    }
+
+    /// Cover public signed review metadata from the original connected
+    /// response. This receipt does not add or authorize a chat message.
+    pub fn select_review_delivery_header(
+        &self,
+        selection: &NativeTextJoinedRowSelection,
+        response: NativeTextJoinedReviewResponse,
+        caller: &RequestCancellation,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<Option<NativeTextReviewHeaderStatus>, Refusal> {
+        let context = &response.context;
+        if !matches!(context.request.query_data(), ReviewStreamQuery::Header(_)) {
+            return Err(Refusal::Failed);
+        }
+        context.require_original(selection)?;
+        self.with_member_receiver(selection, caller, |source| {
+            if source.registration.invite != context.invite
+                || source.founder != Some(context.route.provider)
+            {
+                return Err(Refusal::Stale);
+            }
+            let data = source
+                .node
+                .open_review_delivery(
+                    source.prefix,
+                    &context.pin,
+                    context.route,
+                    &context.request,
+                    &response.wire,
+                )
+                .map_err(|_| Refusal::Failed)?;
+            let incoming = match data {
+                Some(V2ReviewDeliveryData::Header(entry)) => entry,
+                None => return Ok(None),
+                Some(V2ReviewDeliveryData::Approval(_)) => return Err(Refusal::Failed),
+            };
+            let position = incoming.position_data();
+            let binding = source
+                .node
+                .require_review_membership_anchor(
+                    source.prefix,
+                    (position.membership_header, position.membership_epoch),
+                )
+                .map_err(|_| Refusal::Stale)?;
+            source
+                .store
+                .select_received_review_header(
+                    binding,
+                    &incoming,
+                    |position| {
+                        context.require_original(selection).map_err(|_| refused())?;
+                        self.original.require_current(caller)?;
+                        if let Some(position) = position {
+                            let actual = source
+                                .node
+                                .require_review_membership_anchor(
+                                    source.prefix,
+                                    (position.membership_header, position.membership_epoch),
+                                )
+                                .map_err(|_| refused())?;
+                            if actual != binding {
+                                return Err(refused());
+                            }
+                        }
+                        Ok(())
+                    },
+                    rng,
+                )
+                .map(Some)
+                .map_err(|error| match error {
+                    AppError::ChatV2ArchiveBusy => Refusal::Busy,
+                    AppError::ChatV2ReceiveCapacity => Refusal::ReceiveCapacity,
+                    _ => Refusal::Failed,
+                })
+        })
     }
 }

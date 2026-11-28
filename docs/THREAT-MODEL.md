@@ -4329,6 +4329,20 @@ earlier exact membership Header only for a retained signature. It must
 prove that Header and MLS epoch in the selected lineage and recheck the
 original current archive and held record.
 
+The recipient ID12 journal has its own critical declaration, authenticated
+selector and write-ahead file. The live source binds each new signed header
+to the original pinned founder, current native row and selected membership
+ancestry. Cold recovery can complete a covered metadata write with the
+original pin and exact physical predecessor. New admission and display
+require their own live proofs. The selector binds each lane's exact Head.
+Missing files under a selected lane stop that lane's review, and an exact
+signed contradiction freezes the lane. The ordinary message index stays
+independent. Encrypted storage detects substitutions against a surviving
+selector. Cold restoration of an earlier authenticated selector can select
+the older Head when its exact index files survive. That can rewind the
+remembered review freeze or storage allowance. An external monotonic
+anchor would be needed to detect replay of the entire component.
+
 The first private selection checks the same exact Raw, signing files
 and held original under the founder loan. An authenticated write-ahead
 file commits the encrypted immutable record, the intent and case index
@@ -4345,7 +4359,9 @@ replays the exact copy-on-write edits. When the new head is covered, a
 bounded path at each obsolete page's authenticated minimum proves it
 unreachable before removal. The selected head and exact file handles
 remain held through retirement. The immutable decision records stay
-available for original-intent recovery. Approval delivery remains open.
+available for original-intent recovery. The connected route can disclose the
+exact selected Approve proof to a current member. Recipient adoption of
+that proof remains open.
 
 ## Chat history admission and retained audit (20 October, continuation)
 

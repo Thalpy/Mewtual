@@ -122,6 +122,23 @@ impl JoinedPinIndex {
             .map(JoinedAnchorPin::pending_context_data))
     }
 
+    /// Cross-check the registrant against the independently decrypted first
+    /// pin without treating its registry row as new genesis authority.
+    pub(in crate::store) fn require_original_context(
+        &self,
+        group: &[u8; 16],
+        expected: catcoms_sync::V2PendingJoinContextData,
+    ) -> Result<(), AppError> {
+        let position = self
+            .rows
+            .binary_search_by_key(group, |row| row.group)
+            .map_err(|_| refused())?;
+        if self.rows[position].pin.pending_context_data() != expected {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
     /// The owning journal supplies the exact accepted pending join. A
     /// previously pinned group always uses lookup on its existing row.
     pub(in crate::store) fn prepare_insert(

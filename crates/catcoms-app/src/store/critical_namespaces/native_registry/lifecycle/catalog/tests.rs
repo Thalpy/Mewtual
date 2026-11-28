@@ -482,6 +482,66 @@ fn decision_namespace_is_an_explicit_successor_of_the_original_hold_catalog() {
 }
 
 #[test]
+fn received_review_namespace_precedes_rejoin_and_keeps_the_legacy_grammar_closed() {
+    use crate::store::critical_namespaces::{
+        rejoin_namespace as rejoin, review_receive_namespace as review,
+        shared_history_namespace as history,
+    };
+    let (joined, _) = joined_catalog();
+    let shared = history::prepare_declaration(&joined, &VAULT).unwrap();
+    let recipient = review::prepare_declaration(&shared, &VAULT).unwrap();
+    review::verify_declaration(&shared, &recipient, &VAULT).unwrap();
+    assert!(grammar::parse_native_review_startup(&recipient, &VAULT, true).is_err());
+    assert!(grammar::parse_review_receive_family(&shared, &VAULT, true).is_err());
+    assert!(review::prepare_declaration(&recipient, &VAULT).is_err());
+    let parsed = grammar::parse_review_receive_family(&recipient, &VAULT, true).unwrap();
+    let review_descriptor = parsed.review_receive_payload.unwrap();
+    assert_ne!(
+        review::marker_data(&[1; 32], review_descriptor).unwrap(),
+        review::marker_data(&[2; 32], review_descriptor).unwrap()
+    );
+    let mut altered = review_descriptor.to_vec();
+    altered[0] ^= 1;
+    let forged = catalog_declaration::insert_entry_data(
+        &shared,
+        &VAULT,
+        review::ID,
+        review::VERSION,
+        &altered,
+    )
+    .unwrap();
+    assert!(grammar::parse_review_receive_family(&forged, &VAULT, true).is_err());
+
+    let prior_rejoin = rejoin::prepare_declaration(&shared, &VAULT).unwrap();
+    assert!(review::prepare_declaration(&prior_rejoin, &VAULT).is_err());
+    let prior = grammar::parse_rejoin_native_registry_layout(&prior_rejoin, &VAULT, true).unwrap();
+    let rejoin_descriptor = prior.rejoin_payload.unwrap();
+    // ID9's descriptor independently binds the same original base.
+    let combined = rejoin::prepare_declaration(&recipient, &VAULT).unwrap();
+    rejoin::verify_declaration(&recipient, &combined, &VAULT).unwrap();
+    let next = grammar::parse_review_receive_family(&combined, &VAULT, true).unwrap();
+    assert_eq!(next.review_receive_payload, Some(review_descriptor));
+    assert_eq!(next.rejoin_payload, Some(rejoin_descriptor));
+    assert!(rejoin::prepare_declaration(&combined, &VAULT).is_err());
+    assert!(rejoin::verify_declaration(&recipient, &prior_rejoin, &VAULT).is_err());
+    assert!(grammar::parse_rejoin_native_registry_layout(&combined, &VAULT, true).is_err());
+
+    use catcoms_crypto::seal;
+    use rand_chacha::ChaCha20Rng;
+    use rand_core::SeedableRng;
+    let mut rng = ChaCha20Rng::seed_from_u64(4912);
+    let key = [97; 32];
+    let original = crate::store::frame(&seal(&key, &recipient, &mut rng).unwrap());
+    let successor = rejoin::prepare_framed_declaration(&key, &original, &VAULT, &mut rng).unwrap();
+    rejoin::verify_framed_declaration(&key, &original, &successor, &VAULT).unwrap();
+    assert_eq!(
+        rejoin::selected_frame_digest(&key, &successor, &VAULT).unwrap(),
+        *blake3::hash(&successor).as_bytes()
+    );
+    assert!(rejoin::selected_frame_digest(&key, &original, &VAULT).is_err());
+}
+
+#[test]
 fn founder_review_seed_replays_the_exact_predecessor_and_requires_each_leaf() {
     use crate::store::critical_namespaces::{
         archive_current_namespace_codec::CurrentLayoutData,

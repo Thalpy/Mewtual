@@ -4,9 +4,13 @@ use super::*;
 
 pub(in crate::store) struct JoinedCatalogDescriptors<'a> {
     pub(in crate::store) layout: archive_current_namespace_codec::CurrentLayoutData,
+    pub(in crate::store) governance:
+        governance_namespace_codec::capability::GovernanceCapabilityData,
     pub(in crate::store) shared_history: Option<&'a [u8]>,
     pub(in crate::store) review_hold: Option<&'a [u8]>,
     pub(in crate::store) review_decision: Option<&'a [u8]>,
+    pub(in crate::store) review_receive: Option<&'a [u8]>,
+    pub(in crate::store) rejoin_declared: bool,
 }
 
 fn summary(
@@ -48,9 +52,12 @@ impl ServerStore {
         let parsed = self.parse_configured_join_catalog(plain)?;
         Ok(JoinedCatalogDescriptors {
             layout: parsed.current_layout.ok_or_else(refused)?,
+            governance: parsed.governance.ok_or_else(refused)?,
             shared_history: parsed.shared_history_payload,
             review_hold: parsed.review_hold_payload,
             review_decision: parsed.review_decision_payload,
+            review_receive: parsed.review_receive_payload,
+            rejoin_declared: parsed.rejoin_payload.is_some(),
         })
     }
 

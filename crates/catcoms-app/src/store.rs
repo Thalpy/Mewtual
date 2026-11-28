@@ -144,6 +144,7 @@ pub use persistence::governance_layout::joined::rejoin::{
     NativeTextRejoinIndexReceipt, NativeTextRejoinOutcomeReceipt, NativeTextRejoinPendingReceipt,
     NativeTextRejoinPrefixReceipt, NativeTextRejoinReceivedReceipt, NativeTextRejoinWelcomeStatus,
 };
+pub use persistence::governance_layout::joined::review_receive::NativeTextReviewHeaderStatus;
 pub use persistence::v2_member_transport::{
     NativeTextFounderAudit, NativeTextFounderDependencyExchange,
     NativeTextFounderDependencyResponse, NativeTextFounderFrameOutcome, NativeTextFounderReceived,
@@ -5819,6 +5820,9 @@ pub struct ServerStore {
     review_decision_mount: std::sync::Mutex<
         Option<persistence::governance_layout::joined::review_decision::SelectedReviewDecision>,
     >,
+    review_receive_mount: std::sync::Mutex<
+        Option<persistence::governance_layout::joined::review_receive::SelectedReviewReceiver>,
+    >,
     // Namespace5 marker + held member-outbox parent, installed only by the concrete configured
     // handler. Its presence is mount DATA, never a member-source or save permission.
     member_outbox_layout: std::sync::Mutex<
@@ -6078,6 +6082,7 @@ impl ServerStore {
             shared_history_mount: Default::default(),
             review_hold_mount: Default::default(),
             review_decision_mount: Default::default(),
+            review_receive_mount: Default::default(),
             member_outbox_layout: Default::default(),
             member_outbox_mount: Default::default(),
             current_layout: Default::default(),
