@@ -542,6 +542,49 @@ fn received_review_namespace_precedes_rejoin_and_keeps_the_legacy_grammar_closed
 }
 
 #[test]
+fn fresh_native_review_layout_accepts_exact_review_successors_without_cold_authority() {
+    use crate::store::critical_namespaces::{
+        native_registry::{
+            lifecycle::{admission::Handler, preparation::Policy},
+            preparation::NativeRegistryHandler,
+        },
+        rejoin_namespace as rejoin, review_decision_namespace as decisions,
+        review_hold_namespace as holds, review_receive_namespace as recipients,
+        shared_history_namespace::{self as history, Opening},
+    };
+    use crate::store::CriticalCatalogReadPool;
+
+    let (joined, _) = joined_catalog();
+    let shared = history::prepare_declaration(&joined, &VAULT).unwrap();
+    let hold = holds::prepare_declaration(&shared, &VAULT).unwrap();
+    let decision = decisions::prepare_declaration(&hold, &VAULT).unwrap();
+    let recipient = recipients::prepare_declaration(&shared, &VAULT).unwrap();
+    let rejoined = rejoin::prepare_declaration(&recipient, &VAULT).unwrap();
+    let policy = Policy::new(
+        CriticalCatalogReadPool::new(
+            crate::store::critical_namespaces::native_registry::lifecycle::preparation::PREPARATION_FEE,
+        ).unwrap(),
+        Policy::required_persistent_capacity(),
+    ).unwrap();
+    let original = Handler::from_reserved(&policy, policy.reserve().unwrap()).unwrap();
+    let before = NativeRegistryHandler::GovernedLifecycle(
+        original
+            .clone()
+            .with_shared_history_layout(Opening::Required),
+    );
+    let warm = NativeRegistryHandler::GovernedLifecycle(original.with_warm_review_layout());
+    assert!(!warm.accepts_review_recovery());
+    assert!(before.parse_layout(&shared, &VAULT, true).is_ok());
+    assert!(warm.parse_layout(&shared, &VAULT, true).is_ok());
+    for review in [&hold, &decision, &recipient] {
+        assert!(before.parse_layout(review, &VAULT, true).is_err());
+        assert!(warm.parse_layout(review, &VAULT, true).is_ok());
+        assert!(warm.parse_layout(review, &[33; 32], true).is_err());
+    }
+    assert!(warm.parse_layout(&rejoined, &VAULT, true).is_err());
+}
+
+#[test]
 fn founder_review_seed_replays_the_exact_predecessor_and_requires_each_leaf() {
     use crate::store::critical_namespaces::{
         archive_current_namespace_codec::CurrentLayoutData,

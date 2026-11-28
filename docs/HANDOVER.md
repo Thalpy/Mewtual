@@ -58,9 +58,15 @@ First-session founder setup, cold route restoration, existing ID9
 migration and combined acceptance remain open. The desktop Chat V2
 switch remains off.
 
+The ordinary received archive still enforces a 2,048-record limit and
+a 256 MiB quota. Hot ledger rotation still reaches that durable limit.
+Long-lived acceptance must cover additional saves, revision reads and
+relay with bounded work while retaining the signed older operations.
+[Archive successor design](communication-recovery/CHAT-V2-SHARED-ARCHIVE-SUCCESSOR.md).
+
 ## View held posts in founder chat history
 
-The founder's Chat history dialog has a read-only Held posts view. It
+The founder's Chat history dialog has a Held posts view. It
 shows the exact signed originals that have a covered hold receipt and
 verified removal. Damaged or unwitnessed cases are reported as gaps.
 The scan describes surviving local files. If both files for a case
@@ -73,9 +79,8 @@ and row before releasing text.
 The App TCP fixture retrieves one withheld post through a survivor
 and reads it after a second founder restart. It verifies that ordinary
 chat cannot display the post and that audit refuses a replaced directory.
-The first private decision can be recovered in the journal. Application
-of approvals, first-session hold provisioning and final acceptance
-remain open.
+The recovered founder journal retains each exact decision. First-session
+founder review and final acceptance remain open.
 
 ## Recover removed-member posts for founder review
 

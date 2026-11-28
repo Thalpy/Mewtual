@@ -953,9 +953,7 @@ impl Physical {
         self.cell.get_mut().map_err(|_| refused())?.require_idle()?;
         self.handler.require()?;
         self.handler.require_idle_cached()?;
-        let handler = self.handler.clone().with_shared_history_layout(
-            crate::store::critical_namespaces::shared_history_namespace::Opening::Required,
-        );
+        let handler = self.handler.clone().with_warm_review_layout();
         self.current
             .as_mut()
             .ok_or_else(refused)?

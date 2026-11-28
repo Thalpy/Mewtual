@@ -4713,10 +4713,9 @@ async fn native_text_connected_join(block_delete_archive: bool) {
     })
     .await
     .expect("the native Join completes over the founder TCP actor");
-    assert!(
-        matches!(initial_response, tauri::ipc::InvokeResponse::Ok(_)),
-        "initial native join after metadata capture release"
-    );
+    if let tauri::ipc::InvokeResponse::Err(error) = &initial_response {
+        panic!("initial native join after metadata capture release refused: {error:?}");
+    }
     let original = found_value(initial_response);
     assert_eq!(original["backend"], "text-v2");
     assert_eq!(original["name"], "My joined group");

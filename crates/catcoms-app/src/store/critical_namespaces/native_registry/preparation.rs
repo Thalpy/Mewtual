@@ -93,9 +93,25 @@ impl NativeRegistryHandler {
                 return grammar::parse_joined_history_family(plain, domain, executing)
             }
             Opening::Required => {
-                return grammar::parse_shared_history_native_registry_layout(
-                    plain, domain, executing,
-                )
+                let registry =
+                    grammar::parse_shared_history_native_registry_layout(plain, domain, executing);
+                if !self
+                    .lifecycle()
+                    .is_some_and(|handler| handler.accepts_warm_review_layout())
+                {
+                    return registry;
+                }
+                return registry.or_else(|_| {
+                    let review = grammar::parse_review_decision_family(plain, domain, executing)
+                        .or_else(|_| grammar::parse_review_hold_family(plain, domain, executing))
+                        .or_else(|_| {
+                            grammar::parse_review_receive_family(plain, domain, executing)
+                        })?;
+                    if review.rejoin_payload.is_some() || review.shared_history_payload.is_none() {
+                        return Err(refused());
+                    }
+                    Ok(review)
+                });
             }
             Opening::Disabled => {}
         }

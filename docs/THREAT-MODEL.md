@@ -4403,6 +4403,9 @@ exposing another channel's index key. First Join can declare the receiver
 only after proving original warm registration. It preserves the exact
 Pending, pin, Welcome, Outcome and native registry. Storage admitted
 before a lock can finish without making the old native reply current.
+The private warm native handler recognizes the exact review successors
+of its original shared-history layout. This parsing capability gives no
+rejoin or cold declaration recovery authority.
 
 A main-window decision command takes exact held-case coordinates and an
 intent. It uses the recovered founder's own key and signed Case index.

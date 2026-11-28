@@ -378,7 +378,7 @@ async fn complete(
                 &original.account,
                 &mut OsCryptoRng,
             )
-            .map_err(registered_join_error)
+            .map_err(|error| observed_join_error("registered", error))
     })
     .await
     .map_err(|_| FAILED)??;
@@ -393,13 +393,15 @@ async fn complete(
         prepared
             .select_registered_with_review_storage(&original.account, &mut OsCryptoRng)
             .map(|selection| (selection, parked))
-            .map_err(|error| registered_join_error(error).to_owned())
+            .map_err(|error| observed_join_error("selected", error).to_owned())
     })
     .await
     .map_err(|_| FAILED)?
 }
 
-fn registered_join_error(error: AppError) -> &'static str {
+fn observed_join_error(_phase: &str, error: AppError) -> &'static str {
+    #[cfg(test)]
+    eprintln!("native first Join could not finish {_phase}: {error:?}");
     match error {
         AppError::ChatV2JoinReviewReopen => REOPEN,
         AppError::ChatV2ArchiveBusy => BUSY,
