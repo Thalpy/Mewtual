@@ -72,6 +72,32 @@ outside the first migration unless that additional format has been
 implemented and verified. The first increment can use fresh vaults and
 exact eligible pre-rejoin mounts.
 
+### Initial storage implementation
+
+The development opener selects ID13 explicitly on an empty ID8 vault
+before exposing a native row. It keeps the original mounted ID8 marker
+and directory. A private file covers the exact seed before the shared
+governance claim becomes visible. That claim binds the initial index
+Head, companion marker and exact catalog successor. A reopening owner
+rechecks the original native registry and joined-pin files before
+finishing the selected outputs.
+
+The opener can retire a recognized torn private scratch while the empty
+base and all other selectors remain intact. A framing-complete corrupt
+seed stays preserved. An authentic ciphertext with a damaged length
+also stays preserved. Both archive modes retain the current record and
+byte limits. Normal desktop startup continues to use ID8. Existing ID9
+vaults and later review declarations still need compatibility work
+before the indexed layout can become the default.
+
+The focused Windows run passed 22 tests on the current Chat V2 base.
+It covered the exact declaration and restart, conflicting rejoin
+evidence before promotion, retained index and bundle identity, WAL
+recovery, and pages of at most eight scanned rows. A filtered empty
+page advances past the rows it scanned. The ordinary inventory still
+collects a capped result from these pages. Per-peer paging and target
+and Admission indexes remain necessary before raising the archive limit.
+
 ## Publication and recovery
 
 Ordinary exact lookup, selection and audit must use the same verified

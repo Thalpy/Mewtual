@@ -230,6 +230,27 @@ impl NativeTextJoinedStorage {
         rng: &mut impl CryptoRngCore,
         current: crate::store::V2CurrentLayoutPolicy,
     ) -> Result<Self, AppError> {
+        Self::open_native_storage(directory, secret, rng, current, false)
+    }
+
+    /// Explicitly open the indexed-archive family, including its interrupted
+    /// pre-row declaration. The ordinary desktop startup stays on ID8.
+    pub fn open_for_indexed_native_startup(
+        directory: &std::path::Path,
+        secret: &[u8],
+        rng: &mut impl CryptoRngCore,
+        current: crate::store::V2CurrentLayoutPolicy,
+    ) -> Result<Self, AppError> {
+        Self::open_native_storage(directory, secret, rng, current, true)
+    }
+
+    fn open_native_storage(
+        directory: &std::path::Path,
+        secret: &[u8],
+        rng: &mut impl CryptoRngCore,
+        current: crate::store::V2CurrentLayoutPolicy,
+        indexed: bool,
+    ) -> Result<Self, AppError> {
         let opened = Self {
             pending: None,
             recovered_tcp: None,
@@ -239,6 +260,7 @@ impl NativeTextJoinedStorage {
                 rng,
                 current,
                 Self::opening_policy()?,
+                indexed,
             )?,
         };
         // Surviving rejoin evidence belongs only to the previously

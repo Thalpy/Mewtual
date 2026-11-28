@@ -80,6 +80,11 @@ impl NativeRegistryHandler {
         executing: bool,
     ) -> Result<super::super::pending_join_codec::Parsed<'a>, AppError> {
         use super::super::{pending_join_codec as grammar, shared_history_namespace::Opening};
+        if self.lifecycle().is_some_and(|handler| handler.accepts_indexed_history()) {
+            if let Ok(indexed) = grammar::parse_indexed_shared_history_base(plain, domain, executing) {
+                return Ok(indexed);
+            }
+        }
         if self
             .lifecycle()
             .is_some_and(|handler| handler.accepts_rejoin_startup())

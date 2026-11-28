@@ -13,13 +13,16 @@ use crate::store::persistence::v2_shared_history::{
     disk::{
         PreparedSharedHistorySave, SavedSharedOriginal, SelectedHistoryRecord,
         SelectedSharedHistoryAuditPage, SharedHistoryDisk, SharedHistoryDiskQuota,
-        SharedHistoryRelayIndex, DISK_FEE, RELAY_INDEX_FEE,
+        SharedHistoryRelayIndex, RELAY_INDEX_FEE,
     },
     ArchiveRelayEntry, SharedHistoryActionPage, SharedHistoryActionQuery, SharedHistoryScope,
 };
 use catcoms_replication::chat::{ActionId, SignedAction};
 use catcoms_rt::RequestCancellation;
 use catcoms_storage::private_chat_page::PrivateChatPageId;
+
+mod indexed;
+pub(in crate::store) use indexed::INDEXED_MARKER_NAME;
 
 pub(in crate::store) const MARKER_NAME: &str = "chat-critical-namespaces.shared-history.marker";
 pub(in crate::store) const DIRECTORY_NAME: &str = "chat-v2-received-history";
@@ -36,12 +39,18 @@ pub(in crate::store) struct SelectedSharedHistory {
     disk: Option<SharedHistoryDisk>,
     relay_index: Option<SharedHistoryRelayIndex>,
     mount: crate::store::chat_admission::PhysicalMountNegative,
+    indexed: Option<indexed::IndexedArchiveMount>,
     _fee: CatalogReadReservation,
 }
 
 impl SelectedSharedHistory {
     pub(super) fn matches_original(&self, other: &Self) -> Result<bool, AppError> {
         Ok(self.directory.same_original(&other.directory)
+            && match (&self.indexed, &other.indexed) {
+                (None, None) => true,
+                (Some(left), Some(right)) => left.matches_original(right)?,
+                _ => false,
+            }
             && session_id(&self.marker.0).map_err(io)?
                 == session_id(&other.marker.0).map_err(io)?
             && self.marker.1 == other.marker.1)
@@ -49,6 +58,10 @@ impl SelectedSharedHistory {
 
     pub(super) fn marker_digest(&self) -> [u8; 32] {
         *blake3::hash(&self.marker.1).as_bytes()
+    }
+
+    pub(super) fn clone_original_directory(&self) -> Result<HeldDirectory, AppError> {
+        self.directory.try_clone()
     }
 
     pub(super) fn capture(
@@ -75,6 +88,7 @@ impl SelectedSharedHistory {
             disk: None,
             relay_index: None,
             mount: store.capture_physical_mount_negative(),
+            indexed: None,
             _fee: fee,
         };
         value.require(store)?;
@@ -84,6 +98,9 @@ impl SelectedSharedHistory {
     pub(super) fn require(&self, store: &ServerStore) -> Result<(), AppError> {
         store.require_original_physical_mount(&self.mount)?;
         self.directory.require()?;
+        if let Some(indexed) = &self.indexed {
+            indexed.require(store)?;
+        }
         exact_held(
             &fixed(store, false, MARKER_NAME)?,
             &self.marker.0,
@@ -193,15 +210,9 @@ impl ServerStore {
         let pool = &policy.current.archive.pending.pool;
         let key = member_outbox_key(self)?;
         if mounted.disk.is_none() {
-            let disk = SharedHistoryDisk::from_held(
-                mounted.directory.try_clone()?,
-                scope,
-                SharedHistoryDiskQuota::native(),
-                pool.clone(),
-                &key,
-            )?;
+            let disk = mounted.open_disk(scope, pool.clone(), &key)?;
             let paid = pool
-                .try_reserve(DISK_FEE)
+                .try_reserve(disk.disk_fee())
                 .map_err(|_| AppError::ChatV2ArchiveBusy)?;
             disk.recover(&key, &self._session, paid)?;
             mounted.require(self)?;
@@ -219,7 +230,7 @@ impl ServerStore {
             &mut mounted.pending,
             &mut mounted.relay_index,
             &key,
-            pool.try_reserve(DISK_FEE)
+            pool.try_reserve(disk.disk_fee())
                 .map_err(|_| AppError::ChatV2ArchiveBusy)?,
         )?;
         mounted.require(self)?;
@@ -297,7 +308,12 @@ impl ServerStore {
         action: ActionId,
     ) -> Result<Option<SavedSharedOriginal>, AppError> {
         self.with_selected_shared_history(scope, None, |disk, _, key, pool| {
-            disk.read(key, action, &self._session, pool.try_reserve(DISK_FEE)?)
+            disk.read(
+                key,
+                action,
+                &self._session,
+                pool.try_reserve(disk.disk_fee())?,
+            )
         })
     }
 
@@ -310,7 +326,12 @@ impl ServerStore {
         action: ActionId,
     ) -> Result<Option<SavedSharedOriginal>, AppError> {
         self.with_selected_shared_history(scope, Some(action), |disk, _, key, pool| {
-            disk.read_ancestor(key, action, &self._session, pool.try_reserve(DISK_FEE)?)
+            disk.read_ancestor(
+                key,
+                action,
+                &self._session,
+                pool.try_reserve(disk.disk_fee())?,
+            )
         })
     }
 
@@ -326,6 +347,7 @@ impl ServerStore {
                 let payment = scratch.reserve_more(RELAY_INDEX_FEE)?;
                 *relay = Some(SharedHistoryRelayIndex::start(
                     disk,
+                    key,
                     &self._session,
                     payment,
                     &scratch,
@@ -368,7 +390,7 @@ impl ServerStore {
             disk.visit_relay_page(
                 key,
                 &self._session,
-                &pool.try_reserve(DISK_FEE)?,
+                &pool.try_reserve(disk.disk_fee())?,
                 entries,
                 require_current,
                 visit,
@@ -408,13 +430,7 @@ impl ServerStore {
         let disk = if let Some(disk) = &mounted.disk {
             disk
         } else {
-            unmounted = SharedHistoryDisk::from_held(
-                mounted.directory.try_clone()?,
-                scope,
-                SharedHistoryDiskQuota::native(),
-                pool.clone(),
-                &key,
-            )?;
+            unmounted = mounted.open_disk(scope, pool.clone(), &key)?;
             &unmounted
         };
         disk.require_scope(scope)?;

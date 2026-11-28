@@ -429,10 +429,28 @@ pub(in crate::store) fn verify_shared_history_parent(
     )
 }
 
+/// The indexed archive can first be declared on an existing ID8 base before
+/// any native row or pending joined admission has been published.
+pub(in crate::store) fn verify_indexed_history_parent(
+    store: &crate::store::ServerStore,
+    inventory: crate::store::persistence::native_registry::lifecycle::governed::NativeGovernanceInventory,
+    original_catalog: &[u8],
+    governance_marker: &[u8],
+) -> Result<VerifiedGovernanceNative, AppError> {
+    verify_declaration_parent(
+        store,
+        inventory,
+        original_catalog,
+        None,
+        DeclarationParent::History(governance_marker),
+    )
+}
+
 enum DeclarationParent<'a> {
     Native,
     Governed(&'a [u8]),
     Joined(&'a [u8]),
+    History(&'a [u8]),
 }
 
 fn verify_declaration_parent(
@@ -457,8 +475,14 @@ fn verify_declaration_parent(
         DeclarationParent::Joined(_) => {
             grammar::parse_joined_native_registry_layout(&plain, &original.vault, true)?
         }
+        DeclarationParent::History(_) => {
+            grammar::parse_shared_history_native_registry_layout(&plain, &original.vault, true)?
+        }
     };
-    if let DeclarationParent::Governed(marker) | DeclarationParent::Joined(marker) = parent {
+    if let DeclarationParent::Governed(marker)
+    | DeclarationParent::Joined(marker)
+    | DeclarationParent::History(marker) = parent
+    {
         crate::store::critical_namespaces::governance_layout::codec::require_marker(
             &key,
             parsed.governance.ok_or_else(refused)?,

@@ -38,6 +38,7 @@ pub(in crate::store) struct Handler {
     joined_pin_layout: bool,
     shared_history_layout: Opening,
     warm_review_layout: bool,
+    indexed_history: bool,
     rejoin_startup: bool,
 }
 impl Handler {
@@ -80,6 +81,7 @@ impl Handler {
             joined_pin_layout: false,
             shared_history_layout: Opening::Disabled,
             warm_review_layout: false,
+            indexed_history: false,
             rejoin_startup: false,
         })
     }
@@ -134,6 +136,17 @@ impl Handler {
 
     pub(in crate::store) fn shared_history_opening(&self) -> Opening {
         self.shared_history_layout
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn with_indexed_history(
+        mut self,
+    ) -> Self {
+        self.indexed_history = true;
+        self.with_shared_history_layout(Opening::Required)
+    }
+
+    pub(in crate::store) fn accepts_indexed_history(&self) -> bool {
+        self.indexed_history
     }
     pub(in crate::store) fn require(&self) -> Result<(), AppError> {
         self.payment

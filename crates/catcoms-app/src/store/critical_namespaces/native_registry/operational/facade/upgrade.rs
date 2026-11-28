@@ -9,6 +9,7 @@ use super::super::upgrade_source::{self, owning};
 use super::*;
 use crate::store::critical_namespaces::native_registry::lifecycle::preparation;
 use crate::store::persistence::governance_layout::joined::{
+    indexed_history_declaration::IndexedHistoryDeclaration,
     shared_history::SharedHistoryDeclaration, JoinedPinDeclaration,
 };
 use catcoms_rt::CryptoRngCore;
@@ -81,6 +82,8 @@ impl NativeTextGovernanceUpgrade {
         Ok(NativeTextJoinedVaultUpgrade {
             joined: None,
             history: None,
+            indexed: None,
+            indexed_requested: false,
             complete: false,
             original: self,
             _metadata: metadata,
@@ -131,6 +134,8 @@ impl NativeTextGovernanceUpgrade {
 pub struct NativeTextJoinedVaultUpgrade {
     joined: Option<JoinedPinDeclaration>,
     history: Option<SharedHistoryDeclaration>,
+    indexed: Option<Box<IndexedHistoryDeclaration>>,
+    indexed_requested: bool,
     complete: bool,
     original: NativeTextGovernanceUpgrade,
     _metadata: CatalogReadReservation,
@@ -164,6 +169,9 @@ impl NativeTextJoinedVaultUpgrade {
         &mut self,
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
+        if self.indexed_requested {
+            return Err(refused());
+        }
         if self.history.is_none() {
             self.retry(rng)?;
         }
@@ -176,6 +184,29 @@ impl NativeTextJoinedVaultUpgrade {
             return Err(refused());
         };
         index.advance_shared_history_layout(&mut self.joined, &mut self.history, rng)?;
+        self.require_complete()
+    }
+
+    /// Continue the same unexposed empty vault into the indexed archive.
+    /// The normal desktop creation uses the original archive until the
+    /// indexed family has passed native archive, moderation and relay gates.
+    pub fn retry_with_indexed_history(
+        &mut self,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        if !self.indexed_requested {
+            self.retry_with_shared_history(rng)?;
+            self.indexed_requested = true;
+        }
+        let Some(Phase::Selected3(index)) = self
+            .original
+            .original
+            .as_mut()
+            .and_then(|original| original.phase.as_mut())
+        else {
+            return Err(refused());
+        };
+        index.advance_indexed_history_layout(&mut self.history, &mut self.indexed, rng)?;
         self.require_complete()
     }
 
@@ -193,6 +224,10 @@ impl NativeTextJoinedVaultUpgrade {
         };
         if index.native_row_count_data()? != 0 {
             return Err(refused());
+        }
+        if self.indexed_requested {
+            return index
+                .require_indexed_history_layout(self.indexed.as_deref().ok_or_else(refused)?);
         }
         if let Some(history) = &self.history {
             return index.require_shared_history_layout(history);

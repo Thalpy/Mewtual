@@ -18,6 +18,7 @@ use catcoms_storage::{VaultPhysicalWorkLease, VaultSessionGuard};
 use std::fs::File;
 use std::sync::{Arc, Mutex, Weak};
 
+pub(in crate::store::persistence) mod indexed;
 mod relay_index;
 pub(in crate::store) use relay_index::ArchiveRelayEntry;
 pub(in crate::store::persistence) use relay_index::{SharedHistoryRelayIndex, RELAY_INDEX_FEE};
@@ -98,6 +99,7 @@ pub(in crate::store::persistence) struct SharedHistoryDisk {
     gate: Arc<Mutex<u64>>,
     pool: CriticalCatalogReadPool,
     key_binding: [u8; 32],
+    indexed: Option<indexed::IndexedHeadOwner>,
 }
 
 impl SharedHistoryDisk {
@@ -119,6 +121,7 @@ impl SharedHistoryDisk {
             gate: Arc::new(Mutex::new(0)),
             pool,
             key_binding,
+            indexed: None,
         })
     }
 
@@ -132,7 +135,7 @@ impl SharedHistoryDisk {
         session: &VaultSessionGuard,
         payment: CatalogReadReservation,
     ) -> Result<PreparedSharedHistorySave, AppError> {
-        payment.validate(&self.pool, DISK_FEE)?;
+        payment.validate(&self.pool, self.disk_fee())?;
         self.require_key(key)?;
         let (admission, original) = open_shared_history_bundle(
             &self.scope,
@@ -141,6 +144,22 @@ impl SharedHistoryDisk {
             bundle,
         )?;
         let target = projection_target(original.action(), expected.action);
+        if self.indexed.is_some() {
+            let (wal, indexed) =
+                self.prepare_indexed_save(key, expected, bundle, admission, &original, rng)?;
+            return Ok(PreparedSharedHistorySave {
+                owner: Arc::downgrade(&self.gate),
+                expected,
+                admission,
+                original,
+                wal,
+                attempt: None,
+                indexed,
+                indexed_retiring: false,
+                _lease: session.retain_for_physical_work(),
+                _payment: payment,
+            });
+        }
         let selector = self.seal_selector(key, expected, Some(target), rng)?;
         Ok(PreparedSharedHistorySave {
             owner: Arc::downgrade(&self.gate),
@@ -149,6 +168,8 @@ impl SharedHistoryDisk {
             original,
             wal: encode_wal(&selector, bundle)?,
             attempt: None,
+            indexed: None,
+            indexed_retiring: false,
             _lease: session.retain_for_physical_work(),
             _payment: payment,
         })
@@ -162,13 +183,17 @@ impl SharedHistoryDisk {
         session: &VaultSessionGuard,
         payment: CatalogReadReservation,
     ) -> Result<Option<SelectedHistoryRecord>, AppError> {
-        payment.validate(&self.pool, DISK_FEE)?;
+        payment.validate(&self.pool, self.disk_fee())?;
         self.require_key(key)?;
         let _lease = session.retain_for_physical_work();
         let mut gate = self.gate.try_lock().map_err(|_| refused())?;
         self.directory.require()?;
         advance_revision(&mut gate)?;
-        self.recover_locked(key)
+        if self.indexed.is_some() {
+            self.indexed_recover_locked(key)
+        } else {
+            self.recover_locked(key)
+        }
     }
 
     pub(in crate::store::persistence) fn read(
@@ -201,11 +226,37 @@ impl SharedHistoryDisk {
         payment: CatalogReadReservation,
         local_ancestor: bool,
     ) -> Result<Option<SavedSharedOriginal>, AppError> {
-        payment.validate(&self.pool, DISK_FEE)?;
+        payment.validate(&self.pool, self.disk_fee())?;
         self.require_key(key)?;
         let _lease = session.retain_for_physical_work();
         let _gate = self.gate.try_lock().map_err(|_| refused())?;
         self.directory.require()?;
+        if self.indexed.is_some() {
+            let mut pending = self.indexed_pending_action(key)?;
+            if pending
+                .as_ref()
+                .is_some_and(|pending| !local_ancestor || pending.record.action == action)
+            {
+                return Err(refused());
+            }
+            let selected = self.indexed_read_selected_checked(key, action, None, || {
+                if let Some(pending) = pending.as_mut() {
+                    pending.require(&self.directory)?;
+                } else {
+                    self.indexed_clean()?;
+                }
+                self.directory.require()
+            })?;
+            return Ok(
+                selected.map(|(_selected, admission, original)| SavedSharedOriginal {
+                    #[cfg(test)]
+                    selected: _selected,
+                    admission,
+                    original,
+                    _payment: payment,
+                }),
+            );
+        }
         let path = self.directory.child(WAL_NAME);
         let mut pending = if observe(&path)? == Presence::Present {
             if !local_ancestor {
@@ -302,13 +353,39 @@ impl SharedHistoryDisk {
         session: &VaultSessionGuard,
         payment: &CatalogReadReservation,
     ) -> Result<(Vec<ActionId>, SharedHistoryObservation), AppError> {
-        payment.validate(&self.pool, DISK_FEE)?;
+        payment.validate(&self.pool, self.disk_fee())?;
         self.require_key(key)?;
         let _lease = session.retain_for_physical_work();
         let gate = self.gate.try_lock().map_err(|error| match error {
             std::sync::TryLockError::WouldBlock => AppError::ChatV2ArchiveBusy,
             std::sync::TryLockError::Poisoned(_) => refused(),
         })?;
+        if self.indexed.is_some() {
+            let observed = *gate;
+            drop(gate);
+            let actions = self.indexed_actions(key, target, session, payment)?;
+            let gate = self.gate.try_lock().map_err(|error| match error {
+                std::sync::TryLockError::WouldBlock => AppError::ChatV2ArchiveBusy,
+                std::sync::TryLockError::Poisoned(error) => {
+                    drop(error);
+                    refused()
+                }
+            })?;
+            if *gate != observed {
+                return Err(AppError::ChatV2ArchiveBusy);
+            }
+            self.indexed_clean()?;
+            #[cfg(test)]
+            indexed::run_page_final_cut();
+            self.indexed.as_ref().ok_or_else(refused)?.require()?;
+            return Ok((
+                actions,
+                SharedHistoryObservation {
+                    gate: Arc::downgrade(&self.gate),
+                    revision: *gate,
+                },
+            ));
+        }
         let maximum = 2 * self.quota.records;
         let names = bounded_entries(&self.directory, maximum)?;
         if names.len() > maximum {
@@ -382,7 +459,8 @@ impl SharedHistoryDisk {
         if !(1..=8).contains(&query.limit) || caller.is_cancelled() {
             return Err(refused());
         }
-        let page = self.action_page(key, query, session, self.pool.try_reserve(DISK_FEE)?)?;
+        let page =
+            self.action_page(key, query, session, self.pool.try_reserve(self.disk_fee())?)?;
         // The scan fee funds sequential I/O and decode scratch. The second
         // invoice funds the canonical bytes and parsed action kept per item.
         let payment = self
@@ -409,7 +487,7 @@ impl SharedHistoryDisk {
                 records.push((admission, original));
             }
             if caller.is_cancelled()
-                || observe(&self.directory.child(WAL_NAME))? == Presence::Present
+                || observe(&self.directory.child(self.wal_name()))? == Presence::Present
             {
                 return Err(refused());
             }
@@ -563,6 +641,9 @@ impl SharedHistoryDisk {
         action: ActionId,
     ) -> Result<Option<(SelectedHistoryRecord, OwnerFactId, AssembledActionOriginal)>, AppError>
     {
+        if self.indexed.is_some() {
+            return self.indexed_read_selected(key, action);
+        }
         let path = self.selector_path(key, action);
         if observe(&path)? == Presence::Absent {
             return Ok(None);
@@ -757,6 +838,8 @@ pub(in crate::store::persistence) struct PreparedSharedHistorySave {
     original: AssembledActionOriginal,
     wal: Zeroizing<Vec<u8>>,
     attempt: Option<(File, SessionId)>,
+    indexed: Option<indexed::PreparedIndexedSave>,
+    indexed_retiring: bool,
     _lease: VaultPhysicalWorkLease,
     _payment: CatalogReadReservation,
 }
@@ -767,7 +850,7 @@ impl PreparedSharedHistorySave {
     }
 
     pub(in crate::store::persistence) fn has_wal(&self) -> bool {
-        self.attempt.is_some()
+        self.attempt.is_some() || self.indexed_retiring
     }
 
     pub(in crate::store::persistence) fn commit(
@@ -779,6 +862,9 @@ impl PreparedSharedHistorySave {
             return Err(refused());
         }
         disk.require_key(key)?;
+        if disk.indexed.is_some() {
+            return self.commit_indexed(disk, key);
+        }
         let mut gate = disk.gate.try_lock().map_err(|_| refused())?;
         disk.directory.require()?;
         advance_revision(&mut gate)?;
@@ -816,9 +902,14 @@ impl PreparedSharedHistorySave {
         disk: &SharedHistoryDisk,
         key: &[u8; 32],
     ) -> Result<Option<SelectedHistoryRecord>, AppError> {
-        let Some((selected, admission, original)) =
+        let read = if disk.indexed.is_some() {
+            disk.indexed_read_selected_checked(key, self.expected.action, None, || {
+                disk.directory.sync()
+            })?
+        } else {
             disk.read_selected(key, self.expected.action)?
-        else {
+        };
+        let Some((selected, admission, original)) = read else {
             disk.directory.require()?;
             return Ok(None);
         };
@@ -827,7 +918,9 @@ impl PreparedSharedHistorySave {
         {
             return Err(refused());
         }
-        disk.directory.sync()?;
+        if disk.indexed.is_none() {
+            disk.directory.sync()?;
+        }
         Ok(Some(selected))
     }
 }

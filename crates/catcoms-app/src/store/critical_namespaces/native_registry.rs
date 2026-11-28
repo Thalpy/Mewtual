@@ -14,8 +14,9 @@ pub(in crate::store) use lifecycle::wal::{
     Decision as NativeIndex3WalDecision, VerifiedWal as VerifiedNativeIndex3Wal,
 };
 pub(in crate::store) use lifecycle::{
-    verify_joined_pin_parent, verify_shared_history_parent, PreparedNativeRejoinIndex,
-    VerifiedFounderReviewParent, VerifiedGovernanceNative, VerifiedRecipientReviewParent,
+    verify_indexed_history_parent, verify_joined_pin_parent, verify_shared_history_parent,
+    PreparedNativeRejoinIndex, VerifiedFounderReviewParent, VerifiedGovernanceNative,
+    VerifiedRecipientReviewParent,
 };
 // Named full invoice shared with the closed physical reader. Publishing its
 // size grants no policy, reserve, handler or physical/native authority.

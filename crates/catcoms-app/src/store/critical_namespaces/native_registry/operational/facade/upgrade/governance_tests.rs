@@ -484,6 +484,198 @@ fn governed_joined_pin_native_factory_proves_the_selected_catalog_before_exposur
 }
 
 #[test]
+fn indexed_history_physical_recovers_exact_owned_stage_and_old_mode_refuses() {
+    use crate::store::persistence::{
+        governance_layout::joined::shared_history::{DIRECTORY_NAME, INDEXED_MARKER_NAME},
+        v2_shared_history::INDEXED_HEAD_NAME,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xe4f0);
+    let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+    plan.retry(&mut rng).unwrap();
+    let mut upgrade = plan.prepare_joined_vault().unwrap();
+    upgrade.retry_with_shared_history(&mut rng).unwrap();
+    let current = dir.path().join(Slot::Current.name());
+    let before = fs::read(&current).unwrap();
+    let stage = dir.path().join(Slot::Stage.name());
+    let parked = dir.path().join("actual-indexed-catalog-stage");
+    let claim = dir.path().join(governance::GOVERNANCE_SEED);
+    let marker = dir.path().join(INDEXED_MARKER_NAME);
+    let head = dir.path().join(DIRECTORY_NAME).join(INDEXED_HEAD_NAME);
+    let rejoin = dir.path().join("chat-critical-namespaces.rejoin.stage");
+    let foreign = rejoin.clone();
+    governance::set_stage_selection_hook_for_test(Box::new(move || {
+        fs::write(foreign, b"independent rejoin evidence").unwrap();
+    }));
+    let conflict = upgrade.retry_with_indexed_history(&mut rng).unwrap_err();
+    assert!(
+        rejoin.is_file() && stage.is_file() && claim.is_file(),
+        "expected the rejoin exclusion at indexed selection, got {conflict}",
+    );
+    assert_eq!(fs::read(&current).unwrap(), before);
+    assert_eq!(fs::read(&rejoin).unwrap(), b"independent rejoin evidence");
+    let first_claim = fs::read(&claim).unwrap();
+    let first_candidate = fs::read(&stage).unwrap();
+    fs::remove_file(&rejoin).unwrap();
+
+    let (named, original) = (stage.clone(), parked.clone());
+    governance::set_stage_selection_hook_for_test(Box::new(move || {
+        fs::rename(&named, original).unwrap();
+        fs::write(named, b"foreign catalog stage").unwrap();
+    }));
+    let refusal = upgrade
+        .retry_with_indexed_history(&mut NeverRng)
+        .unwrap_err();
+    assert!(
+        stage.is_file(),
+        "expected a refusal after Stage, got {refusal}; indexed requested={}, prepared={}, claim={}, marker={}, head={}",
+        upgrade.indexed_requested,
+        upgrade.indexed.is_some(),
+        claim.is_file(),
+        marker.is_file(),
+        head.is_file(),
+    );
+    assert_eq!(fs::read(&current).unwrap(), before);
+    assert_eq!(fs::read(&stage).unwrap(), b"foreign catalog stage");
+    let claim_bytes = fs::read(&claim).unwrap();
+    let chosen = fs::read(&parked).unwrap();
+    assert_eq!(claim_bytes, first_claim);
+    assert_eq!(chosen, first_candidate);
+    let marker_bytes = fs::read(&marker).unwrap();
+    let head_bytes = fs::read(&head).unwrap();
+    assert!(upgrade.retry_with_shared_history(&mut NeverRng).is_err());
+    drop(upgrade);
+
+    let old = || {
+        NativeTextJoinedStorage::open_for_native_startup(
+            dir.path(),
+            SECRET,
+            &mut NeverRng,
+            current_policy(),
+        )
+    };
+    let indexed = || {
+        NativeTextJoinedStorage::open_for_indexed_native_startup(
+            dir.path(),
+            SECRET,
+            &mut NeverRng,
+            current_policy(),
+        )
+    };
+    assert!(old().is_err());
+    assert!(indexed().is_err());
+    assert_eq!(fs::read(&current).unwrap(), before);
+    assert_eq!(fs::read(&claim).unwrap(), claim_bytes);
+    assert_eq!(fs::read(&stage).unwrap(), b"foreign catalog stage");
+
+    fs::remove_file(&stage).unwrap();
+    fs::rename(&parked, &stage).unwrap();
+    let mounted = indexed().unwrap();
+    assert_eq!(mounted.row_count_data().unwrap(), 0);
+    assert!(mounted
+        .actual_store_for_test()
+        .unwrap()
+        .has_mounted_shared_history()
+        .unwrap());
+    assert_eq!(fs::read(&current).unwrap(), chosen);
+    assert_eq!(fs::read(&marker).unwrap(), marker_bytes);
+    assert_eq!(fs::read(&head).unwrap(), head_bytes);
+    assert!(!claim.exists() && !stage.exists());
+    drop(mounted);
+    assert!(old().is_err());
+    assert_eq!(fs::read(&current).unwrap(), chosen);
+    assert_eq!(indexed().unwrap().row_count_data().unwrap(), 0);
+}
+
+#[test]
+fn indexed_history_physical_refuses_the_replaced_mounted_id8_parent_before_any_write() {
+    use crate::store::persistence::{
+        governance_layout::joined::{
+            indexed_history_declaration::CLAIM_STAGE_NAME,
+            shared_history::{DIRECTORY_NAME, INDEXED_MARKER_NAME, MARKER_NAME},
+        },
+        v2_shared_history::INDEXED_HEAD_NAME,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(0xe4f1);
+    let mut plan = original(dir.path(), &mut rng).prepare_governance().unwrap();
+    plan.retry(&mut rng).unwrap();
+    let mut upgrade = plan.prepare_joined_vault().unwrap();
+    upgrade.retry_with_shared_history(&mut rng).unwrap();
+    drop(upgrade.into_vault().unwrap());
+    let mounted = NativeTextJoinedStorage::open_for_native_startup(
+        dir.path(),
+        SECRET,
+        &mut NeverRng,
+        current_policy(),
+    )
+    .unwrap();
+    let store = mounted.actual_store_for_test().unwrap();
+    let prepare = |rng: &mut ChaCha20Rng| store.prepare_empty_indexed_history_declaration(rng);
+    // The same store, paid pool and native witnesses must admit the exact
+    // parent before testing a refusal from the substituted file.
+    drop(prepare(&mut rng).unwrap());
+    let current = dir.path().join(Slot::Current.name());
+    let before = fs::read(&current).unwrap();
+    let id8 = dir.path().join(MARKER_NAME);
+    let parked = dir.path().join("original-mounted-id8-marker");
+    fs::rename(&id8, &parked).unwrap();
+    fs::copy(&parked, &id8).unwrap();
+    assert!(store
+        .prepare_empty_indexed_history_declaration(&mut NeverRng)
+        .is_err());
+    assert_eq!(fs::read(&current).unwrap(), before);
+    assert!(!dir.path().join(Slot::Stage.name()).exists());
+    assert!(!dir.path().join(governance::GOVERNANCE_SEED).exists());
+    assert!(!dir.path().join(INDEXED_MARKER_NAME).exists());
+    assert!(!dir
+        .path()
+        .join(DIRECTORY_NAME)
+        .join(INDEXED_HEAD_NAME)
+        .exists());
+    fs::remove_file(&id8).unwrap();
+    fs::rename(parked, id8).unwrap();
+    let declaration = prepare(&mut rng).unwrap();
+    let exact_seed = declaration.prepared_seed_for_test().to_vec();
+    drop((declaration, mounted));
+
+    let scratch = dir.path().join(CLAIM_STAGE_NAME);
+    let open_indexed = || {
+        NativeTextJoinedStorage::open_for_indexed_native_startup(
+            dir.path(),
+            SECRET,
+            &mut NeverRng,
+            current_policy(),
+        )
+    };
+    fs::write(&scratch, &exact_seed[..exact_seed.len() / 2]).unwrap();
+    let clean = open_indexed().unwrap();
+    assert_eq!(clean.row_count_data().unwrap(), 0);
+    assert!(!scratch.exists());
+    assert_eq!(fs::read(&current).unwrap(), before);
+    drop(clean);
+
+    let mut corrupt = exact_seed.clone();
+    *corrupt.last_mut().unwrap() ^= 1;
+    fs::write(&scratch, &corrupt).unwrap();
+    assert!(open_indexed().is_err());
+    assert_eq!(fs::read(&scratch).unwrap(), corrupt);
+    assert_eq!(fs::read(&current).unwrap(), before);
+
+    fs::write(&scratch, &exact_seed).unwrap();
+    let recovered = open_indexed().unwrap();
+    assert_eq!(recovered.row_count_data().unwrap(), 0);
+    assert_ne!(fs::read(&current).unwrap(), before);
+    assert!(dir
+        .path()
+        .join(DIRECTORY_NAME)
+        .join(INDEXED_HEAD_NAME)
+        .is_file());
+    assert!(!dir.path().join(governance::GOVERNANCE_SEED).exists());
+    assert!(!scratch.exists());
+}
+
+#[test]
 fn governed_joined_pin_warm_selection_keeps_the_original_mount_and_stage() {
     let dir = tempfile::tempdir().unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(0xc464);

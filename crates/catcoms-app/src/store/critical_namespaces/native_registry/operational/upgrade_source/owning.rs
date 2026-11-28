@@ -9,6 +9,7 @@ enum ColdOpening {
     Joined,
     IdleJoined,
     NativeStartup,
+    IndexedNativeStartup,
     #[cfg(test)]
     SelectedSharedHistory,
 }
@@ -940,12 +941,31 @@ impl Store {
         )
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn advance_indexed_history_layout(
+        &mut self,
+        previous: &mut Option<crate::store::persistence::governance_layout::joined::shared_history::SharedHistoryDeclaration>,
+        declaration: &mut Option<Box<crate::store::persistence::governance_layout::joined::indexed_history_declaration::IndexedHistoryDeclaration>>,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        Arc::get_mut(&mut self.physical)
+            .ok_or_else(refused)?
+            .advance_indexed_history_layout(previous, declaration, rng)
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn require_indexed_history_layout(
+        &self,
+        declaration: &crate::store::persistence::governance_layout::joined::indexed_history_declaration::IndexedHistoryDeclaration,
+    ) -> Result<(), AppError> {
+        self.physical.require_indexed_history_layout(declaration)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn open_native_startup(
         dir: &std::path::Path,
         passphrase: &[u8],
         rng: &mut impl CryptoRngCore,
         current: crate::store::V2CurrentLayoutPolicy,
         policy: Policy,
+        indexed: bool,
     ) -> Result<Self, AppError> {
         Self::open_governed_family(
             dir,
@@ -953,7 +973,7 @@ impl Store {
             rng,
             current,
             policy,
-            ColdOpening::NativeStartup,
+            if indexed { ColdOpening::IndexedNativeStartup } else { ColdOpening::NativeStartup },
         )
     }
 
@@ -1001,6 +1021,9 @@ impl Store {
                 handler = handler.with_shared_history_layout(Opening::Required)
             }
             ColdOpening::NativeStartup => handler = handler.with_rejoin_startup(),
+            ColdOpening::IndexedNativeStartup => {
+                handler = handler.with_rejoin_startup().with_indexed_history()
+            }
             _ => {}
         }
         let physical = physical::Physical::allocate(handler.clone());
@@ -1022,7 +1045,8 @@ impl Store {
             .expect("unexposed original governed physical")
             .install(current);
         let count = value.row_count_data()?;
-        if matches!(opening, ColdOpening::NativeStartup)
+        let native_startup = matches!(opening, ColdOpening::NativeStartup | ColdOpening::IndexedNativeStartup);
+        if native_startup
             && value.physical.rejoin_catalog_selected()?
             && count != 1
         {
@@ -1030,8 +1054,8 @@ impl Store {
         }
         let joined = match (opening, count) {
             (ColdOpening::IdleJoined, 0) => JoinedPinOpening::Idle,
-            (ColdOpening::NativeStartup, 0) => JoinedPinOpening::NativeWithoutRow,
-            (ColdOpening::NativeStartup, 1) | (ColdOpening::Governed | ColdOpening::Joined, _) => {
+            (ColdOpening::NativeStartup | ColdOpening::IndexedNativeStartup, 0) => JoinedPinOpening::NativeWithoutRow,
+            (ColdOpening::NativeStartup | ColdOpening::IndexedNativeStartup, 1) | (ColdOpening::Governed | ColdOpening::Joined, _) => {
                 JoinedPinOpening::Any
             }
             #[cfg(test)]
@@ -1048,7 +1072,7 @@ impl Store {
             .finish_governed_cold(
                 &tail,
                 joined,
-                matches!((opening, count), (ColdOpening::NativeStartup, 1)),
+                native_startup && count == 1,
             )
         {
             drop(value);

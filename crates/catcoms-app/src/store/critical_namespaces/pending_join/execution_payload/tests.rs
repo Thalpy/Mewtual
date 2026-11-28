@@ -189,6 +189,7 @@ fn summary(
         review_hold_payload_digest: None,
         review_decision_payload_digest: None,
         review_receive_payload_digest: None,
+        indexed_history_payload_digest: None,
     }
 }
 fn original_metadata(n: u8, active: bool) -> codec::Metadata {

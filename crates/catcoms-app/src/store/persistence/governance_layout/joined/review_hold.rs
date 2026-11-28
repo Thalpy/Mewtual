@@ -16,7 +16,7 @@ use crate::store::persistence::v2_review_hold::{
     },
     HeldAuditObservation, HeldCase, HoldScope, NativeTextHeldReviewContinuation,
 };
-use crate::store::persistence::v2_shared_history::{disk::DISK_FEE, SharedHistoryScope};
+use crate::store::persistence::v2_shared_history::SharedHistoryScope;
 use catcoms_replication::chat::{
     SignedAction, V2GeneralPrefixVerifier, V2RemovedCreateEvidence, V2RemovedCreateRecord,
 };
@@ -138,7 +138,7 @@ impl ServerStore {
                 key,
                 case.action,
                 &self._session,
-                pool.try_reserve(DISK_FEE)?,
+                pool.try_reserve(ordinary.disk_fee())?,
             )?;
             if selected.is_some() {
                 return Err(denied());
@@ -290,7 +290,7 @@ impl ServerStore {
                 key,
                 target.action,
                 &self._session,
-                pool.try_reserve(DISK_FEE)?,
+                pool.try_reserve(ordinary.disk_fee())?,
             )? {
                 // Both signatures may be valid for the same ActionId.
                 // The existing selected exact bytes continue to win.

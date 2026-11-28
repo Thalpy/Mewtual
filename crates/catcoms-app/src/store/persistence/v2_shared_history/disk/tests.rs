@@ -196,6 +196,7 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
         .is_err());
     assert!(SharedHistoryRelayIndex::start(
         &disk,
+        &KEY,
         &session,
         pool.try_reserve(RELAY_INDEX_FEE).unwrap(),
         &pay()
@@ -256,6 +257,7 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     let scratch = pay();
     let mut relay = SharedHistoryRelayIndex::start(
         &disk,
+        &KEY,
         &session,
         pool.try_reserve(RELAY_INDEX_FEE).unwrap(),
         &scratch,
@@ -336,6 +338,7 @@ fn shared_history_disk_selects_exact_originals_and_finishes_only_its_authenticat
     assert_eq!(readable, intact);
     let mut relay = SharedHistoryRelayIndex::start(
         &disk,
+        &KEY,
         &session,
         pool.try_reserve(RELAY_INDEX_FEE).unwrap(),
         &scratch,

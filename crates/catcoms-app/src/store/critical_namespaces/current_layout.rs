@@ -706,6 +706,37 @@ impl V2CurrentLayoutStore {
             .native_registry = Some(handler);
         self.store.install_warm_shared_history(declaration)
     }
+    pub(in crate::store::critical_namespaces) fn advance_native_indexed_history(
+        &mut self,
+        previous: &mut Option<crate::store::persistence::governance_layout::joined::shared_history::SharedHistoryDeclaration>,
+        declaration: &mut Option<Box<crate::store::persistence::governance_layout::joined::indexed_history_declaration::IndexedHistoryDeclaration>>,
+        handler: super::native_registry::preparation::NativeRegistryHandler,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        if !handler.lifecycle().is_some_and(|owner| owner.accepts_indexed_history())
+            || self.governance.as_ref().is_none_or(|g| !g.is_live_cached())
+        {
+            return Err(refused());
+        }
+        if declaration.is_none() {
+            let store = self.checked_store()?;
+            if let Some(previous) = previous.as_ref() {
+                previous.require_promoted(store)?;
+            }
+            // Only one paid native inventory can be live. The new owner
+            // independently acquires the same Current, archive and witnesses.
+            drop(previous.take());
+            *declaration = Some(Box::new(store.prepare_empty_indexed_history_declaration(rng)?));
+        }
+        let declaration = declaration.as_mut().ok_or_else(refused)?;
+        declaration.promote(&self.store)?;
+        self.store.current_layout_policy.as_mut().ok_or_else(refused)?
+            .native_registry = Some(handler.clone());
+        self.store.governance_layout_policy.as_mut().ok_or_else(refused)?
+            .current.native_registry = Some(handler);
+        self.store.install_warm_indexed_history(declaration)
+    }
+
     pub(in crate::store::critical_namespaces) fn attach_recovered_joined_node<
         T: catcoms_rt::MeshTransport,
         R: catcoms_rt::CryptoRngCore,

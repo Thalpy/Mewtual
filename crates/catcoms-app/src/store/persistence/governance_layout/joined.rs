@@ -23,6 +23,7 @@ pub(in crate::store) enum JoinedPinOpening {
     Idle,
     NativeWithoutRow,
 }
+pub(in crate::store) mod indexed_history_declaration;
 mod pending;
 pub(in crate::store) mod rejoin;
 pub(in crate::store) mod review_decision;
@@ -243,18 +244,32 @@ impl ServerStore {
     pub(in crate::store) fn select_joined_pin_catalog(
         &self,
     ) -> Result<ColdJoinedSelection, AppError> {
-        let supports_review = self
+        let handler = self
             .current_layout_policy
             .as_ref()
-            .and_then(|policy| policy.native_registry.as_ref())
-            .is_some_and(|handler| handler.accepts_review_recovery());
-        let receiver = if supports_review {
+            .and_then(|policy| policy.native_registry.as_ref());
+        let supports_review = handler.is_some_and(|handler| handler.accepts_review_recovery());
+        let indexed = if handler
+            .and_then(|handler| handler.lifecycle())
+            .is_some_and(|handler| handler.accepts_indexed_history())
+        {
+            indexed_history_declaration::recover(self)?
+        } else {
+            None
+        };
+        let receiver = if indexed.is_some() {
+            review_receive::require_no_claim_stage(self)?;
+            None
+        } else if supports_review {
             review_receive::recover(self)?
         } else {
             review_receive::require_no_claim_stage(self)?;
             None
         };
-        let review = if receiver.is_some() {
+        let review = if indexed.is_some() {
+            review_hold::require_no_scratch(self)?;
+            None
+        } else if receiver.is_some() {
             None
         } else if supports_review {
             review_hold::recover(self)?
@@ -262,7 +277,8 @@ impl ServerStore {
             review_hold::require_no_scratch(self)?;
             None
         };
-        let recovered = if receiver.is_none()
+        let recovered = if indexed.is_none()
+            && receiver.is_none()
             && review.is_none()
             && self.shared_history_opening() != Opening::Disabled
         {
@@ -271,6 +287,9 @@ impl ServerStore {
             None
         };
         let selected = self.select_joined_pin_catalog_with(None)?;
+        if let Some(indexed) = indexed {
+            indexed.require(self, &selected)?;
+        }
         if let Some(recovered) = recovered {
             recovered.require(self, &selected)?;
         }
@@ -330,9 +349,21 @@ impl ServerStore {
             {
                 let plain = Zeroizing::new(unseal(&key, &unframe(&raw)?)?);
                 let parsed = self.parse_joined_catalog_descriptors(&plain)?;
+                if parsed.indexed_history.is_none() {
+                    absent(&fixed(self, false, shared_history::INDEXED_MARKER_NAME)?)?;
+                }
                 let history = parsed
                     .shared_history
                     .map(|descriptor| {
+                        if let Some(indexed) = parsed.indexed_history {
+                            return shared_history::SelectedSharedHistory::capture_indexed(
+                                self,
+                                descriptor,
+                                indexed,
+                                parsed.layout,
+                                &key,
+                            );
+                        }
                         shared_history::SelectedSharedHistory::capture(
                             self,
                             descriptor,

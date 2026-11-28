@@ -18,8 +18,9 @@ pub(super) mod network;
 pub(super) mod preparation;
 mod rejoin_install;
 pub(in crate::store) use preparation::{
-    verify_governance_native, verify_joined_pin_parent, verify_shared_history_parent,
-    VerifiedFounderReviewParent, VerifiedGovernanceNative, VerifiedRecipientReviewParent,
+    verify_governance_native, verify_indexed_history_parent, verify_joined_pin_parent,
+    verify_shared_history_parent, VerifiedFounderReviewParent, VerifiedGovernanceNative,
+    VerifiedRecipientReviewParent,
 };
 pub(in crate::store) use rejoin_install::PreparedNativeRejoinIndex;
 

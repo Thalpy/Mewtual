@@ -21,6 +21,7 @@ mod review;
 mod review_approval;
 mod review_receiver;
 mod rewrite;
+mod shared_archive;
 pub(in crate::store) use path::{
     PrivateIndexPathData, PrivateIndexSuccessorData, PRIVATE_INDEX_BOUNDARY_OPEN_BYTES,
     PRIVATE_INDEX_PATH_METADATA_BYTES,
@@ -32,6 +33,7 @@ pub(in crate::store) use rewrite::{
     rewrite_private_branch_data, rewrite_private_leaf_data, PrivateIndexRewriteData,
     PRIVATE_INDEX_REWRITE_METADATA_BYTES, PRIVATE_INDEX_REWRITE_TEMPORARY_BYTES,
 };
+pub(in crate::store) use shared_archive::SharedArchiveIndexValueData;
 
 const TOKEN_DOMAIN: &[u8] = b"catcoms/private-chat-text-token-index/v1\0";
 const PUBLICATION_DOMAIN: &[u8] = b"catcoms/private-chat-text-publication-index/v1\0";
@@ -42,6 +44,8 @@ const RECEIVED_REVIEW_ORDINAL_DOMAIN: &[u8] =
 const RECEIVED_REVIEW_CASE_DOMAIN: &[u8] = b"catcoms/private-chat-received-review-case-index/v1\0";
 const APPROVED_REVIEW_ACTION_DOMAIN: &[u8] =
     b"catcoms/private-chat-reviewed-original-action-index/v1\0";
+const SHARED_ARCHIVE_ACTION_DOMAIN: &[u8] =
+    b"catcoms/private-chat-shared-archive-action-index/v1\0";
 const VERSION: u16 = 1;
 const BRANCH_ROW_BYTES: usize = 80;
 const MAX_VALUE_BYTES: usize = 384;
@@ -64,6 +68,14 @@ const _: () = assert!(
     PUBLICATION_HEADER_BYTES + MAX_LEAF_ROWS * (34 + MAX_VALUE_BYTES) <= MAX_INDEX_NODE_BYTES
 );
 const _: () = assert!(MAX_INDEX_NODE_BYTES == 16384 && MAX_INDEX_FRAME_BYTES == 16470);
+const SHARED_ARCHIVE_HEADER_BYTES: usize =
+    TOKEN_HEADER_BYTES - TOKEN_DOMAIN.len() + SHARED_ARCHIVE_ACTION_DOMAIN.len();
+const _: () = assert!(
+    SHARED_ARCHIVE_HEADER_BYTES + MAX_BRANCH_ROWS * BRANCH_ROW_BYTES <= MAX_INDEX_NODE_BYTES
+);
+const _: () = assert!(
+    SHARED_ARCHIVE_HEADER_BYTES + MAX_LEAF_ROWS * (34 + MAX_VALUE_BYTES) <= MAX_INDEX_NODE_BYTES
+);
 
 /// Fixed nonallocating refusal: untrusted lengths/prefixes cannot select a diagnostic size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +97,7 @@ pub(in crate::store) enum PrivateIndexKindData {
     ReviewReceivedOrdinal,
     ReviewReceivedCase,
     ReviewApprovedAction,
+    SharedArchiveAction,
 }
 impl PrivateIndexKindData {
     fn domain(self) -> &'static [u8] {
@@ -96,6 +109,7 @@ impl PrivateIndexKindData {
             Self::ReviewReceivedOrdinal => RECEIVED_REVIEW_ORDINAL_DOMAIN,
             Self::ReviewReceivedCase => RECEIVED_REVIEW_CASE_DOMAIN,
             Self::ReviewApprovedAction => APPROVED_REVIEW_ACTION_DOMAIN,
+            Self::SharedArchiveAction => SHARED_ARCHIVE_ACTION_DOMAIN,
         }
     }
     fn code(self) -> u8 {
@@ -107,6 +121,7 @@ impl PrivateIndexKindData {
             Self::ReviewReceivedOrdinal => 5,
             Self::ReviewReceivedCase => 6,
             Self::ReviewApprovedAction => 7,
+            Self::SharedArchiveAction => 8,
         }
     }
     fn header_bytes(self) -> usize {
@@ -115,7 +130,10 @@ impl PrivateIndexKindData {
             Self::Publication => PUBLICATION_HEADER_BYTES,
             Self::ReviewIntent => REVIEW_INTENT_HEADER_BYTES,
             Self::ReviewCase => REVIEW_CASE_HEADER_BYTES,
-            Self::ReviewReceivedOrdinal | Self::ReviewReceivedCase | Self::ReviewApprovedAction => {
+            Self::ReviewReceivedOrdinal
+            | Self::ReviewReceivedCase
+            | Self::ReviewApprovedAction
+            | Self::SharedArchiveAction => {
                 TOKEN_HEADER_BYTES - TOKEN_DOMAIN.len() + self.domain().len()
             }
         }
@@ -137,6 +155,7 @@ pub(in crate::store) enum PrivateIndexValueData {
     Review(ReviewIndexValueData),
     ReceivedReview(ReceivedReviewIndexValueData),
     ApprovedReview(ApprovedReviewIndexValueData),
+    SharedArchive(SharedArchiveIndexValueData),
 }
 impl PrivateIndexValueData {
     fn check_key(self, context: PrivateIndexContextData, key: [u8; 32]) -> Result<()> {
@@ -171,6 +190,9 @@ impl PrivateIndexValueData {
             (PrivateIndexKindData::ReviewApprovedAction, Self::ApprovedReview(value)) => {
                 value.require_key(context, key)
             }
+            (PrivateIndexKindData::SharedArchiveAction, Self::SharedArchive(value)) => {
+                value.require_key(context, key)
+            }
             _ => Err(PrivateIndexError::Context),
         }
     }
@@ -192,6 +214,9 @@ impl PrivateIndexValueData {
             PrivateIndexKindData::ReviewApprovedAction => {
                 Self::ApprovedReview(ApprovedReviewIndexValueData::decode(raw)?)
             }
+            PrivateIndexKindData::SharedArchiveAction => {
+                Self::SharedArchive(SharedArchiveIndexValueData::decode(raw)?)
+            }
         };
         value.check_key(context, key)?;
         Ok(value)
@@ -204,6 +229,7 @@ impl PrivateIndexValueData {
             Self::Review(value) => return value.encode(),
             Self::ReceivedReview(value) => return value.encode(),
             Self::ApprovedReview(value) => return value.encode(),
+            Self::SharedArchive(value) => return value.encode(),
         }
         .map_err(|_| PrivateIndexError::Malformed)?;
         if raw.is_empty() || raw.len() > MAX_VALUE_BYTES {

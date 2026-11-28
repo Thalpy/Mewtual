@@ -688,3 +688,107 @@ fn founder_review_seed_replays_the_exact_predecessor_and_requires_each_leaf() {
     let frame = frame(&seal(&key, &a2, &mut rng).unwrap());
     assert!(PreparedDeclaration::prepare(kind, &key, &frame, layout, leaves, &mut rng).is_err());
 }
+
+#[test]
+fn indexed_shared_history_requires_its_exact_original_descriptor_and_private_reader() {
+    use crate::store::critical_namespaces::{
+        indexed_shared_history_namespace as indexed, shared_history_namespace as history,
+    };
+    let (joined, _) = joined_catalog();
+    let original = history::prepare_declaration(&joined, &VAULT).unwrap();
+    let candidate = indexed::prepare_declaration(&original, &VAULT).unwrap();
+    indexed::verify_declaration(&original, &candidate, &VAULT).unwrap();
+    assert!(indexed::prepare_declaration(&candidate, &VAULT).is_err());
+    assert!(
+        grammar::parse_shared_history_native_registry_layout(&candidate, &VAULT, true).is_err()
+    );
+    assert!(grammar::parse_native_review_startup(&candidate, &VAULT, true).is_err());
+    assert!(grammar::parse_indexed_shared_history_base(&candidate, &[40; 32], true).is_err());
+    let existing =
+        grammar::parse_shared_history_native_registry_layout(&original, &VAULT, true).unwrap();
+    let selected = grammar::parse_indexed_shared_history_base(&candidate, &VAULT, true).unwrap();
+    assert_eq!(
+        selected.shared_history_payload,
+        existing.shared_history_payload
+    );
+    let descriptor = selected.indexed_history_payload.unwrap();
+    assert_ne!(
+        indexed::marker_data(&[1; 32], descriptor).unwrap(),
+        indexed::marker_data(&[2; 32], descriptor).unwrap(),
+    );
+    assert!(grammar::successor(&existing.summary([1; 32]), &selected.summary([2; 32])).is_err());
+    let mut altered = descriptor.to_vec();
+    altered[0] ^= 1;
+    for (version, payload) in [(indexed::VERSION, altered.as_slice()), (2, descriptor)] {
+        let forged = catalog_declaration::insert_entry_data(
+            &original,
+            &VAULT,
+            indexed::ID,
+            version,
+            payload,
+        )
+        .unwrap();
+        assert!(indexed::verify_declaration(&original, &forged, &VAULT).is_err());
+    }
+}
+
+#[test]
+fn indexed_shared_history_seed_revalidates_bound_empty_head_and_original_native_leaves() {
+    use crate::store::{
+        critical_namespaces::{
+            indexed_shared_history_namespace::bootstrap::{
+                AuthenticatedArchiveSeed, IndexedArchiveParent, PreparedArchiveDeclaration,
+            },
+            shared_history_namespace as history,
+        },
+        frame,
+        persistence::v2_shared_history::{
+            prepare_empty_indexed_history_head, verify_empty_indexed_history_head,
+        },
+    };
+    use catcoms_crypto::seal;
+    use rand_chacha::ChaCha20Rng;
+    use rand_core::SeedableRng;
+
+    let (joined, _) = joined_catalog();
+    let shared = history::prepare_declaration(&joined, &VAULT).unwrap();
+    let parsed =
+        grammar::parse_shared_history_native_registry_layout(&shared, &VAULT, true).unwrap();
+    let parent = IndexedArchiveParent {
+        layout: parsed.current_layout.unwrap(),
+        native_registry: [21; 32],
+        joined_pins: [22; 32],
+        original_archive: [23; 32],
+    };
+    let mut rng = ChaCha20Rng::seed_from_u64(1413);
+    let catalog_key = [24; 32];
+    let archive_key = [25; 32];
+    let original = frame(&seal(&catalog_key, &shared, &mut rng).unwrap());
+    let prepared = PreparedArchiveDeclaration::prepare(
+        &catalog_key,
+        parent,
+        &original,
+        |scope, rng| prepare_empty_indexed_history_head(&archive_key, *scope, rng),
+        &mut rng,
+    )
+    .unwrap();
+    let seed = AuthenticatedArchiveSeed::open(&catalog_key, &prepared.seed).unwrap();
+    let check = |scope: &[u8; 32], head: &[u8]| {
+        verify_empty_indexed_history_head(&archive_key, *scope, head)
+    };
+    let selected = seed.validate(&catalog_key, parent, check).unwrap();
+    assert_eq!(selected.original, original);
+    assert_ne!(selected.candidate, original);
+    assert!(!selected.initial_head.is_empty());
+    assert_ne!(selected.marker, [0; 32]);
+    let foreign = IndexedArchiveParent {
+        joined_pins: [26; 32],
+        ..parent
+    };
+    assert!(seed.validate(&catalog_key, foreign, check).is_err());
+    assert!(seed
+        .validate(&catalog_key, parent, |scope, head| {
+            verify_empty_indexed_history_head(&[27; 32], *scope, head)
+        },)
+        .is_err());
+}
