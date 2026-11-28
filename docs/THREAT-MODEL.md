@@ -248,6 +248,20 @@ address. Forgetting the contacts revokes the original live approval.
 Rolling the local contact file back to an earlier authentic version at the
 same governing head can restore its previous consent.
 
+The separate optional A1 founder-peer record is not contact consent. It
+binds the complete original registration and only the original signed
+zero-address reservation. Cold startup can recover its PeerId for use on
+an independently authenticated existing connection; it retains no host/IP
+and cannot dial. Stage-only, foreign, partial or malformed optional bytes
+grant no hint. A complete final plus Stage grants a hint only when their
+ciphertext is identical and authentic for the original A1 scope; the cold
+reader retains both native identities and writes nothing. Create-new final
+output preserves a racing destination. An optional failure does not block
+the separately reverified original Join registration or ordinary startup;
+ID9 declaration/A2 always refuses this A1 interpretation. The same-vault
+component rollback boundary applies, but replaying this immutable original
+hint supplies no membership, signing, message or new-connection permission.
+
 16 November Score/voice integration candidate: this branch combines the reviewed
 Score and voice admission history with the newer Chat/security and Studio save
 baseline. The entries below retain each branch's evidence; they do not establish

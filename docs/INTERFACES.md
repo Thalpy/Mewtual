@@ -978,6 +978,21 @@ are authored and UNRUN during the compilation pause. [Contract and rollback limi
 
 ## Chat V2 review-decision data
 
+The original A1 registration can retain its pinned founder identity in a
+separate optional AEAD sidecar. Its fixed stage and record contain only the
+original zero-address reservation and exact registration scope, leaving all
+existing pin, Pending, invitation, Current, ID9 and ID12 formats unchanged.
+Registration attempts to cover it from the same parked outcome before native
+CAS, using create-new final output. Optional IO failure preserves its bytes
+and does not replace the independent Pending/Welcome registration proof or
+block registration. Cancellation still refuses the original publication.
+Cold A1 installs only an inert PeerId, with no host/IP or dial capability.
+The original signed commitment and selected local registration are rechecked;
+an unreadable optional file leaves ordinary startup available without a hint.
+A crash may leave final and Stage together: only byte-identical fully
+authenticated copies can supply the inert hint, and cold read repairs neither.
+An ID9/A2 owner never inherits this file's route interpretation.
+
 `owner_bodies::ReviewDecisionBody` binds one complete target, stable case ID, intent nonce, decision
 and exact previous body ID in at most665bytes. It checks data transitions and actual action/header
 signatures, not selected-current case state or owner/root provenance. A later selected Approve can

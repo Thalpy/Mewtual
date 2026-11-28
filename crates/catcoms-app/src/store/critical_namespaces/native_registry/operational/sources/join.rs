@@ -480,6 +480,9 @@ pub(super) struct MountedNode<R: CryptoRngCore> {
     recovered: Option<NativeTextJoinedRegistrationData>,
     selection: Option<NativeTextJoinedRowSelection>,
     founder_contact: OnceLock<PeerId>,
+    // One paid ciphertext continuation on this same parked A1 outcome.
+    // It cannot supply a host, dial, Source or native registration proof.
+    founder_route: Option<crate::store::persistence::v2_founder_route::FounderRouteWrite>,
     _payment: CatalogReadReservation,
 }
 
@@ -507,6 +510,7 @@ impl<R: CryptoRngCore> NativeTextSources<catcoms_net::MeshService, R> {
         receipt: NativeTextJoinedRegistrationData,
         transport: Arc<join_tcp::Transport>,
         payment: CatalogReadReservation,
+        founder: Option<PeerId>,
     ) -> Result<(), AppError> {
         let checked = node
             .as_ref()
@@ -534,7 +538,8 @@ impl<R: CryptoRngCore> NativeTextSources<catcoms_net::MeshService, R> {
             registration: None,
             recovered: Some(receipt),
             selection: None,
-            founder_contact: OnceLock::new(),
+            founder_contact: founder.map(OnceLock::from).unwrap_or_default(),
+            founder_route: None,
             _payment: payment,
         });
         Ok(())
@@ -623,6 +628,7 @@ impl<R: CryptoRngCore> NativeTextJoinedInstallation<R> {
                     recovered: None,
                     selection: None,
                     founder_contact: OnceLock::from(self.exchange.target),
+                    founder_route: None,
                     _payment: payment.take().unwrap(),
                 });
                 self.exchange.tcp.attached();
@@ -1578,6 +1584,10 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
         rng: &mut impl CryptoRngCore,
     ) -> Result<NativeTextJoinedRegistryRowData, AppError> {
         self.original.require_current(negative)?;
+        // Destruction of a successful plan (Files and its account) belongs
+        // outside the pending/mounted/physical writers. Uncertain errors
+        // deliberately leave the plan on the original parked runtime.
+        let mut retired_route = None;
         let (receipt, debt) = {
             let original = self.original.pending.upgrade().ok_or_else(refused)?;
             let pending = original.state.try_lock().map_err(|_| refused())?;
@@ -1610,11 +1620,45 @@ impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
                 if proof.data().selected_data() != selected || proof.data().invocation != token {
                     return Err(refused());
                 }
+                // Match the existing Register shape rejection before the
+                // new optional AEAD plan may sample any randomness or write.
+                let max_name = super::super::super::data::MAX_NAME;
+                if name.trim().is_empty()
+                    || name.len() > max_name
+                    || display.trim().is_empty()
+                    || display.len() > max_name
+                {
+                    return Err(refused());
+                }
+                // Optional identity memory cannot hold the independent Join
+                // hostage after a torn/corrupt file. On the successful path
+                // cover it before native CAS; otherwise preserve every byte.
+                // The native cell verifies the same retained Pending and
+                // Welcome before both fresh CAS and exact Stage retry.
+                if runtime.founder_route.is_none() {
+                    if let Ok(plan) = metadata.prepare_a1_founder_route(pending, invite, rng) {
+                        runtime.founder_route = Some(plan);
+                    }
+                }
+                if let Some(plan) = runtime.founder_route.as_mut() {
+                    let mut ended = false;
+                    let _optional = metadata.cover_a1_founder_route(pending, plan, || {
+                        let current = self.original.require_current(negative);
+                        ended = current.is_err();
+                        current
+                    });
+                    if ended {
+                        return Err(refused());
+                    }
+                }
                 self.original.require_current(negative)?;
-                metadata.register_joined(name, display, proof, rng)?
+                let result = metadata.register_joined(name, display, proof, rng)?;
+                retired_route = runtime.founder_route.take();
+                result
             }
         };
         drop(debt);
+        drop(retired_route);
         self.original.require_current(negative)?;
         Ok(receipt)
     }

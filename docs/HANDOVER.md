@@ -1,5 +1,20 @@
 # Mewtual; Handover
 
+## Remember the original A1 founder identity
+
+During first registration, the original A1 owner can cover an encrypted
+copy of the signed founder reservation. It binds the vault, pin, exact
+request and local Add and Admission. Exact retries keep the same bytes.
+A torn or damaged optional file stays preserved and the original join
+can finish using its separate Pending and Welcome proofs.
+
+A cold A1 can use a verified saved peer identity to select the original
+founder's authenticated connection. The optional record carries only
+the signed zero-address reservation. A final file and its byte-identical
+Stage can survive an interrupted write and be read together. A Stage
+alone yields no hint. ID9 and A2 continue to require their own route
+proof. The ordinary startup path can open a row with no saved hint.
+
 ## Recover signed founder decisions on a joined vault
 
 The original joined source can cover public founder decision headers in an
@@ -36,8 +51,9 @@ separate cursor and read each body through the exact guarded lookup.
 The joined desktop worker polls signed headers from the original founder
 connection. It resumes from the selected journal, occasionally rechecks
 the last header, and shares inventory turns with ordinary history. It
-uses the original route when that route is already available. Cold A1
-startup still needs a way to restore this route without the invite.
+uses the original route when that connection is already available.
+An existing A1 created before the optional record needs the original
+invitation to supply its peer identity.
 
 The joined worker also fetches exact approvals for its attached channel
 in bounded turns. It revisits a waiting reply without holding up later
@@ -59,7 +75,7 @@ it publishes the original founder row. It keeps the same live TCP actor
 and rejects an older or replaced Current. Pre-write pressure can retry
 the original request. An interrupted write can need a cold reopen.
 
-First-session founder review authority, cold route restoration, existing
+First-session founder review authority, automatic reconnection, existing
 ID9 migration and combined acceptance remain open. The desktop Chat V2
 switch remains off.
 

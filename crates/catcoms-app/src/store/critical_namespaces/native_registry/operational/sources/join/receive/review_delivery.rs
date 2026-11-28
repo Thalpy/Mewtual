@@ -20,6 +20,19 @@ use catcoms_replication::chat::{
     FounderGenesisAnchorData, V2ReviewedCreateCheck,
 };
 use catcoms_rt::TransportError;
+
+#[cfg(test)]
+impl<R: CryptoRngCore> NativeTextJoinedSelectionPreparation<R> {
+    /// Observe only the inert hint through the genuine original receiver.
+    /// This supplies no connection, transport handle or authorization.
+    pub(in crate::store) fn remembered_founder_peer_for_test(
+        &self,
+        selection: &NativeTextJoinedRowSelection,
+        caller: &RequestCancellation,
+    ) -> Result<Option<PeerId>, Refusal> {
+        self.with_member_receiver(selection, caller, |source| Ok(source.founder))
+    }
+}
 use catcoms_sync::{
     owner_v2::{
         PreparedV2ReviewDelivery, V2MemberDependencyRoute, V2MemberPublicationObservation,

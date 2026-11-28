@@ -453,6 +453,13 @@ impl Store {
         self.physical.recovered_join_registration_data()
     }
 
+    pub(in crate::store::critical_namespaces::native_registry) fn optional_a1_founder_peer(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+    ) -> Result<Option<catcoms_rt::PeerId>, AppError> {
+        self.physical.optional_a1_founder_peer(data)
+    }
+
     pub(in crate::store::critical_namespaces::native_registry) fn select_review_storage_before_founder_startup(
         &self,
         rng: &mut dyn CryptoRngCore,

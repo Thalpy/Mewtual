@@ -1002,13 +1002,16 @@ fn finish_recovered_node<R: CryptoRngCore>(
     negative: &RequestCancellation,
 ) -> Result<NativeTextJoinedRecovery<R>, AppError> {
     let budget = policy.prepare()?;
+    // Optional historical identity only. Malformed/missing files, pending
+    // stages and ID9/A2 never prevent ordinary startup or authorize a dial.
+    let founder = index.optional_a1_founder_peer(receipt).ok().flatten();
     let vault =
         crate::store::NativeTextVault::from_recovered_joined_index(index, session, ui_budget)?;
     let mut sources = vault
         .capture_native_sources(budget)
         .finish()
         .map_err(|_| refused())?;
-    sources.install_recovered_joined(node, receipt, transport, fee)?;
+    sources.install_recovered_joined(node, receipt, transport, fee, founder)?;
     if negative.is_cancelled() {
         return Err(refused());
     }

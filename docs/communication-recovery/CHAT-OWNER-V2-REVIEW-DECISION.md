@@ -240,7 +240,17 @@ original founder connection. It reads the durable ordinal from ID12, gives
 ordinary inventory a turn between review polls when needed, and checks
 the exact current membership card on every request. An empty response
 ends that attempt without advancing the journal. A cold A1 vault needs
-its original founder route restored before polling begins. The joined
+its original founder route restored before polling begins. A newly registered
+A1 can retain the signed zero-address reservation in an independent optional
+encrypted file and recover only its pinned founder PeerId after restart.
+This does not retain a host/IP, establish a connection or authorize dialing;
+polling still requires the original founder's current authenticated TCP lease.
+Missing or damaged optional data supplies no route and preserves both original
+Join registration and ordinary startup. Optional failure never suppresses
+the independent Pending/Welcome or caller-current checks. Complete final and
+Stage together can supply the inert hint only when byte-identical and fully
+authenticated; cold reading modifies neither. ID9/A2 does not inherit the A1
+hint. The joined
 worker scans up to four selected header ordinals per turn and requests
 an exact Approve for its attached channel. A missing body or ancestry
 stays eligible on later passes. The worker refreshes an active view

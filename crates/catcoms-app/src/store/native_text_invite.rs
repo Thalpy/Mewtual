@@ -141,6 +141,24 @@ fn check_parts<'a>(
     check_reservation(reservation, &anchor.group)
 }
 
+pub(in crate::store) fn checked_founder_peer(
+    binding: &SignedInviteBindingData,
+    reservation: &[u8],
+) -> Result<catcoms_rt::PeerId, ChatError> {
+    use catcoms_replication::chat::join_bindings::JoinPayloadKindData;
+    if reservation.len() > MAX_ROUTING
+        || !binding.verify()
+        || binding.spec_data().inviter != binding.spec_data().anchor.founder
+        || JoinPayloadKindData::RoutingPlan.commitment_data(reservation)?
+            != binding.spec_data().public_routing_plan
+    {
+        return Err(ChatError::Scope);
+    }
+    // The same closed reservation grammar as the original invitation:
+    // authenticated identity, TCP port and exactly zero contact addresses.
+    check_reservation(reservation, &binding.spec_data().anchor.group).map(|value| value.0)
+}
+
 fn check_reservation<'a>(
     bytes: &'a [u8],
     group: &[u8],

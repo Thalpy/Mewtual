@@ -89,14 +89,14 @@ async fn native_runtime_invite_returns_only_the_original_installed_join_response
     native_governed_add_fixture(JoinCase::ColdPending).await;
 }
 
-#[tokio::test]
-async fn mounted_join_request_uses_the_original_native_command_and_retains_its_pending() {
-    mounted_join_fixture(false, None).await;
+#[test]
+fn mounted_join_request_uses_the_original_native_command_and_retains_its_pending() {
+    run_mounted_join_fixture(false, None);
 }
 
-#[tokio::test]
-async fn mounted_join_request_cold_recovers_the_exact_registry_stage_only_with_its_welcome() {
-    mounted_join_fixture(true, None).await;
+#[test]
+fn mounted_join_request_cold_recovers_the_exact_registry_stage_only_with_its_welcome() {
+    run_mounted_join_fixture(true, None);
 }
 
 #[test]
@@ -155,6 +155,10 @@ fn mounted_join_review_selected_cut_reopens_same_original_without_a_live_row() {
 }
 
 fn run_mounted_successor(successor: MountedSuccessor) {
+    run_mounted_join_fixture(false, Some(successor));
+}
+
+fn run_mounted_join_fixture(recover_stage: bool, successor: Option<MountedSuccessor>) {
     // These debug fixtures exercise three paid vaults and cold restore on one
     // caller thread. Match the removal fixture's stack for both scenarios.
     std::thread::Builder::new()
@@ -164,7 +168,7 @@ fn run_mounted_successor(successor: MountedSuccessor) {
                 .enable_all()
                 .build()
                 .unwrap()
-                .block_on(mounted_join_fixture(false, Some(successor)));
+                .block_on(mounted_join_fixture(recover_stage, successor));
         })
         .unwrap()
         .join()
@@ -852,7 +856,21 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
             rng,
         )
     };
-    assert!(register(&mut rng).is_err());
+    if recover_stage {
+        // The genuine post-Welcome producer loses its optional ciphertext
+        // stage before first Register. It must still reach the independent
+        // native selection proof (whose real Welcome replacement below
+        // intentionally refuses), leaving the exact Native Stage recoverable.
+        let (result, reached) =
+            crate::store::persistence::v2_founder_route::with_torn_founder_stage_for_test(|| {
+                register(&mut rng)
+            });
+        assert!(reached && result.is_err());
+        assert!(dir.path().join("chat-v2-a1-founder-peer.stage").is_file());
+        assert!(!dir.path().join("chat-v2-a1-founder-peer.bin").exists());
+    } else {
+        assert!(register(&mut rng).is_err());
+    }
     assert!(registration_parked.is_file());
     let saved_stage = std::fs::read(&stage).unwrap();
     assert_eq!(std::fs::read(&index).unwrap(), prior_index);
@@ -2250,6 +2268,36 @@ async fn mounted_join_fixture(recover_stage: bool, successor: Option<MountedSucc
     assert_eq!(selection.name_data(), "Original Room");
     assert_eq!(selection.display_name_data(), Some("Original Member"));
     assert_eq!(selection.request_data(), registration.request);
+    // This is before any invitation-based reconnect can populate the
+    // in-memory field. Cold A1 recovered the exact signed reservation from
+    // its optional scoped file, without retaining or consuming a host.
+    assert_eq!(
+        recovered_row()
+            .remembered_founder_peer_for_test(&selection, &fresh)
+            .unwrap(),
+        if recover_stage {
+            None
+        } else {
+            Some(invite.connected_peer_data())
+        }
+    );
+    if recover_stage {
+        // Full cold native-row recovery still completed above. Optional
+        // ambiguity remains preserved and supplies no inert founder hint.
+        assert!(dir.path().join("chat-v2-a1-founder-peer.stage").is_file());
+        assert!(!dir.path().join("chat-v2-a1-founder-peer.bin").exists());
+    }
+    if successor == Some(MountedSuccessor::RemovedReview) {
+        // The cold hint alone supplies no connection or poll permission.
+        // The same scenario below requires Ready only after the real TCP
+        // reconnect and uses prepare_next_review_header without an invite.
+        assert_eq!(
+            recovered_row()
+                .review_header_contact_scope(&selection, false, &fresh)
+                .unwrap(),
+            crate::store::NativeTextReviewHeaderPollStatus::Unavailable
+        );
+    }
     assert_eq!(
         selection.member_outbox_context_id_data(),
         original_member_outbox

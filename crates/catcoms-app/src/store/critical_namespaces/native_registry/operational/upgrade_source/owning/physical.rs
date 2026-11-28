@@ -198,6 +198,25 @@ impl Physical {
             .recovered_join_registration_data()
     }
 
+    pub(super) fn optional_a1_founder_peer(
+        &self,
+        data: crate::store::NativeTextJoinedRegistrationData,
+    ) -> Result<Option<catcoms_rt::PeerId>, AppError> {
+        self.handler.require()?;
+        let store = self.current()?.checked_store()?;
+        let pool = &store
+            .governance_layout_policy
+            .as_ref()
+            .ok_or_else(refused)?
+            .current
+            .archive
+            .pending
+            .pool;
+        let fee =
+            pool.try_reserve(crate::store::persistence::v2_founder_route::FOUNDER_ROUTE_FEE)?;
+        self.with_registered_native_join(data, |store, _| store.read_a1_founder_peer(data, &fee))
+    }
+
     pub(super) fn select_review_storage_before_founder_startup(
         &self,
         rng: &mut dyn CryptoRngCore,
@@ -2431,6 +2450,31 @@ impl MetadataWork {
                 rng,
             )
         })
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn prepare_a1_founder_route(
+        &self,
+        pending: &JoinedPendingIo,
+        invite: &crate::store::NativeTextInvitePacketData<'_>,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<crate::store::persistence::v2_founder_route::FounderRouteWrite, AppError> {
+        let (_, fee) = self.joined_transport_resources(
+            crate::store::persistence::v2_founder_route::FOUNDER_ROUTE_FEE,
+        )?;
+        self.with_joined_store(|store| {
+            let original = pending.warm_registration_data(store)?;
+            pending.require_original_join_intent(invite.binding(), original.invocation)?;
+            store.prepare_a1_founder_route(pending, invite, fee, rng)
+        })
+    }
+
+    pub(in crate::store::critical_namespaces::native_registry) fn cover_a1_founder_route(
+        &self,
+        pending: &JoinedPendingIo,
+        plan: &mut crate::store::persistence::v2_founder_route::FounderRouteWrite,
+        admit: impl FnOnce() -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        self.with_joined_store(|store| store.cover_a1_founder_route(pending, plan, admit))
     }
 
     pub(in crate::store::critical_namespaces::native_registry) fn register_joined(

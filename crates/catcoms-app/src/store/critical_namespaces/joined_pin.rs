@@ -14,6 +14,30 @@ use catcoms_rt::CryptoRngCore;
 use catcoms_wire::{Decoder, Encoder};
 use zeroize::Zeroizing;
 
+/// Negative profile check for optional original-founder identity memory.
+/// ID9 declaration itself ends this A1-only interpretation, even before
+/// an A2 has been selected. No parsed flag supplies route authority.
+pub(in crate::store) fn require_a1_founder_route_profile(
+    store: &crate::store::ServerStore,
+) -> Result<(), AppError> {
+    let declared = {
+        let catalog = store
+            .pending_join_catalog
+            .try_lock()
+            .map_err(|_| refused())?;
+        catalog
+            .as_ref()
+            .ok_or_else(refused)?
+            .current
+            .rejoin_payload_digest
+            .is_some()
+    };
+    if declared || store.has_rejoin_evidence()? {
+        return Err(refused());
+    }
+    Ok(())
+}
+
 pub(in crate::store) mod declaration;
 pub(in crate::store) mod index;
 pub(super) mod namespace;
